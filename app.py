@@ -1381,4 +1381,296 @@ if "nba_auto_results" in st.session_state:
             "types still require validation."
         )
 
+# ============================================
+# NBA VERIFIED PROP DECODER V2
+# ============================================
+
+import re
+
+st.divider()
+st.header("🏀 Verified NBA Prop Decoder V2")
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def decoder_market_catalog():
+    data = scan_request(
+        "/markets",
+        {"language": "en"}
+    )
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        for key in ("markets", "data"):
+            if isinstance(data.get(key), list):
+                return data[key]
+    return []
+
+
+def decoder_number(value):
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+        if 0 <= number <= 1000:
+            return number
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def decoder_direction(*values):
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        words = value.lower().strip()
+        if re.search(r"\b(over|more|higher)\b", words):
+            return "MORE"
+        if re.search(r"\b(under|less|lower)\b", words):
+            return "LESS"
+    return None
+
+
+def decoder_line(*records):
+    # Use only explicit line/handicap fields.
+    # Do not confuse decimal odds with a stat line.
+    keys = (
+        "line", "handicap", "points",
+        "total", "threshold", "specialValue"
+    )
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        for key in keys:
+            if key in record:
+                value = decoder_number(record[key])
+                if value is not None:
+                    return value
+    return None
+
+
+def decoder_tier(*values):
+    text = " ".join(
+        str(value).lower()
+        for value in values
+        if value is not None
+    )
+    if re.search(r"\bgoblin\b", text):
+        return "Goblin"
+    if re.search(r"\bdemon\b", text):
+        return "Demon"
+    if re.search(r"\bstandard\b|\bregular\b", text):
+        return "Standard"
+    return "Unknown"
+
+
+def decoder_catalog_map(catalog):
+    result = {}
+    for item in catalog:
+        if not isinstance(item, dict):
+            continue
+        market_id = item.get("marketId")
+        if market_id is not None:
+            result[str(market_id)] = item
+    return result
+
+
+if st.button(
+    "🔍 DECODE NBA PROP LINES",
+    use_container_width=True,
+    key="decoder_v2_button"
+):
+    try:
+        with st.spinner("Decoding NBA markets..."):
+            games = scan_nba_games()[:max_games]
+            catalog = decoder_catalog_map(
+                decoder_market_catalog()
+            )
+
+            verified = []
+            unresolved = []
+            seen = set()
+
+            for game in games:
+                fixture_id = game.get("fixtureId")
+                if not fixture_id:
+                    continue
+
+                matchup = (
+                    str(game.get("participant1Name", "?"))
+                    + " vs "
+                    + str(game.get("participant2Name", "?"))
+                )
+
+                try:
+                    odds = scan_game_odds(fixture_id)
+                except (ValueError, requests.RequestException):
+                    unresolved.append({
+                        "Game": matchup,
+                        "Reason": "Odds request failed"
+                    })
+                    continue
+
+                books = odds.get("bookmakerOdds", {})
+                if not isinstance(books, dict):
+                    continue
+
+                for book in SCAN_BOOKS:
+                    book_data = books.get(book, {})
+                    if not isinstance(book_data, dict):
+                        continue
+
+                    markets = book_data.get("markets", {})
+                    if not isinstance(markets, dict):
+                        continue
+
+                    for market_id, market in markets.items():
+                        if not isinstance(market, dict):
+                            continue
+
+                        definition = catalog.get(
+                            str(market_id), {}
+                        )
+
+                        # Require catalog-confirmed player props.
+                        if definition.get("playerProp") is not True:
+                            continue
+
+                        market_name = definition.get(
+                            "marketName", "Unknown"
+                        )
+
+                        if market.get("marketActive") is not True:
+                            continue
+
+                        outcomes = market.get("outcomes", {})
+                        if not isinstance(outcomes, dict):
+                            continue
+
+                        for outcome_id, outcome in outcomes.items():
+                            if not isinstance(outcome, dict):
+                                continue
+
+                            players = outcome.get("players", {})
+                            if not isinstance(players, dict):
+                                continue
+
+                            for player_id, player in players.items():
+                                if not isinstance(player, dict):
+                                    continue
+
+                                if player.get("active") is not True:
+                                    continue
+
+                                player_name = player.get("playerName")
+                                if not player_name:
+                                    continue
+
+                                direction = decoder_direction(
+                                    player.get("outcomeName"),
+                                    player.get("selectionName"),
+                                    player.get("name"),
+                                    outcome.get("outcomeName"),
+                                    outcome.get("name"),
+                                    definition.get("outcomeName")
+                                )
+
+                                line = decoder_line(
+                                    player, outcome, market
+                                )
+
+                                tier = decoder_tier(
+                                    player.get("lineType"),
+                                    player.get("tier"),
+                                    player.get("label"),
+                                    outcome.get("lineType"),
+                                    market.get("lineType")
+                                )
+
+                                row = {
+                                    "Game": matchup,
+                                    "Platform": book,
+                                    "Player": player_name,
+                                    "Stat": market_name,
+                                    "Line": line,
+                                    "Direction": direction,
+                                    "Tier": tier,
+                                    "American Odds": player.get(
+                                        "priceAmerican"
+                                    ),
+                                    "Market ID": str(market_id),
+                                    "Outcome ID": str(outcome_id),
+                                    "Player ID": str(player_id)
+                                }
+
+                                # No guesses: all required fields
+                                # must be explicitly verified.
+                                missing = []
+                                if line is None:
+                                    missing.append("line")
+                                if direction is None:
+                                    missing.append("direction")
+                                if tier == "Unknown":
+                                    missing.append("line type")
+
+                                if missing:
+                                    row["Reason"] = (
+                                        "Missing " + ", ".join(missing)
+                                    )
+                                    unresolved.append(row)
+                                    continue
+
+                                unique_key = (
+                                    fixture_id, book, player_id,
+                                    market_id, line, direction, tier
+                                )
+
+                                if unique_key in seen:
+                                    continue
+
+                                seen.add(unique_key)
+                                verified.append(row)
+
+            st.session_state["decoder_v2_verified"] = verified
+            st.session_state["decoder_v2_unresolved"] = unresolved
+
+    except (ValueError, requests.RequestException) as error:
+        st.error(
+            "Decoder could not complete: " + str(error)
+        )
+
+
+if "decoder_v2_verified" in st.session_state:
+    verified = st.session_state["decoder_v2_verified"]
+    unresolved = st.session_state["decoder_v2_unresolved"]
+
+    c1, c2 = st.columns(2)
+    c1.metric("Verified Lines", len(verified))
+    c2.metric("Needs Decoding", len(unresolved))
+
+    st.subheader("Verified Eligible Lines")
+    if verified:
+        st.dataframe(
+            pd.DataFrame(verified),
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info(
+            "No fully verified lines yet. "
+            "The decoder will not invent missing data."
+        )
+
+    st.subheader("Unresolved Lines")
+    if unresolved:
+        st.dataframe(
+            pd.DataFrame(unresolved),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    st.caption(
+        "Verified means the available API fields passed "
+        "the decoder checks, not that a pick is profitable "
+        "or that the sportsbook line is still current."
+    )
+
        
