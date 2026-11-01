@@ -797,3 +797,261 @@ if st.button("LOAD PRIZEPICKS PLAYER PROPS"):
             st.error(f"OddsPAPI request failed: {error}")
         except (ValueError, TypeError, AttributeError) as error:
             st.error(f"Unable to decode response: {error}")
+
+# ============================================
+# SPORTS LAB - VERIFIED PICK'EM DECODER
+# ============================================
+
+import requests
+import pandas as pd
+import streamlit as st
+
+st.divider()
+st.header("🎯 Verified Pick'em Outcome Inventory")
+
+API_BASE = "https://api.oddspapi.io/v4"
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_pickem_data(fixture_id, api_key):
+    odds_response = requests.get(
+        f"{API_BASE}/odds",
+        params={
+            "apiKey": api_key,
+            "fixtureId": fixture_id,
+            "bookmakers": "prizepicks,kalshi",
+            "language": "en",
+            "verbosity": 3
+        },
+        timeout=30
+    )
+    odds_response.raise_for_status()
+
+    markets_response = requests.get(
+        f"{API_BASE}/markets",
+        params={
+            "apiKey": api_key,
+            "language": "en"
+        },
+        timeout=30
+    )
+    markets_response.raise_for_status()
+
+    return odds_response.json(), markets_response.json()
+
+
+def decode_pickem_outcomes(odds_data, definitions):
+    market_lookup = {
+        str(m.get("marketId")): m
+        for m in definitions
+        if isinstance(m, dict)
+    }
+
+    rows = []
+    summary = []
+
+    bookmaker_odds = odds_data.get("bookmakerOdds", {})
+
+    for slug in ["prizepicks", "kalshi"]:
+        bookmaker = bookmaker_odds.get(slug, {})
+        markets = bookmaker.get("markets", {})
+
+        active_count = 0
+        inactive_count = 0
+
+        for market_id, market in markets.items():
+            if not isinstance(market, dict):
+                continue
+
+            definition = market_lookup.get(str(market_id), {})
+            market_name = definition.get(
+                "marketName", "Unknown"
+            )
+            market_type = definition.get(
+                "marketType", "Unknown"
+            )
+
+            outcomes = market.get("outcomes", {})
+
+            for outcome_id, outcome in outcomes.items():
+                if not isinstance(outcome, dict):
+                    continue
+
+                players = outcome.get("players", {})
+
+                for player_id, player in players.items():
+                    if not isinstance(player, dict):
+                        continue
+
+                    market_active = (
+                        market.get("marketActive") is True
+                    )
+                    selection_active = (
+                        player.get("active") is True
+                    )
+
+                    eligible = (
+                        market_active and selection_active
+                    )
+
+                    if eligible:
+                        active_count += 1
+                    else:
+                        inactive_count += 1
+
+                    rows.append({
+                        "Platform": slug.title(),
+                        "Player": player.get(
+                            "playerName", "Unknown"
+                        ),
+                        "Market": market_name,
+                        "Market Type": market_type,
+                        "Market ID": str(market_id),
+                        "Outcome ID": str(outcome_id),
+                        "Player ID": str(player_id),
+                        "Decimal Odds": player.get("price"),
+                        "American Odds": player.get(
+                            "priceAmerican"
+                        ),
+                        "Market Active": market_active,
+                        "Selection Active": selection_active,
+                        "Eligible": eligible,
+                        "Line": "Unverified",
+                        "Direction": "Unverified",
+                        "Line Type": "Unverified"
+                    })
+
+        summary.append({
+            "Platform": slug.title(),
+            "Markets": len(markets),
+            "Active Outcomes": active_count,
+            "Inactive Outcomes": inactive_count,
+            "Total Player Outcomes": (
+                active_count + inactive_count
+            )
+        })
+
+    return pd.DataFrame(rows), pd.DataFrame(summary)
+
+
+fixture_default = st.session_state.get(
+    "pickem_fixture_id",
+    "id1100013273719476"
+)
+
+fixture_input = st.text_input(
+    "Fixture ID",
+    value=fixture_default,
+    key="verified_pickem_fixture"
+)
+
+if st.button(
+    "LOAD VERIFIED OUTCOMES",
+    use_container_width=True
+):
+    api_key = st.secrets.get("ODDS_API_KEY", "")
+
+    if not api_key:
+        st.error(
+            "ODDS_API_KEY is missing from Streamlit Secrets."
+        )
+    elif not fixture_input.strip():
+        st.error("Please enter a fixture ID.")
+    else:
+        try:
+            with st.spinner(
+                "Retrieving real player outcomes..."
+            ):
+                odds_data, definitions = fetch_pickem_data(
+                    fixture_input.strip(),
+                    api_key
+                )
+
+                df, summary_df = decode_pickem_outcomes(
+                    odds_data,
+                    definitions
+                )
+
+            st.subheader("📊 Platform Summary")
+            st.dataframe(
+                summary_df,
+                use_container_width=True,
+                hide_index=True
+            )
+
+            if df.empty:
+                st.warning(
+                    "No player outcomes were returned "
+                    "for this fixture."
+                )
+            else:
+                total = len(df)
+                eligible = int(df["Eligible"].sum())
+                inactive = total - eligible
+
+                c1, c2, c3 = st.columns(3)
+
+                c1.metric(
+                    "Player Outcomes",
+                    total
+                )
+                c2.metric(
+                    "Active Outcomes",
+                    eligible
+                )
+                c3.metric(
+                    "Inactive Outcomes",
+                    inactive
+                )
+
+                st.subheader("🏀 Player Outcomes")
+
+                platform_filter = st.selectbox(
+                    "Choose Platform",
+                    ["All", "Prizepicks", "Kalshi"]
+                )
+
+                active_only = st.checkbox(
+                    "Show Active Only",
+                    value=True,
+                    key="verified_active_only"
+                )
+
+                filtered = df.copy()
+
+                if platform_filter != "All":
+                    filtered = filtered[
+                        filtered["Platform"]
+                        == platform_filter
+                    ]
+
+                if active_only:
+                    filtered = filtered[
+                        filtered["Eligible"]
+                    ]
+
+                st.dataframe(
+                    filtered,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.caption(
+                    "These are real API records. "
+                    "Line thresholds, MORE/LESS directions, "
+                    "and Goblin/Demon classifications "
+                    "remain unverified."
+                )
+
+        except requests.HTTPError as error:
+            st.error(
+                f"OddsPAPI HTTP error: {error}"
+            )
+        except requests.RequestException as error:
+            st.error(
+                f"Connection failed: {error}"
+            )
+        except (ValueError, TypeError, AttributeError) as error:
+            st.error(
+                f"Unable to decode API response: {error}"
+            )
