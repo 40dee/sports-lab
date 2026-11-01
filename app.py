@@ -355,3 +355,65 @@ if st.button("🔎 DISCOVER NBA MARKETS"):
                 st.error("Could not retrieve market data.")
             except (ValueError, AttributeError):
                 st.error("Unexpected API response format.")
+
+st.divider()
+st.subheader("🏀 NBA Market Decoder")
+
+if st.button("DECODE NBA MARKETS"):
+    key = st.secrets.get("ODDS_API_KEY", "")
+
+    if not key:
+        st.error("API key missing.")
+    else:
+        try:
+            response = requests.get(
+                "https://api.oddspapi.io/v4/markets",
+                params={
+                    "apiKey": key,
+                    "language": "en"
+                },
+                timeout=30
+            )
+            response.raise_for_status()
+            markets = response.json()
+
+            nba_markets = [
+                market for market in markets
+                if str(market.get("sportId")) == "11"
+            ]
+
+            rows = []
+            for market in nba_markets:
+                rows.append({
+                    "Market ID": market.get("marketId"),
+                    "Market Name": market.get("marketName"),
+                    "Player Prop": market.get("playerProp"),
+                    "Type": market.get("marketType"),
+                    "Period": market.get("period")
+                })
+
+            st.success(
+                f"Decoded {len(rows)} basketball markets!"
+            )
+
+            if rows:
+                df = pd.DataFrame(rows)
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.subheader("Player Props Only")
+                st.dataframe(
+                    df[df["Player Prop"] == True],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.warning("No basketball markets returned.")
+
+        except requests.RequestException as error:
+            st.error(f"Market request failed: {error}")
+        except ValueError:
+            st.error("Invalid API response.")
