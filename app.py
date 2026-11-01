@@ -1673,4 +1673,127 @@ if "decoder_v2_verified" in st.session_state:
         "or that the sportsbook line is still current."
     )
 
+# ============================================
+# SPORTS LAB - ONE PLAYER DECODER DIAGNOSTIC
+# ============================================
+
+st.divider()
+st.header("🔬 PrizePicks Decoder Diagnostic")
+
+st.caption(
+    "Inspects one PrizePicks player outcome. "
+    "API keys and betslip links are not displayed."
+)
+
+if st.button(
+    "🔬 INSPECT ONE PLAYER",
+    use_container_width=True,
+    key="inspect_one_player_v1"
+):
+    try:
+        games = scan_nba_games()
+
+        if not games:
+            st.warning("No upcoming NBA games found.")
+        else:
+            found = False
+
+            # Check no more than 3 games to conserve API calls.
+            for game in games[:3]:
+                odds = scan_game_odds(game["fixtureId"])
+
+                books = odds.get("bookmakerOdds", {})
+                prizepicks = books.get("prizepicks", {})
+                markets = prizepicks.get("markets", {})
+
+                if not isinstance(markets, dict):
+                    continue
+
+                for market_id, market in markets.items():
+                    if not isinstance(market, dict):
+                        continue
+
+                    outcomes = market.get("outcomes", {})
+
+                    if not isinstance(outcomes, dict):
+                        continue
+
+                    for outcome_id, outcome in outcomes.items():
+                        if not isinstance(outcome, dict):
+                            continue
+
+                        players = outcome.get("players", {})
+
+                        if not isinstance(players, dict):
+                            continue
+
+                        for player_id, player in players.items():
+                            if not isinstance(player, dict):
+                                continue
+
+                            if not player.get("playerName"):
+                                continue
+
+                            # Hide sensitive or unnecessary fields.
+                            safe_player = {
+                                k: v
+                                for k, v in player.items()
+                                if k not in (
+                                    "betslip",
+                                    "apiKey",
+                                    "url"
+                                )
+                            }
+
+                            safe_market = {
+                                k: v
+                                for k, v in market.items()
+                                if k != "outcomes"
+                            }
+
+                            safe_outcome = {
+                                k: v
+                                for k, v in outcome.items()
+                                if k != "players"
+                            }
+
+                            st.success("Player outcome found!")
+
+                            st.write("Game")
+                            st.write(
+                                game.get("participant1Name"),
+                                "vs",
+                                game.get("participant2Name")
+                            )
+
+                            st.write("Market ID:", market_id)
+                            st.json(safe_market)
+
+                            st.write("Outcome ID:", outcome_id)
+                            st.json(safe_outcome)
+
+                            st.write("Player ID:", player_id)
+                            st.json(safe_player)
+
+                            found = True
+                            break
+
+                        if found:
+                            break
+                    if found:
+                        break
+                if found:
+                    break
+
+            if not found:
+                st.warning(
+                    "No PrizePicks player outcome was "
+                    "returned for the first 3 games."
+                )
+
+    except (ValueError, requests.RequestException) as error:
+        st.error(
+            "Diagnostic failed: " + str(error)
+        )
+
        
