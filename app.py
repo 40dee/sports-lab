@@ -143,3 +143,34 @@ else:
         "Welcome to Elite Individual Analytics Lab. "
         "Click the button above to open the demonstration board."
     )
+
+st.divider()
+st.subheader("🔌 OddsPAPI Connection Test")
+
+if st.button("TEST ODDS API CONNECTION"):
+    import requests
+
+    key = st.secrets.get("ODDS_API_KEY", "")
+
+    if not key:
+        st.error("API key missing from Streamlit Secrets.")
+    else:
+        try:
+            response = requests.get(
+                "https://api.oddspapi.io/v4/account",
+                params={"apiKey": key},
+                timeout=15
+            )
+
+            if response.status_code == 200:
+                st.success("OddsPAPI connection successful!")
+                st.info("Your API authentication is working.")
+            else:
+                st.error(
+                    f"Connection failed. HTTP status: "
+                    f"{response.status_code}"
+                )
+
+        except requests.RequestException:
+            st.error("Unable to connect to OddsPAPI.")
+
