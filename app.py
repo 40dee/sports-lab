@@ -171,7 +171,7 @@ if st.secrets.get("ODDS_API_KEY", ""):
     st.sidebar.success("ODDS_API_KEY configured")
 else:
     st.sidebar.warning("ODDS_API_KEY missing")
-st.sidebar.success("ODDS_API_KEY configured") if st.secrets.get("ODDS_API_KEY", "") else st.sidebar.warning("ODDS_API_KEY missing")
+st.sidebar.success("ODDS_API_KEY configured") if st.secrets.get
 st.sidebar.info("Historical box scores: not connected")
 st.sidebar.info("P1/P2 projections: not connected")
 st.sidebar.info("ROI tracking: not connected")
