@@ -254,3 +254,104 @@ if st.button("🏀 FETCH REAL NBA GAMES", use_container_width=True):
             except ValueError:
                 st.error("OddsPAPI returned invalid JSON.")
 
+
+st.divider()
+st.subheader("🏀 NBA Market Discovery")
+
+st.caption("Inspect available markets for one NBA game.")
+
+fixture_id = st.text_input(
+    "NBA Fixture ID",
+    value="id1100013273719476",
+    help="Enter a fixture ID from your NBA game table."
+)
+
+if st.button("🔎 DISCOVER NBA MARKETS"):
+    key = st.secrets.get("ODDS_API_KEY", "")
+
+    if not key:
+        st.error("API key missing.")
+    elif not fixture_id.strip():
+        st.error("Enter a fixture ID.")
+    else:
+        import requests
+
+        with st.spinner("Checking available markets..."):
+            try:
+                response = requests.get(
+                    "https://api.oddspapi.io/v4/odds",
+                    params={
+                        "apiKey": key,
+                        "fixtureId": fixture_id.strip(),
+                        "verbosity": 3
+                    },
+                    timeout=25
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                bookmaker_odds = data.get(
+                    "bookmakerOdds", {}
+                )
+
+                rows = []
+
+                for bookmaker, details in bookmaker_odds.items():
+                    markets = details.get("markets", {})
+
+                    for market_id, market in markets.items():
+                        rows.append({
+                            "Bookmaker": bookmaker,
+                            "Market ID": str(market_id),
+                            "Outcome Types": len(
+                                market.get("outcomes", {})
+                            ),
+                            "Bookmaker Market ID": str(
+                                market.get(
+                                    "bookmakerMarketId", ""
+                                )
+                            )
+                        })
+
+                if rows:
+                    import pandas as pd
+
+                    df = pd.DataFrame(rows)
+
+                    st.success(
+                        f"Found {len(df)} bookmaker-market entries."
+                    )
+
+                    st.dataframe(
+                        df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                    st.write(
+                        "Bookmakers:",
+                        df["Bookmaker"].nunique()
+                    )
+                    st.write(
+                        "Unique Market IDs:",
+                        df["Market ID"].nunique()
+                    )
+
+                    st.info(
+                        "Market IDs are not yet decoded "
+                        "into market names."
+                    )
+                else:
+                    st.warning(
+                        "No bookmaker markets were returned "
+                        "for this fixture."
+                    )
+
+            except requests.HTTPError:
+                st.error(
+                    f"API error: HTTP {response.status_code}"
+                )
+            except requests.RequestException:
+                st.error("Could not retrieve market data.")
+            except (ValueError, AttributeError):
+                st.error("Unexpected API response format.")
