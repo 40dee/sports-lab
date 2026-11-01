@@ -498,10 +498,7 @@ if "v4_rows" in st.session_state:
                 filtered["Line Type"] == "Unverified"
             ]
 
-        st.dataframe(
-            filtered.drop(columns=["Stat Key", "Period"]),
-            use_container_width=True,
-            hide_index=True
+              st.dataframe(filtered.drop(columns=["Stat Key", "Period"]), use_container_width=True, hide_index=True)
         )
 
         st.subheader("Grouped threshold inventory")
