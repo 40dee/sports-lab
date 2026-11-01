@@ -1063,4 +1063,322 @@ if st.button(
         except (ValueError, TypeError, AttributeError):
             st.error("Unable to decode the API response.")
    
+# ==============================================
+# SPORTS LAB - AUTOMATIC NBA PREGAME SCANNER
+# ==============================================
+
+from datetime import datetime, timedelta, timezone
+import requests
+import pandas as pd
+import streamlit as st
+
+st.divider()
+st.header("🏀 Automatic NBA Pregame Scanner")
+st.caption(
+    "Checks upcoming NBA games for PrizePicks, "
+    "Kalshi and DraftKings. No simulated picks."
+)
+
+SCAN_BASE = "https://api.oddspapi.io/v4"
+SCAN_BOOKS = ["prizepicks", "kalshi", "draftkings"]
+
+def scan_request(endpoint, params):
+    key = st.secrets.get("ODDS_API_KEY", "")
+    if not key:
+        raise ValueError("ODDS_API_KEY is missing.")
+
+    response = requests.get(
+        SCAN_BASE + endpoint,
+        params={**params, "apiKey": key},
+        timeout=30
+    )
+
+    if response.status_code != 200:
+        raise ValueError(
+            f"{endpoint} returned HTTP {response.status_code}"
+        )
+
+    return response.json()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def scan_nba_games():
+    start = datetime.now(timezone.utc)
+    end = start + timedelta(days=3)
+
+    fixtures = scan_request(
+        "/fixtures",
+        {
+            "sportId": 11,
+            "from": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "statusId": 0,
+            "language": "en"
+        }
+    )
+
+    if not isinstance(fixtures, list):
+        raise ValueError("Unexpected fixtures response.")
+
+    nba = [
+        game for game in fixtures
+        if (
+            "nba" in str(
+                game.get("tournamentName", "")
+            ).lower()
+            or str(
+                game.get("tournamentSlug", "")
+            ).lower() == "nba"
+        )
+        and game.get("fixtureId")
+    ]
+
+    return sorted(
+        nba,
+        key=lambda game: game.get("startTime", "")
+    )
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def scan_game_odds(fixture_id):
+    return scan_request(
+        "/odds",
+        {
+            "fixtureId": fixture_id,
+            "bookmakers": ",".join(SCAN_BOOKS),
+            "language": "en",
+            "verbosity": 3
+        }
+    )
+
+
+def classify_market(market):
+    outcomes = market.get("outcomes", {})
+    if not isinstance(outcomes, dict):
+        return False
+
+    for outcome in outcomes.values():
+        if not isinstance(outcome, dict):
+            continue
+
+        players = outcome.get("players", {})
+        if not isinstance(players, dict):
+            continue
+
+        for player in players.values():
+            if (
+                isinstance(player, dict)
+                and player.get("playerName")
+            ):
+                return True
+
+    return False
+
+
+max_games = st.slider(
+    "Maximum games to check",
+    min_value=1,
+    max_value=5,
+    value=3,
+    key="nba_auto_max_games"
+)
+
+st.caption(
+    "Estimated API calls on a fresh scan: "
+    f"up to {max_games + 1}. "
+    "Cached results are reused for 30 minutes."
+)
+
+if st.button(
+    "🔍 SCAN UPCOMING NBA MARKETS",
+    use_container_width=True,
+    key="nba_auto_scan_button"
+):
+    try:
+        with st.spinner("Scanning upcoming NBA games..."):
+            games = scan_nba_games()
+
+            if not games:
+                st.warning(
+                    "No upcoming NBA fixtures found "
+                    "in the next three days."
+                )
+            else:
+                results = []
+                market_rows = []
+
+                for game in games[:max_games]:
+                    fixture_id = game["fixtureId"]
+
+                    matchup = (
+                        str(game.get("participant1Name", "?"))
+                        + " vs "
+                        + str(game.get("participant2Name", "?"))
+                    )
+
+                    try:
+                        odds = scan_game_odds(fixture_id)
+                        books = odds.get("bookmakerOdds", {})
+
+                        for book in SCAN_BOOKS:
+                            data = books.get(book, {})
+                            markets = data.get("markets", {})
+
+                            if not isinstance(markets, dict):
+                                markets = {}
+
+                            player_markets = 0
+                            game_markets = 0
+                            active_players = 0
+
+                            for market_id, market in markets.items():
+                                if not isinstance(market, dict):
+                                    continue
+
+                                is_player = classify_market(market)
+
+                                if is_player:
+                                    player_markets += 1
+                                else:
+                                    game_markets += 1
+
+                                outcomes = market.get(
+                                    "outcomes", {}
+                                )
+
+                                if not isinstance(outcomes, dict):
+                                    continue
+
+                                for outcome_id, outcome in outcomes.items():
+                                    if not isinstance(outcome, dict):
+                                        continue
+
+                                    players = outcome.get(
+                                        "players", {}
+                                    )
+
+                                    if not isinstance(players, dict):
+                                        continue
+
+                                    for player_id, player in players.items():
+                                        if not isinstance(player, dict):
+                                            continue
+
+                                        name = player.get("playerName")
+
+                                        if not name:
+                                            continue
+
+                                        active = (
+                                            market.get("marketActive") is True
+                                            and player.get("active") is True
+                                        )
+
+                                        if active:
+                                            active_players += 1
+
+                                        market_rows.append({
+                                            "Game": matchup,
+                                            "Platform": book,
+                                            "Player": name,
+                                            "Market ID": str(market_id),
+                                            "Outcome ID": str(outcome_id),
+                                            "Player ID": str(player_id),
+                                            "Active": active,
+                                            "Decimal Odds": player.get("price"),
+                                            "American Odds": player.get(
+                                                "priceAmerican"
+                                            ),
+                                            "Line": "Unverified",
+                                            "Direction": "Unverified",
+                                            "Line Type": "Unverified"
+                                        })
+
+                            results.append({
+                                "Game": matchup,
+                                "Platform": book,
+                                "Player Markets": player_markets,
+                                "Other Markets": game_markets,
+                                "Active Player Outcomes": active_players,
+                                "Fixture ID": fixture_id,
+                                "Status": "Retrieved"
+                            })
+
+                    except (ValueError, requests.RequestException):
+                        for book in SCAN_BOOKS:
+                            results.append({
+                                "Game": matchup,
+                                "Platform": book,
+                                "Player Markets": None,
+                                "Other Markets": None,
+                                "Active Player Outcomes": None,
+                                "Fixture ID": fixture_id,
+                                "Status": "API request failed"
+                            })
+
+                st.session_state["nba_auto_results"] = results
+                st.session_state["nba_auto_players"] = market_rows
+
+    except (ValueError, requests.RequestException) as error:
+        st.error(str(error))
+
+
+if "nba_auto_results" in st.session_state:
+    st.subheader("📊 Market Availability by Game")
+
+    st.dataframe(
+        pd.DataFrame(st.session_state["nba_auto_results"]),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    players = pd.DataFrame(
+        st.session_state.get("nba_auto_players", [])
+    )
+
+    st.subheader("🎯 Retrieved Player Outcomes")
+
+    if players.empty:
+        st.info(
+            "No named player outcomes were returned "
+            "from the checked games."
+        )
+    else:
+        platform = st.selectbox(
+            "Platform",
+            ["All"] + SCAN_BOOKS,
+            key="nba_auto_platform"
+        )
+
+        active_only = st.checkbox(
+            "Active outcomes only",
+            value=True,
+            key="nba_auto_active_only"
+        )
+
+        if platform != "All":
+            players = players[
+                players["Platform"] == platform
+            ]
+
+        if active_only:
+            players = players[
+                players["Active"] == True
+            ]
+
+        st.metric("Displayed Outcomes", len(players))
+
+        st.dataframe(
+            players,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.caption(
+            "A named player outcome is not necessarily "
+            "a verified player-prop line. Thresholds, "
+            "MORE/LESS directions, and Goblin/Demon "
+            "types still require validation."
+        )
+
        
