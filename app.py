@@ -417,3 +417,64 @@ if st.button("DECODE NBA MARKETS"):
             st.error(f"Market request failed: {error}")
         except ValueError:
             st.error("Invalid API response.")
+
+st.divider()
+st.subheader("🏀 NBA Player Market Finder")
+
+if st.button("FIND NBA PROP CATEGORIES"):
+    try:
+        response = requests.get(
+            "https://api.oddspapi.io/v4/markets",
+            params={
+                "apiKey": st.secrets["ODDS_API_KEY"],
+                "language": "en"
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        markets = response.json()
+
+        props = [
+            m for m in markets
+            if str(m.get("sportId")) == "11"
+            and m.get("playerProp") is True
+        ]
+
+        categories = {}
+
+        for market in props:
+            name = market.get("marketName", "Unknown")
+            market_type = market.get("marketType", "Unknown")
+            category = (name, market_type)
+            categories[category] = categories.get(category, 0) + 1
+
+        rows = [
+            {
+                "Market Name": name,
+                "Market Type": market_type,
+                "Market IDs": count
+            }
+            for (name, market_type), count in categories.items()
+        ]
+
+        if rows:
+            df = pd.DataFrame(rows)
+            search = st.text_input(
+                "Search categories",
+                placeholder="points, rebounds, assists, fantasy"
+            )
+            if search:
+                df = df[
+                    df["Market Name"].str.contains(
+                        search, case=False, na=False
+                    )
+                ]
+            st.dataframe(df, hide_index=True, use_container_width=True)
+            st.success(f"Found {len(categories)} player-prop categories.")
+        else:
+            st.warning("No player-prop categories found.")
+
+    except requests.RequestException as error:
+        st.error(f"API request failed: {error}")
+    except (ValueError, KeyError, TypeError) as error:
+        st.error(f"Unable to process markets: {error}")
