@@ -1043,24 +1043,24 @@ if st.button(
                     "remain unverified."
                 )
 
+     
         except requests.HTTPError as error:
-    status = error.response.status_code
+            status = error.response.status_code
 
-    if status == 403:
-        st.error(
-            "OddsPAPI denied this request (403). "
-            "Check API permissions, quota, and fixture access."
-        )
-    else:
-        st.error(
-            f"OddsPAPI returned HTTP {status}."
-        )
-            
-        except requests.RequestException as error:
-            st.error(
-                f"Connection failed: {error}"
-            )
-        except (ValueError, TypeError, AttributeError) as error:
-            st.error(
-                f"Unable to decode API response: {error}"
-            )
+            if status == 403:
+                st.error(
+                    "OddsPAPI denied this request (403). "
+                    "Check API permissions and fixture access."
+                )
+            else:
+                st.error(
+                    f"OddsPAPI returned HTTP {status}."
+                )
+
+        except requests.RequestException:
+            st.error("Unable to connect to OddsPAPI.")
+
+        except (ValueError, TypeError, AttributeError):
+            st.error("Unable to decode the API response.")
+   
+       
