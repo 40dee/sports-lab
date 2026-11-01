@@ -1055,7 +1055,7 @@ if st.button(
         st.error(
             f"OddsPAPI returned HTTP {status}."
         )
-            )
+            
         except requests.RequestException as error:
             st.error(
                 f"Connection failed: {error}"
