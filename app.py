@@ -643,3 +643,157 @@ if st.button("TEST ACTUAL PICK'EM MARKETS"):
             st.error(f"Connection error: {error}")
         except (ValueError, TypeError, AttributeError) as error:
             st.error(f"Unexpected response: {error}")
+
+st.divider()
+st.subheader("🎯 PrizePicks Player-Prop Decoder")
+
+if st.button("LOAD PRIZEPICKS PLAYER PROPS"):
+    import requests
+    import pandas as pd
+
+    key = st.secrets.get("ODDS_API_KEY", "")
+    fixture = st.session_state.get(
+        "pickem_fixture_id",
+        "id1100013273719476"
+    )
+
+    if not key:
+        st.error("OddsPAPI key missing.")
+    else:
+        try:
+            with st.spinner("Loading PrizePicks markets..."):
+                odds_response = requests.get(
+                    "https://api.oddspapi.io/v4/odds",
+                    params={
+                        "apiKey": key,
+                        "fixtureId": fixture,
+                        "bookmakers": "prizepicks",
+                        "language": "en",
+                        "verbosity": 3
+                    },
+                    timeout=30
+                )
+                odds_response.raise_for_status()
+                odds_data = odds_response.json()
+
+                market_response = requests.get(
+                    "https://api.oddspapi.io/v4/markets",
+                    params={
+                        "apiKey": key,
+                        "language": "en"
+                    },
+                    timeout=30
+                )
+                market_response.raise_for_status()
+                definitions = market_response.json()
+
+            market_lookup = {
+                str(m.get("marketId")): m
+                for m in definitions
+                if isinstance(m, dict)
+            }
+
+            bookmaker = odds_data.get(
+                "bookmakerOdds", {}
+            ).get("prizepicks", {})
+
+            markets = bookmaker.get("markets", {})
+            rows = []
+
+            for market_id, market in markets.items():
+                if not isinstance(market, dict):
+                    continue
+
+                definition = market_lookup.get(
+                    str(market_id), {}
+                )
+
+                outcomes = market.get("outcomes", {})
+
+                for outcome_id, outcome in outcomes.items():
+                    if not isinstance(outcome, dict):
+                        continue
+
+                    players = outcome.get("players", {})
+
+                    for player_id, player in players.items():
+                        if not isinstance(player, dict):
+                            continue
+
+                        rows.append({
+                            "Player": player.get(
+                                "playerName", "Unknown"
+                            ),
+                            "Market": definition.get(
+                                "marketName", "Unknown"
+                            ),
+                            "Market ID": str(market_id),
+                            "Outcome ID": str(outcome_id),
+                            "Player ID": str(player_id),
+                            "Decimal Odds": player.get("price"),
+                            "American Odds": player.get(
+                                "priceAmerican"
+                            ),
+                            "Market Active": market.get(
+                                "marketActive"
+                            ),
+                            "Selection Active": player.get(
+                                "active"
+                            ),
+                            "Main Line": player.get(
+                                "mainline"
+                            ),
+                            "Line": "Unverified",
+                            "MORE/LESS": "Unverified"
+                        })
+
+            if not rows:
+                st.warning(
+                    "No player outcomes returned "
+                    "for this fixture."
+                )
+            else:
+                df = pd.DataFrame(rows)
+
+                st.success(
+                    f"Decoded {len(df)} player outcomes."
+                )
+
+                st.metric(
+                    "Active player outcomes",
+                    int(
+                        (
+                            (df["Market Active"] == True)
+                            & (df["Selection Active"] == True)
+                        ).sum()
+                    )
+                )
+
+                active_only = st.checkbox(
+                    "Show active selections only",
+                    value=True,
+                    key="pp_active_only"
+                )
+
+                if active_only:
+                    df = df[
+                        (df["Market Active"] == True)
+                        & (df["Selection Active"] == True)
+                    ]
+
+                st.dataframe(
+                    df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+                st.info(
+                    "Player names and odds are decoded. "
+                    "Lines and MORE/LESS remain unverified "
+                    "until outcome metadata is mapped."
+                )
+
+        except requests.RequestException as error:
+            st.error(f"OddsPAPI request failed: {error}")
+        except (ValueError, TypeError, AttributeError) as error:
+            st.error(f"Unable to decode response: {error}")
