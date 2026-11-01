@@ -1796,4 +1796,33 @@ if st.button(
             "Diagnostic failed: " + str(error)
         )
 
+# ============================================
+# SPORTS LAB - MARKET DEFINITION INSPECTOR
+# ============================================
+
+st.divider()
+st.header("🔬 Market Definition Inspector")
+
+if st.button(
+    "INSPECT MARKET 111682",
+    key="inspect_market_111682"
+):
+    try:
+        catalog = decoder_market_catalog()
+
+        matches = [
+            item for item in catalog
+            if str(item.get("marketId")) == "111682"
+        ]
+
+        if matches:
+            st.json(matches[0])
+        else:
+            st.warning(
+                "Market 111682 was not found in the catalog."
+            )
+
+    except (ValueError, requests.RequestException):
+        st.error("Could not retrieve market definitions.")
+
        
