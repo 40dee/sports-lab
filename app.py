@@ -1044,8 +1044,17 @@ if st.button(
                 )
 
         except requests.HTTPError as error:
-            st.error(
-                f"OddsPAPI HTTP error: {error}"
+    status = error.response.status_code
+
+    if status == 403:
+        st.error(
+            "OddsPAPI denied this request (403). "
+            "Check API permissions, quota, and fixture access."
+        )
+    else:
+        st.error(
+            f"OddsPAPI returned HTTP {status}."
+        )
             )
         except requests.RequestException as error:
             st.error(
