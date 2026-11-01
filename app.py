@@ -1825,4 +1825,172 @@ if st.button(
     except (ValueError, requests.RequestException):
         st.error("Could not retrieve market definitions.")
 
+# ============================================
+# NBA PROP DECODER V3 - CATALOG CORRECTED
+# ============================================
+
+st.divider()
+st.header("🏀 NBA Prop Decoder V3")
+
+def v3_decode_outcome(catalog_market, outcome_id):
+    for entry in catalog_market.get("outcomes", []):
+        if str(entry.get("outcomeId")) == str(outcome_id):
+            name = str(entry.get("outcomeName", "")).lower()
+            if name == "over":
+                return "MORE"
+            if name == "under":
+                return "LESS"
+    return None
+
+
+if st.button(
+    "DECODE REAL NBA LINES V3",
+    use_container_width=True,
+    key="nba_decoder_v3"
+):
+    try:
+        with st.spinner("Decoding market definitions..."):
+            catalog = decoder_catalog_map(
+                decoder_market_catalog()
+            )
+
+            decoded = []
+            seen = set()
+            games = scan_nba_games()[:max_games]
+
+            for game in games:
+                fixture_id = game.get("fixtureId")
+                if not fixture_id:
+                    continue
+
+                matchup = (
+                    str(game.get("participant1Name", "?"))
+                    + " vs "
+                    + str(game.get("participant2Name", "?"))
+                )
+
+                odds = scan_game_odds(fixture_id)
+                books = odds.get("bookmakerOdds", {})
+
+                for book in SCAN_BOOKS:
+                    book_data = books.get(book, {})
+                    if not isinstance(book_data, dict):
+                        continue
+
+                    markets = book_data.get("markets", {})
+                    if not isinstance(markets, dict):
+                        continue
+
+                    for market_id, market in markets.items():
+                        definition = catalog.get(str(market_id), {})
+
+                        if definition.get("playerProp") is not True:
+                            continue
+
+                        if market.get("marketActive") is not True:
+                            continue
+
+                        line = decoder_number(
+                            definition.get("handicap")
+                        )
+
+                        if line is None:
+                            continue
+
+                        outcomes = market.get("outcomes", {})
+                        if not isinstance(outcomes, dict):
+                            continue
+
+                        for outcome_id, outcome in outcomes.items():
+                            direction = v3_decode_outcome(
+                                definition, outcome_id
+                            )
+
+                            if direction is None:
+                                continue
+
+                            players = outcome.get("players", {})
+                            if not isinstance(players, dict):
+                                continue
+
+                            for player_id, player in players.items():
+                                if not isinstance(player, dict):
+                                    continue
+
+                                if player.get("active") is not True:
+                                    continue
+
+                                name = player.get("playerName")
+                                if not name:
+                                    continue
+
+                                unique = (
+                                    fixture_id,
+                                    book,
+                                    str(player_id),
+                                    str(market_id),
+                                    str(outcome_id)
+                                )
+
+                                if unique in seen:
+                                    continue
+                                seen.add(unique)
+
+                                decoded.append({
+                                    "Game": matchup,
+                                    "Platform": book,
+                                    "Player": name,
+                                    "Stat": definition.get(
+                                        "marketName"
+                                    ),
+                                    "Line": line,
+                                    "Direction": direction,
+                                    "Line Type": "Unverified",
+                                    "Odds": player.get(
+                                        "priceAmerican"
+                                    ),
+                                    "Market ID": market_id,
+                                    "Outcome ID": outcome_id,
+                                    "Active": True
+                                })
+
+            st.session_state["nba_v3_lines"] = decoded
+
+    except (ValueError, requests.RequestException) as error:
+        st.error("Decoder error: " + str(error))
+
+
+if "nba_v3_lines" in st.session_state:
+    rows = st.session_state["nba_v3_lines"]
+
+    st.metric("Decoded Active Outcomes", len(rows))
+
+    if rows:
+        df = pd.DataFrame(rows)
+
+        platform = st.selectbox(
+            "Filter platform",
+            ["All"] + SCAN_BOOKS,
+            key="nba_v3_platform"
+        )
+
+        if platform != "All":
+            df = df[df["Platform"] == platform]
+
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+    else:
+        st.warning("No matching active player props decoded.")
+
+    st.caption(
+        "Line and MORE/LESS are decoded from the market "
+        "catalog. Standard/Goblin/Demon classification "
+        "remains unverified. These are market records, "
+        "not model recommendations."
+    )
+
        
