@@ -16,7 +16,7 @@ st.sidebar.success("PrizePicks Board Stream: SYNCED")
 
 # Master Discovery Button
 if st.button("⚡ EXECUTE SYSTEM-WIDE MATCHUP SYNC", use_container_width=True):
-    st.toast("Compiling defensive metrics against positions...")
+st.toast("Compiling defensive metrics against positions...")
     
     # 1. High-Level Summary Metrics
     m1, m2, m3 = st.columns(3)
