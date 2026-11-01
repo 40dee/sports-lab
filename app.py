@@ -174,3 +174,83 @@ if st.button("TEST ODDS API CONNECTION"):
         except requests.RequestException:
             st.error("Unable to connect to OddsPAPI.")
 
+from datetime import datetime, timedelta, timezone
+import requests
+
+st.divider()
+st.subheader("🏀 Live NBA Pregame Scanner")
+
+if st.button("🏀 FETCH REAL NBA GAMES", use_container_width=True):
+    key = st.secrets.get("ODDS_API_KEY", "")
+
+    if not key:
+        st.error("OddsPAPI key is missing.")
+    else:
+        with st.spinner("Retrieving NBA schedule..."):
+            try:
+                start = datetime.now(timezone.utc)
+                end = start + timedelta(days=3)
+
+                response = requests.get(
+                    "https://api.oddspapi.io/v4/fixtures",
+                    params={
+                        "apiKey": key,
+                        "sportId": 11,
+                        "from": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "to": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "statusId": 0
+                    },
+                    timeout=20
+                )
+
+                response.raise_for_status()
+                fixtures = response.json()
+
+                if not isinstance(fixtures, list):
+                    st.error("Unexpected API response format.")
+                else:
+                    nba = [
+                        game for game in fixtures
+                        if (
+                            "nba" in str(
+                                game.get("tournamentName", "")
+                            ).lower()
+                            or game.get("tournamentSlug", "").lower()
+                            == "nba"
+                        )
+                    ]
+
+                    if nba:
+                        rows = []
+                        for game in nba:
+                            rows.append({
+                                "Game": (
+                                    f"{game.get('participant1Name', '?')}"
+                                    " vs "
+                                    f"{game.get('participant2Name', '?')}"
+                                ),
+                                "Start (UTC)": game.get("startTime"),
+                                "Odds Available": game.get("hasOdds"),
+                                "Fixture ID": game.get("fixtureId")
+                            })
+
+                        st.success(f"Found {len(rows)} NBA games.")
+                        st.dataframe(
+                            pd.DataFrame(rows),
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    else:
+                        st.warning(
+                            "No NBA games returned for this window."
+                        )
+
+            except requests.HTTPError:
+                st.error(
+                    f"OddsPAPI returned HTTP {response.status_code}."
+                )
+            except requests.RequestException:
+                st.error("Unable to retrieve the NBA schedule.")
+            except ValueError:
+                st.error("OddsPAPI returned invalid JSON.")
+
