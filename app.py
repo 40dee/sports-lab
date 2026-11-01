@@ -549,3 +549,97 @@ if st.button("VERIFY PICK'EM APPS"):
         st.error(f"API request failed: {error}")
     except (KeyError, ValueError, TypeError) as error:
         st.error(f"Unable to process data: {error}")
+
+st.divider()
+st.subheader("🎯 PrizePicks & Kalshi Pregame Test")
+
+fixture_id = st.text_input(
+    "NBA Fixture ID",
+    value="id1100013273719476",
+    key="pickem_fixture_id"
+)
+
+if st.button("TEST ACTUAL PICK'EM MARKETS"):
+    key = st.secrets.get("ODDS_API_KEY", "")
+
+    if not key:
+        st.error("OddsPAPI key missing.")
+    else:
+        try:
+            response = requests.get(
+                "https://api.oddspapi.io/v4/odds",
+                params={
+                    "apiKey": key,
+                    "fixtureId": fixture_id.strip(),
+                    "bookmakers": "prizepicks,kalshi",
+                    "language": "en",
+                    "verbosity": 3
+                },
+                timeout=30
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            books = data.get("bookmakerOdds", {})
+
+            rows = []
+            for slug in ["prizepicks", "kalshi"]:
+                book = books.get(slug, {})
+                markets = book.get("markets", {})
+
+                rows.append({
+                    "Platform": slug,
+                    "Fixture Returned": bool(book),
+                    "Market Count": len(markets),
+                    "Active": book.get(
+                        "bookmakerIsActive", False
+                    ),
+                    "Suspended": book.get(
+                        "suspended", None
+                    )
+                })
+
+            st.dataframe(
+                pd.DataFrame(rows),
+                hide_index=True,
+                use_container_width=True
+            )
+
+            st.write("Fixture:", data.get("fixtureId"))
+            st.write("Game:", (
+                str(data.get("participant1Name", "")) +
+                " vs " +
+                str(data.get("participant2Name", ""))
+            ))
+            st.write("Status:", data.get("statusName"))
+
+            for slug in ["prizepicks", "kalshi"]:
+                book = books.get(slug, {})
+                markets = book.get("markets", {})
+
+                with st.expander(
+                    f"{slug}: Market details"
+                ):
+                    if markets:
+                        st.write(
+                            "Market IDs:",
+                            list(markets.keys())[:30]
+                        )
+                        first_id = next(iter(markets))
+                        st.json({
+                            "marketId": first_id,
+                            "market": markets[first_id]
+                        })
+                    else:
+                        st.info(
+                            "No markets returned for this fixture."
+                        )
+
+        except requests.HTTPError:
+            st.error(
+                f"OddsPAPI returned HTTP {response.status_code}."
+            )
+        except requests.RequestException as error:
+            st.error(f"Connection error: {error}")
+        except (ValueError, TypeError, AttributeError) as error:
+            st.error(f"Unexpected response: {error}")
