@@ -478,3 +478,74 @@ if st.button("FIND NBA PROP CATEGORIES"):
         st.error(f"API request failed: {error}")
     except (ValueError, KeyError, TypeError) as error:
         st.error(f"Unable to process markets: {error}")
+
+st.divider()
+st.subheader("🎯 Pick'em App Availability Check")
+
+if st.button("VERIFY PICK'EM APPS"):
+    import requests
+
+    platforms = {
+        "PrizePicks": ["prizepicks"],
+        "Sleeper": ["sleeper"],
+        "Underdog": ["underdog"],
+        "ParlayPlay": ["parlayplay", "parlay-play"],
+        "Kalshi": ["kalshi"],
+        "DraftKings Pick6": ["pick6", "pick-6"]
+    }
+
+    try:
+        response = requests.get(
+            "https://api.oddspapi.io/v4/bookmakers",
+            params={
+                "apiKey": st.secrets["ODDS_API_KEY"]
+            },
+            timeout=30
+        )
+        response.raise_for_status()
+        bookmakers = response.json()
+
+        if not isinstance(bookmakers, list):
+            st.error("Unexpected bookmaker response.")
+        else:
+            rows = []
+
+            for platform, keywords in platforms.items():
+                matches = [
+                    book for book in bookmakers
+                    if any(
+                        word in (
+                            str(book.get("bookmakerName", "")) +
+                            " " +
+                            str(book.get("slug", ""))
+                        ).lower().replace(" ", "").replace("-", "")
+                        for word in [
+                            k.replace("-", "") for k in keywords
+                        ]
+                    )
+                ]
+
+                rows.append({
+                    "Platform": platform,
+                    "In Catalog": "YES" if matches else "NOT FOUND",
+                    "Bookmaker Slugs": ", ".join(
+                        str(m.get("slug", "")) for m in matches
+                    ) if matches else "—",
+                    "Pregame Props": "Not tested"
+                })
+
+            st.dataframe(
+                pd.DataFrame(rows),
+                hide_index=True,
+                use_container_width=True
+            )
+
+            st.info(
+                "Catalog presence does not guarantee "
+                "actual pregame player-prop lines."
+            )
+
+    except requests.RequestException as error:
+        st.error(f"API request failed: {error}")
+    except (KeyError, ValueError, TypeError) as error:
+        st.error(f"Unable to process data: {error}")
