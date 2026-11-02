@@ -1039,7 +1039,7 @@ def render_card_history(card):
                 .sort_values("GAME_DATE")
                 .reset_index(drop=True)
             )   
-        )
+        
 
         prop_line = float(card["Line"])
         chart_width = 1000
