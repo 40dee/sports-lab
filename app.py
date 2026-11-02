@@ -939,7 +939,7 @@ def render_card_history(card):
                 "No selected-season appearances returned."
             )
 
-                import html
+        import html
         import streamlit.components.v1 as components
 
         chart_window = st.radio(
