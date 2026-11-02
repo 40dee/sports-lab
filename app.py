@@ -977,7 +977,7 @@ def render_history_graph(sample, h2h_games, card):
 
 def render_card_history(card):
     render_player_availability(card)
-        st.markdown("#### Team scoring matchup")
+    st.markdown("#### Team scoring matchup")
 
     matchup_key = f"team_scoring_{card['Fixture ID']}"
 
