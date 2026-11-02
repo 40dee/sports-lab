@@ -942,7 +942,7 @@ def render_card_history(card):
         import html
         import streamlit.components.v1 as components
 
-             h2h_games = locals().get("h2h")
+        h2h_games = locals().get("h2h")
 
         st.markdown("#### Head-to-head stat averages")
 
