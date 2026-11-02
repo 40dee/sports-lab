@@ -975,7 +975,152 @@ def render_history_graph(sample, h2h_games, card):
 
 # ---------------- PLAYER BREAKDOWN ----------------
 
-def render_card_history(card):
+    st.markdown("#### Team scoring matchup")
+
+    matchup_key = f"team_scoring_{card['Fixture ID']}"
+
+    if st.button(
+        "Load team scoring comparison",
+        key=f"load_{matchup_key}",
+    ):
+        st.session_state.pop(matchup_key, None)
+
+        try:
+            participant_names = {
+                normalize_player(name)
+                for name in str(card["Game"]).split(" vs ")
+            }
+
+            matchup_teams = [
+                team
+                for team in espn_teams()
+                if normalize_player(team["displayName"])
+                in participant_names
+            ]
+
+            if len(matchup_teams) != 2:
+                raise ValueError(
+                    "Could not identify both matchup teams."
+                )
+
+            team_rows = []
+            response_times = []
+
+            with st.spinner("Loading ESPN team records..."):
+                for team in matchup_teams:
+                    team_url = ESPN_BASE + f"teams/{team['id']}"
+                    team_params = {"enable": "stats"}
+
+                    response = saved_fetch(
+                        team_url,
+                        team_params,
+                        ttl_seconds=3600,
+                    )
+
+                    returned_team = response.get("team", {})
+
+                    if str(returned_team.get("id")) != str(team["id"]):
+                        raise ValueError(
+                            "ESPN returned an unexpected team."
+                        )
+
+                    overall_records = [
+                        record
+                        for record in returned_team.get(
+                            "record", {}
+                        ).get("items", [])
+                        if record.get("type") == "total"
+                    ]
+
+                    if len(overall_records) != 1:
+                        raise ValueError(
+                            "Overall team record unavailable."
+                        )
+
+                    stats = {
+                        item["name"]: item.get("value")
+                        for item in overall_records[0].get(
+                            "stats", []
+                        )
+                    }
+
+                    required = (
+                        "gamesPlayed",
+                        "avgPointsFor",
+                        "avgPointsAgainst",
+                    )
+
+                    if any(
+                        stats.get(field) is None
+                        for field in required
+                    ):
+                        raise ValueError(
+                            "Required team scoring fields are missing."
+                        )
+
+                    if float(stats["gamesPlayed"]) <= 0:
+                        raise ValueError(
+                            "No team games are available."
+                        )
+
+                    team_rows.append({
+                        "Team": team["displayName"],
+                        "Games": int(stats["gamesPlayed"]),
+                        "Points scored / game": round(
+                            float(stats["avgPointsFor"]), 2
+                        ),
+                        "Points allowed / game": round(
+                            float(stats["avgPointsAgainst"]), 2
+                        ),
+                    })
+
+                    response_times.append(
+                        cached_response_time(
+                            team_url,
+                            team_params,
+                        )
+                    )
+
+            st.session_state[matchup_key] = {
+                "rows": team_rows,
+                "fetched": response_times,
+            }
+
+        except Exception as error:
+            st.error(
+                f"Team scoring comparison unavailable: {error}"
+            )
+
+    matchup_result = st.session_state.get(matchup_key)
+
+    if matchup_result:
+        st.dataframe(
+            pd.DataFrame(matchup_result["rows"]),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+        for row, fetched in zip(
+            matchup_result["rows"],
+            matchup_result["fetched"],
+        ):
+            st.caption(
+                f"{row['Team']} · App fetched (UTC): "
+                f"{fetched or 'Unavailable'}"
+            )
+
+        st.caption(
+            "Source: ESPN current overall team records. "
+            "This is not filtered to the historical-season selector "
+            "or reconstructed as of an earlier fixture. "
+            "Points allowed per game is not defensive efficiency "
+            "or defense versus position."
+        )
+
+    st.caption(
+        "Pace, offensive/defensive efficiency, and league "
+        "rankings are not connected yet."
+    )
     render_player_availability(card)
     st.markdown("#### Team scoring matchup")
 
