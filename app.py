@@ -498,7 +498,7 @@ if "v4_rows" in st.session_state:
                 filtered["Line Type"] == "Unverified"
             ]
 
-                st.subheader("Player cards")
+        st.subheader("Player cards")
 
         search = st.text_input(
             "Find a player",
