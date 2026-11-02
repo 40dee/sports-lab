@@ -732,8 +732,129 @@ def window_summary(frame, line, label):
         "Ties": count - more - less,
     }
 
+def render_player_availability(card):
+    st.markdown("#### Roster & availability")
+
+    identity = resolve_player(card["Player"])
+
+    if identity is None:
+        st.info(
+            "Load the NBA discovery batch first. "
+            "A unique ESPN player match is required."
+        )
+        return
+
+    player_id, player_name = identity
+    availability_key = (
+        f"availability_{card['Fixture ID']}_{player_id}"
+    )
+
+    if st.button(
+        "Check ESPN roster & injuries",
+        key=f"check_{availability_key}",
+    ):
+        try:
+            participants = str(card["Game"]).split(" vs ")
+            teams = espn_teams()
+
+            matched_teams = [
+                team
+                for team in teams
+                if normalize_player(team["displayName"])
+                in {
+                    normalize_player(name)
+                    for name in participants
+                }
+            ]
+
+            if len(matched_teams) != 2:
+                raise ValueError(
+                    "The two matchup teams could not be matched."
+                )
+
+            roster_matches = []
+
+            with st.spinner("Checking ESPN rosters..."):
+                for team in matched_teams:
+                    roster = saved_fetch(
+                        ESPN_BASE
+                        + f"teams/{team['id']}/roster",
+                        {},
+                    )
+
+                    for athlete in roster.get("athletes", []):
+                        if str(athlete.get("id")) == str(player_id):
+                            roster_matches.append({
+                                "team": team["displayName"],
+                                "position": athlete.get(
+                                    "position", {}
+                                ).get("abbreviation", "Unavailable"),
+                                "status": athlete.get(
+                                    "status", {}
+                                ).get("name", "Unavailable"),
+                                "injuries": athlete.get(
+                                    "injuries", []
+                                ),
+                                "source_timestamp": roster.get(
+                                    "timestamp", "Unavailable"
+                                ),
+                            })
+
+            if len(roster_matches) != 1:
+                raise ValueError(
+                    "A unique roster match was not found "
+                    "on the two matchup teams."
+                )
+
+            st.session_state[availability_key] = roster_matches[0]
+
+        except Exception as exc:
+            st.session_state.pop(availability_key, None)
+            st.error(f"ESPN availability check failed: {exc}")
+
+    result = st.session_state.get(availability_key)
+
+    if result is None:
+        st.caption("Availability has not been checked.")
+        return
+
+    st.write(f"**Player:** {player_name}")
+    st.write(f"**Listed team:** {result['team']}")
+    st.write(f"**Position:** {result['position']}")
+    st.write(f"**Roster status:** {result['status']}")
+
+    injuries = result["injuries"]
+
+    if injuries:
+        for injury in injuries:
+            st.write(
+                "**Reported injury status:** "
+                + str(injury.get("status", "Unavailable"))
+            )
+            note = (
+                injury.get("shortComment")
+                or injury.get("longComment")
+            )
+            if note:
+                st.write(str(note))
+    else:
+        st.info(
+            "No injury entry was returned by this roster feed. "
+            "Game availability is not confirmed."
+        )
+
+    st.write("**Confirmed starter:** Unavailable")
+    st.caption(
+        f"Source: ESPN roster · "
+        f"Source timestamp: {result['source_timestamp']}. "
+        "Responses may be cached for up to one hour. "
+        "Active roster status does not confirm that "
+        "the player will play tonight."
+    )
+
 
 def render_card_history(card):
+    render_player_availability(card)
     st.write("Defense matchup: Unavailable")
     columns = market_columns(card)
 
