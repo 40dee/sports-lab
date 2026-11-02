@@ -278,45 +278,182 @@ def decode_game(game, odds, catalog):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_nba_player_logs(season):
-    from nba_api.stats.endpoints import leaguegamelog
-
-    frames = leaguegamelog.LeagueGameLog(
-        season=season,
-        season_type_all_star="Regular Season",
-        player_or_team_abbreviation="P",
-        timeout=30,
-    ).get_data_frames()
-
-    if not frames:
-        raise ValueError("NBA Stats returned no tables.")
-
-    logs = frames[0]
-    required = {
-        "PLAYER_ID", "PLAYER_NAME", "GAME_ID", "GAME_DATE",
-        "MATCHUP", "MIN", "PTS", "REB", "AST",
-        "STL", "BLK", "TOV", "FG3M",
-    }
-
-    missing = required - set(logs.columns)
-    if missing:
-        raise ValueError(
-            "NBA Stats response is missing: " + ", ".join(sorted(missing))
-        )
-    if logs.empty:
-        raise ValueError(f"No player game logs returned for {season}.")
-
-    logs = logs.copy()
-    logs["GAME_DATE"] = pd.to_datetime(
-        logs["GAME_DATE"], errors="coerce"
+    base = (
+        "https://site.api.espn.com/apis/site/v2/"
+        "sports/basketball/nba/"
     )
-    if logs["GAME_DATE"].isna().any():
-        raise ValueError("Some NBA game dates could not be read.")
 
+    def fetch(path, params):
+        response = requests.get(
+            base + path,
+            params=params,
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def number(value):
+        text = str(value).strip()
+        if text in ("", "--", "-", "None"):
+            return None
+        return float(text)
+
+    def minutes(value):
+        text = str(value).strip()
+        if ":" in text:
+            parts = text.split(":")
+            return float(parts[0]) + float(parts[1]) / 60
+        return number(text)
+
+    year = int(season.split("-")[0])
+    season_start = datetime(year, 10, 1, tzinfo=timezone.utc)
+    season_end = datetime(year + 1, 7, 1, tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+
+    if now < season_start:
+        raise ValueError("The selected season has not started.")
+
+    end = min(now, season_end - timedelta(days=1))
+    start = max(season_start, end - timedelta(days=6))
+
+    games = {}
+    day = start
+
+    while day.date() <= end.date():
+        board = fetch(
+            "scoreboard",
+            {"dates": day.strftime("%Y%m%d")},
+        )
+
+        if "events" not in board:
+            raise ValueError("ESPN returned an unexpected scoreboard.")
+
+        for event in board["events"]:
+            completed = event.get("status", {}).get(
+                "type", {}
+            ).get("completed", False)
+
+            regular = event.get("season", {}).get("type") == 2
+
+            if completed and regular:
+                games[str(event["id"])] = event
+
+        day += timedelta(days=1)
+
+    if not games:
+        raise ValueError(
+            "No completed regular-season games returned for "
+            f"{start:%Y-%m-%d} through {end:%Y-%m-%d}."
+        )
+
+    rows = []
+
+    for game_id, event in games.items():
+        summary = fetch("summary", {"event": game_id})
+
+        competitors = event["competitions"][0]["competitors"]
+        teams = {
+            str(item["team"]["id"]): item
+            for item in competitors
+        }
+
+        groups = summary.get("boxscore", {}).get("players", [])
+
+        if not groups:
+            raise ValueError(
+                f"ESPN returned no player box score for game {game_id}."
+            )
+
+        game_rows = []
+
+        for group in groups:
+            team_id = str(group["team"]["id"])
+            team = teams[team_id]
+            opponent = next(
+                item for key, item in teams.items()
+                if key != team_id
+            )
+            home = team["homeAway"] == "home"
+            team_name = team["team"]["abbreviation"]
+            opponent_name = opponent["team"]["abbreviation"]
+
+            for section in group.get("statistics", []):
+                labels = section.get("labels", [])
+                required = {
+                    "MIN", "PTS", "REB", "AST",
+                    "STL", "BLK", "TO", "3PT"
+                }
+
+                if not required.issubset(labels):
+                    raise ValueError(
+                        f"Unexpected stat columns in game {game_id}."
+                    )
+
+                for athlete in section.get("athletes", []):
+                    if athlete.get("didNotPlay"):
+                        continue
+
+                    values = athlete.get("stats", [])
+                    if not values:
+                        continue
+                    if len(values) != len(labels):
+                        raise ValueError(
+                            f"Incomplete stat row in game {game_id}."
+                        )
+
+                    stats = dict(zip(labels, values))
+                    played = minutes(stats["MIN"])
+
+                    if played is None:
+                        raise ValueError(
+                            f"Missing minutes in game {game_id}."
+                        )
+
+                    player = athlete["athlete"]
+                    threes = str(stats["3PT"]).split("-")[0]
+
+                    game_rows.append({
+                        "PLAYER_ID": str(player["id"]),
+                        "PLAYER_NAME": player["displayName"],
+                        "GAME_ID": game_id,
+                        "GAME_DATE": event["date"],
+                        "TEAM_ID": team_id,
+                        "OPPONENT_ID": str(opponent["team"]["id"]),
+                        "HOME_AWAY": "Home" if home else "Away",
+                        "MATCHUP": (
+                            f"{team_name} "
+                            f"{'vs.' if home else '@'} "
+                            f"{opponent_name}"
+                        ),
+                        "MIN": played,
+                        "PTS": number(stats["PTS"]),
+                        "REB": number(stats["REB"]),
+                        "AST": number(stats["AST"]),
+                        "STL": number(stats["STL"]),
+                        "BLK": number(stats["BLK"]),
+                        "TOV": number(stats["TO"]),
+                        "FG3M": number(threes),
+                        "SOURCE": "ESPN",
+                    })
+
+        if not game_rows:
+            raise ValueError(
+                f"No usable player records in game {game_id}."
+            )
+
+        rows.extend(game_rows)
+
+    logs = pd.DataFrame(rows)
+    logs["GAME_DATE"] = pd.to_datetime(
+        logs["GAME_DATE"], utc=True, errors="raise"
+    )
     logs = logs.drop_duplicates(["PLAYER_ID", "GAME_ID"])
 
     return {
         "logs": logs.sort_values("GAME_DATE", ascending=False),
         "retrieved_at": datetime.now(timezone.utc).isoformat(),
+        "coverage_start": start.strftime("%Y-%m-%d"),
+        "coverage_end": end.strftime("%Y-%m-%d"),
     }
 
 
