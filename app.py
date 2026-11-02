@@ -942,19 +942,103 @@ def render_card_history(card):
         import html
         import streamlit.components.v1 as components
 
+             h2h_games = locals().get("h2h")
+
+        st.markdown("#### Head-to-head stat averages")
+
+        if h2h_games is None:
+            st.info(
+                "H2H unavailable: opponent mapping could not "
+                "be confirmed."
+            )
+        elif h2h_games.empty:
+            st.info(
+                "No H2H appearances found in the loaded seasons."
+            )
+        else:
+            stat_labels = {
+                "MIN": "Minutes",
+                "PTS": "Points",
+                "REB": "Rebounds",
+                "AST": "Assists",
+                "STL": "Steals",
+                "BLK": "Blocks",
+                "TOV": "Turnovers",
+                "FG3M": "Threes made",
+            }
+
+            h2h_rows = []
+
+            for column, label in stat_labels.items():
+                if column in h2h_games.columns:
+                    values = pd.to_numeric(
+                        h2h_games[column],
+                        errors="coerce",
+                    ).dropna()
+
+                    h2h_rows.append({
+                        "Stat": label,
+                        "Average": (
+                            round(float(values.mean()), 2)
+                            if not values.empty else None
+                        ),
+                        "Games with data": len(values),
+                    })
+
+            st.dataframe(
+                pd.DataFrame(h2h_rows),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            seasons_shown = ", ".join(
+                sorted(
+                    h2h_games["SEASON"].dropna().unique()
+                )
+            )
+
+            st.caption(
+                f"{len(h2h_games)} H2H appearances · "
+                f"Seasons: {seasons_shown} · "
+                f"{h2h_games['GAME_DATE'].min():%Y-%m-%d} "
+                f"to "
+                f"{h2h_games['GAME_DATE'].max():%Y-%m-%d}. "
+                "These are historical results against the team, "
+                "not a specific defender."
+            )
+
         chart_window = st.radio(
             "Games to display",
-            [5, 10, 15, 20],
+            ["Last 5", "Last 10", "Last 15", "Last 20", "H2H"],
             index=3,
             horizontal=True,
-            key="player_history_chart_window",
+            key="player_history_chart_window_v2",
         )
 
-        chart_data = (
-            sample.sort_values("GAME_DATE", ascending=False)
-            .head(chart_window)
-            .sort_values("GAME_DATE")
-            .reset_index(drop=True)
+        if chart_window == "H2H":
+            if h2h_games is None or h2h_games.empty:
+                st.info(
+                    "No confirmed H2H games are available "
+                    "for this chart."
+                )
+                return
+
+            chart_data = (
+                h2h_games.sort_values("GAME_DATE")
+                .reset_index(drop=True)
+            )
+        else:
+            window_size = int(chart_window.split()[-1])
+
+            chart_data = (
+                sample.sort_values(
+                    "GAME_DATE",
+                    ascending=False,
+                )
+                .head(window_size)
+                .sort_values("GAME_DATE")
+                .reset_index(drop=True)
+            )   
         )
 
         prop_line = float(card["Line"])
