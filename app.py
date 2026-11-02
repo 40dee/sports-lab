@@ -1064,9 +1064,193 @@ def render_history_graph(sample, h2h_games, card):
 
 # ---------------- PLAYER BREAKDOWN ----------------
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_team_advanced(season):
+    params = {
+        "MeasureType": "Advanced",
+        "PerMode": "PerGame",
+        "LeagueID": "00",
+        "Season": season,
+        "SeasonType": "Regular Season",
+        "LastNGames": 0,
+        "Month": 0,
+        "OpponentTeamID": 0,
+        "PaceAdjust": "N",
+        "PlusMinus": "N",
+        "Rank": "N",
+        "Period": 0,
+    }
+
+    response = requests.get(
+        "https://stats.nba.com/stats/leaguedashteamstats",
+        params=params,
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://www.nba.com/",
+        },
+        timeout=12,
+    )
+    response.raise_for_status()
+    payload = response.json()
+
+    if payload.get("parameters", {}).get("Season") != season:
+        raise ValueError("NBA Stats returned a different season.")
+
+    tables = payload.get("resultSets", [])
+    if not tables:
+        raise ValueError("NBA Stats returned no tables.")
+
+    table = tables[0]
+    frame = pd.DataFrame(
+        table["rowSet"],
+        columns=table["headers"],
+    )
+
+    numeric_fields = [
+        "GP",
+        "OFF_RATING",
+        "DEF_RATING",
+        "PACE",
+        "OFF_RATING_RANK",
+        "DEF_RATING_RANK",
+        "PACE_RANK",
+    ]
+    required = {"TEAM_ID", "TEAM_NAME", *numeric_fields}
+
+    if not required.issubset(frame.columns):
+        raise ValueError("Required NBA team stats are missing.")
+
+    for field in numeric_fields:
+        frame[field] = pd.to_numeric(
+            frame[field], errors="coerce"
+        )
+
+    if (
+        len(frame) != 30
+        or frame["TEAM_ID"].nunique() != 30
+        or frame[list(required)].isna().any().any()
+        or (frame["GP"] <= 0).any()
+    ):
+        raise ValueError(
+            "Complete statistics for all 30 teams are unavailable."
+        )
+
+    return {
+        "data": frame,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def render_team_advanced(card):
+    st.markdown("#### Team efficiency & pace")
+
+    season = st.session_state.get(
+        "nba_history_season", "2026-27"
+    )
+    state_key = (
+        f"team_advanced_{card['Fixture ID']}_{season}"
+    )
+
+    def team_name_key(name):
+        return normalize_player(name).replace(
+            "losangeles", "la"
+        )
+
+    if st.button(
+        "Load NBA efficiency & pace",
+        key=f"load_{state_key}",
+    ):
+        st.session_state.pop(state_key, None)
+
+        try:
+            with st.spinner(
+                "Loading NBA team efficiency and rankings..."
+            ):
+                result = load_team_advanced(season)
+
+            names = {
+                team_name_key(name)
+                for name in str(card["Game"]).split(" vs ")
+            }
+            frame = result["data"]
+            matched = frame[
+                frame["TEAM_NAME"].map(team_name_key).isin(names)
+            ].copy()
+
+            if len(names) != 2 or len(matched) != 2:
+                raise ValueError(
+                    "Both matchup teams could not be matched."
+                )
+
+            st.session_state[state_key] = {
+                "data": matched,
+                "fetched_at": result["fetched_at"],
+            }
+
+        except Exception:
+            st.error(
+                "NBA efficiency data could not be loaded. "
+                "The request may have timed out or been blocked. "
+                "Your player history remains available."
+            )
+
+    result = st.session_state.get(state_key)
+    if result is None:
+        st.caption(
+            "Click Load to request team efficiency. "
+            "This does not use OddsPAPI."
+        )
+        return
+
+    display = result["data"][
+        [
+            "TEAM_NAME",
+            "GP",
+            "OFF_RATING",
+            "OFF_RATING_RANK",
+            "DEF_RATING",
+            "DEF_RATING_RANK",
+            "PACE",
+            "PACE_RANK",
+        ]
+    ].rename(columns={
+        "TEAM_NAME": "Team",
+        "GP": "Games",
+        "OFF_RATING": "Offensive rating",
+        "OFF_RATING_RANK": "Offense rank",
+        "DEF_RATING": "Defensive rating",
+        "DEF_RATING_RANK": "Defense rank",
+        "PACE": "Pace",
+        "PACE_RANK": "Pace rank",
+    })
+
+    st.dataframe(
+        display,
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.caption(
+        f"Source: NBA Stats · {season} regular season · "
+        f"App fetched (UTC): {result['fetched_at']} · "
+        "Responses cached for one hour."
+    )
+    st.caption(
+        "Offensive rating: points scored per 100 possessions. "
+        "Defensive rating: points allowed per 100 possessions. "
+        "Pace: possessions per 48 minutes. "
+        "Rank 1 means best offense, best defense, or fastest pace."
+    )
+    st.caption(
+        "Season-to-date statistics, not reconstructed as of an "
+        "earlier fixture. These are team-level statistics; "
+        "defense versus position and P2 adjustments are pending."
+    )
+
+
 def render_card_history(card):
     render_player_availability(card)
     render_team_scoring(card)
+    render_team_advanced(card)
 
     columns = market_columns(card)
     if columns is None:
