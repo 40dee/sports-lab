@@ -1200,7 +1200,7 @@ if "v4_rows" in st.session_state:
                 "No decoded lines match these filters."
             )
 
-             columns = st.columns(3)
+        columns = st.columns(3)
 
         for index, (_, card) in enumerate(visible.iterrows()):
             card_id = "|".join(
