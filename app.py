@@ -1187,11 +1187,12 @@ def render_team_advanced(card):
                 "fetched_at": result["fetched_at"],
             }
 
-        except Exception:
-            st.error(
-                "NBA efficiency data could not be loaded. "
-                "The request may have timed out or been blocked. "
-                "Your player history remains available."
+                except Exception as error:
+            st.error("NBA efficiency data could not be loaded.")
+            st.code(
+                f"{type(error).__name__}: {error}",
+                language="text",
+            )
             )
 
     result = st.session_state.get(state_key)
