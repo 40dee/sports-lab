@@ -1200,9 +1200,13 @@ if "v4_rows" in st.session_state:
                 "No decoded lines match these filters."
             )
 
-        columns = st.columns(3)
+             columns = st.columns(3)
 
         for index, (_, card) in enumerate(visible.iterrows()):
+            card_id = "|".join(
+                str(card[field]) for field in card_keys
+            )
+
             with columns[index % 3]:
                 with st.container(border=True):
                     st.subheader(str(card["Player"]))
@@ -1211,15 +1215,44 @@ if "v4_rows" in st.session_state:
                         f"**{card['Stat']} · {card['Line']:g}**"
                     )
                     st.caption(
-                        f"{card['Platform']} · "
+                        f"{str(card['Platform']).upper()} · "
                         f"{card['Line Type']} · "
                         f"Period: {card['Period']}"
                     )
                     st.write("**Model pick:** Pending")
                     st.write("**Projection:** Unavailable")
 
-                    with st.expander("Matchup & history"):
-                        render_card_history(card)
+                    if st.button(
+                        "View breakdown",
+                        key=f"breakdown_{card_id}",
+                        use_container_width=True,
+                    ):
+                        st.session_state["selected_prop_card"] = (
+                            card.to_dict()
+                        )
+
+        selected_card = st.session_state.get("selected_prop_card")
+
+        if selected_card is not None:
+            st.divider()
+
+            with st.container(border=True):
+                st.subheader(
+                    f"{selected_card['Player']} — Player breakdown"
+                )
+                st.caption(str(selected_card["Game"]))
+                st.write(
+                    f"**{str(selected_card['Platform']).upper()} · "
+                    f"{selected_card['Stat']} · "
+                    f"{selected_card['Line']:g}**"
+                )
+                st.caption(
+                    "Historical results are shown below. "
+                    "Model projections and pick explanations "
+                    "are not connected yet."
+                )
+
+                render_card_history(selected_card)  
 
         with st.expander("View raw market data"):
             st.dataframe(
