@@ -824,34 +824,3 @@ if (
         use_container_width=True,
         hide_index=True
     )
-
-if (
-    "nba_history" in st.session_state
-    and st.session_state.get("nba_history_season") == history_season
-):
-    history = st.session_state["nba_history"]
-    logs = history["logs"]
-
-    st.success(
-        f"Loaded {len(logs):,} player-game records "
-        f"for {history_season}."
-    )
-
-    st.caption(
-        f"Source: NBA Stats · Regular season · "
-        f"Latest game returned: "
-        f"{logs['GAME_DATE'].max():%Y-%m-%d} · "
-        f"Retrieved at: {history['retrieved_at']} · "
-        f"Cache: 1 hour"
-    )
-
-    st.dataframe(
-        logs[
-            [
-                "PLAYER_NAME", "GAME_DATE", "MATCHUP", "MIN",
-                "PTS", "REB", "AST", "STL", "BLK", "TOV", "FG3M"
-            ]
-        ].head(30),
-        use_container_width=True,
-        hide_index=True
-    )
