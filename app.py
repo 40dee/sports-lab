@@ -498,7 +498,103 @@ if "v4_rows" in st.session_state:
                 filtered["Line Type"] == "Unverified"
             ]
 
-        st.dataframe(filtered.drop(columns=["Stat Key", "Period"]), use_container_width=True, hide_index=True)
+                st.subheader("Player cards")
+
+        search = st.text_input(
+            "Find a player",
+            placeholder="Type a player's name..."
+        )
+
+        stat_filter = st.selectbox(
+            "Stat",
+            ["All"] + sorted(
+                filtered["Stat"].dropna().unique().tolist()
+            )
+        )
+
+        tier_filter = st.selectbox(
+            "Line type",
+            ["All", "Standard", "Goblin", "Demon", "Unverified"]
+        )
+
+        cards = filtered[filtered["Decoded"]].copy()
+
+        if search.strip():
+            cards = cards[
+                cards["Player"].str.contains(
+                    search.strip(), case=False, regex=False, na=False
+                )
+            ]
+
+        if stat_filter != "All":
+            cards = cards[cards["Stat"] == stat_filter]
+
+        if tier_filter != "All":
+            cards = cards[cards["Line Type"] == tier_filter]
+
+        card_keys = [
+            "Fixture ID", "Platform", "Player ID", "Stat Key",
+            "Period", "Line", "Line Type"
+        ]
+
+        cards = cards.drop_duplicates(card_keys).sort_values(
+            ["Player", "Stat", "Line"]
+        )
+
+        st.caption(
+            "Market lines only. Photos, historical stats and "
+            "model recommendations are not connected yet."
+        )
+
+        page_size = 12
+        total_pages = max(
+            1, (len(cards) + page_size - 1) // page_size
+        )
+
+        page = st.selectbox(
+            "Page",
+            range(1, total_pages + 1),
+            format_func=lambda n: f"{n} of {total_pages}"
+        )
+
+        visible = cards.iloc[
+            (page - 1) * page_size:page * page_size
+        ]
+
+        if visible.empty:
+            st.info("No decoded lines match these filters.")
+
+        columns = st.columns(3)
+
+        for index, (_, card) in enumerate(visible.iterrows()):
+            with columns[index % 3]:
+                with st.container(border=True):
+                    st.subheader(str(card["Player"]))
+                    st.caption(str(card["Game"]))
+                    st.write(
+                        f"**{card['Stat']} · {card['Line']:g}**"
+                    )
+                    st.caption(
+                        f"{card['Platform']} · {card['Line Type']} "
+                        f"· Period: {card['Period']}"
+                    )
+
+                    st.write("**Model pick:** Pending")
+                    st.write("**Projection:** Unavailable")
+
+                    with st.expander("Matchup & history"):
+                        st.write("Defense matchup: Unavailable")
+                        st.write("Head-to-head: Unavailable")
+                        st.write("Last 15: Unavailable")
+                        st.write("Home average: Unavailable")
+                        st.write("Away average: Unavailable")
+
+        with st.expander("View raw market data"):
+            st.dataframe(
+                filtered.drop(columns=["Stat Key", "Period"]),
+                use_container_width=True,
+                hide_index=True
+            )
         
 
         st.subheader("Grouped threshold inventory")
