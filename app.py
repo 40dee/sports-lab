@@ -317,7 +317,7 @@ def history_connection():
     return con
 
 
-def saved_fetch(url, params):
+def saved_fetch(url, params, ttl__seconds=3600):
     key = url + "?" + json.dumps(params, sort_keys=True)
 
     with history_connection() as con:
@@ -332,7 +332,7 @@ def saved_fetch(url, params):
         age = (
             now - datetime.fromisoformat(found[0])
         ).total_seconds()
-        if age < 3600:
+        if age < ttl_seconds:
             return json.loads(found[1])
 
     response = requests.get(url, params=params, timeout=25)
