@@ -29,7 +29,7 @@ def api_get(path, params):
         response = requests.get(
             BASE + path,
             params={**params, "apiKey": key},
-            timeout=30,
+            timeout=60,
         )
     except requests.RequestException:
         raise ValueError("Unable to connect to OddsPAPI.") from None
