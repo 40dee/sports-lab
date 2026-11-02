@@ -1187,7 +1187,7 @@ def render_team_advanced(card):
                 "fetched_at": result["fetched_at"],
             }
 
-                except Exception as error:
+        except Exception as error:
             st.error("NBA efficiency data could not be loaded.")
             st.code(
                 f"{type(error).__name__}: {error}",
