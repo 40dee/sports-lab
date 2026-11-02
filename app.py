@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import html
 import json
 import re
 import sqlite3
@@ -10,6 +11,7 @@ import unicodedata
 import pandas as pd
 import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 
 st.set_page_config(
@@ -58,7 +60,6 @@ def api_get(path, params):
 def upcoming_nba():
     start = datetime.now(timezone.utc)
     end = start + timedelta(days=3)
-
     data = api_get(
         "/fixtures",
         {
@@ -78,12 +79,8 @@ def upcoming_nba():
             if isinstance(game, dict)
             and game.get("fixtureId")
             and (
-                "nba" in str(
-                    game.get("tournamentName", "")
-                ).lower()
-                or str(
-                    game.get("tournamentSlug", "")
-                ).lower() == "nba"
+                "nba" in str(game.get("tournamentName", "")).lower()
+                or str(game.get("tournamentSlug", "")).lower() == "nba"
             )
         ],
         key=lambda game: str(game.get("startTime", "")),
@@ -93,10 +90,8 @@ def upcoming_nba():
 @st.cache_data(ttl=1800, show_spinner=False)
 def market_catalog():
     data = api_get("/markets", {"language": "en"})
-
     if isinstance(data, dict):
         data = data.get("markets", data.get("data", []))
-
     if not isinstance(data, list):
         raise ValueError("Unexpected market catalog structure.")
 
@@ -136,24 +131,18 @@ def outcome_direction(definition, outcome_id):
     options = definition.get("outcomes", [])
     if not isinstance(options, list):
         return None
-
     for option in options:
         if (
             isinstance(option, dict)
             and str(option.get("outcomeId")) == str(outcome_id)
         ):
-            name = str(
-                option.get("outcomeName", "")
-            ).strip().lower()
+            name = str(option.get("outcomeName", "")).strip().lower()
             return {"over": "MORE", "under": "LESS"}.get(name)
-
     return None
 
 
 def explicit_tier(*records):
-    fields = (
-        "lineType", "tier", "label", "badge", "projectionType"
-    )
+    fields = ("lineType", "tier", "label", "badge", "projectionType")
     text = " ".join(
         str(record[field]).lower()
         for record in records
@@ -161,7 +150,6 @@ def explicit_tier(*records):
         for field in fields
         if record.get(field) is not None
     )
-
     for token, label in (
         ("goblin", "Goblin"),
         ("demon", "Demon"),
@@ -170,7 +158,6 @@ def explicit_tier(*records):
     ):
         if re.search(r"\b" + token + r"\b", text):
             return label
-
     return "Unverified"
 
 
@@ -180,12 +167,7 @@ def decode_game(game, odds, catalog):
         f"{game.get('participant1Name', '?')} vs "
         f"{game.get('participant2Name', '?')}"
     )
-
-    books = (
-        odds.get("bookmakerOdds", {})
-        if isinstance(odds, dict)
-        else {}
-    )
+    books = odds.get("bookmakerOdds", {}) if isinstance(odds, dict) else {}
     if not isinstance(books, dict):
         books = {}
 
@@ -195,17 +177,14 @@ def decode_game(game, odds, catalog):
         book_data = books.get(book, {})
         if not isinstance(book_data, dict):
             book_data = {}
-
         markets = book_data.get("markets", {})
         if not isinstance(markets, dict):
             markets = {}
 
         count = 0
-
         for market_id, market in markets.items():
             if not isinstance(market, dict):
                 continue
-
             definition = catalog.get(str(market_id), {})
             if definition.get("playerProp") is not True:
                 continue
@@ -213,12 +192,7 @@ def decode_game(game, odds, catalog):
                 continue
 
             raw_line = numeric_line(definition.get("handicap"))
-            line = (
-                raw_line
-                if raw_line is not None and raw_line > 0
-                else None
-            )
-
+            line = raw_line if raw_line is not None and raw_line > 0 else None
             outcomes = market.get("outcomes", {})
             if not isinstance(outcomes, dict):
                 continue
@@ -226,10 +200,7 @@ def decode_game(game, odds, catalog):
             for outcome_id, outcome in outcomes.items():
                 if not isinstance(outcome, dict):
                     continue
-
-                direction = outcome_direction(
-                    definition, outcome_id
-                )
+                direction = outcome_direction(definition, outcome_id)
                 players = outcome.get("players", {})
                 if not isinstance(players, dict):
                     continue
@@ -239,7 +210,6 @@ def decode_game(game, odds, catalog):
                         continue
                     if player.get("active") is not True:
                         continue
-
                     name = player.get("playerName")
                     if not isinstance(name, str) or not name.strip():
                         continue
@@ -250,7 +220,6 @@ def decode_game(game, odds, catalog):
                     )
                     if key in seen:
                         continue
-
                     seen.add(key)
                     count += 1
 
@@ -260,15 +229,9 @@ def decode_game(game, odds, catalog):
                         "Start (UTC)": game.get("startTime"),
                         "Platform": book,
                         "Player": name.strip(),
-                        "Stat": definition.get(
-                            "marketName", "Unknown"
-                        ),
-                        "Stat Key": definition.get(
-                            "marketType", "Unknown"
-                        ),
-                        "Period": definition.get(
-                            "period", "Unknown"
-                        ),
+                        "Stat": definition.get("marketName", "Unknown"),
+                        "Stat Key": definition.get("marketType", "Unknown"),
+                        "Period": definition.get("period", "Unknown"),
                         "Line": line,
                         "Raw Handicap": raw_line,
                         "Direction": direction,
@@ -287,10 +250,7 @@ def decode_game(game, odds, catalog):
                         "mainLine Flag": player.get(
                             "mainLine", player.get("mainline")
                         ),
-                        "Decoded": (
-                            line is not None
-                            and direction is not None
-                        ),
+                        "Decoded": line is not None and direction is not None,
                     })
 
         summaries.append({
@@ -298,9 +258,7 @@ def decode_game(game, odds, catalog):
             "Platform": book,
             "Returned Markets": len(markets),
             "Active Named Prop Outcomes": count,
-            "Bookmaker Active Flag": book_data.get(
-                "bookmakerIsActive"
-            ),
+            "Bookmaker Active Flag": book_data.get("bookmakerIsActive"),
         })
 
     return rows, summaries
@@ -317,35 +275,54 @@ def history_connection():
     return con
 
 
-def saved_fetch(url, params, ttl__seconds=3600):
+def saved_fetch(url, params, ttl_seconds=3600):
     key = url + "?" + json.dumps(params, sort_keys=True)
-
-    with history_connection() as con:
+    con = history_connection()
+    try:
         found = con.execute(
             "SELECT fetched, payload FROM responses WHERE key=?",
             (key,),
         ).fetchone()
+    finally:
+        con.close()
 
     now = datetime.now(timezone.utc)
-
     if found:
         age = (
             now - datetime.fromisoformat(found[0])
         ).total_seconds()
-        if age < ttl_seconds:
+        if 0 <= age < ttl_seconds:
             return json.loads(found[1])
 
     response = requests.get(url, params=params, timeout=25)
     response.raise_for_status()
     payload = response.json()
+    fetched_at = datetime.now(timezone.utc).isoformat()
 
-    with history_connection() as con:
-        con.execute(
-            "INSERT OR REPLACE INTO responses VALUES (?,?,?)",
-            (key, now.isoformat(), json.dumps(payload)),
-        )
+    con = history_connection()
+    try:
+        with con:
+            con.execute(
+                "INSERT OR REPLACE INTO responses VALUES (?,?,?)",
+                (key, fetched_at, json.dumps(payload)),
+            )
+    finally:
+        con.close()
 
     return payload
+
+
+def cached_response_time(url, params):
+    key = url + "?" + json.dumps(params, sort_keys=True)
+    con = history_connection()
+    try:
+        row = con.execute(
+            "SELECT fetched FROM responses WHERE key=?",
+            (key,),
+        ).fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
 
 
 def stat_number(value):
@@ -368,14 +345,9 @@ def stat_minutes(value):
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_nba_player_logs(season):
     year = int(season.split("-")[0])
-    season_start = datetime(
-        year, 10, 1, tzinfo=timezone.utc
-    )
-    season_end = datetime(
-        year + 1, 7, 1, tzinfo=timezone.utc
-    )
+    season_start = datetime(year, 10, 1, tzinfo=timezone.utc)
+    season_end = datetime(year + 1, 7, 1, tzinfo=timezone.utc)
     now = datetime.now(timezone.utc)
-
     if now < season_start:
         raise ValueError("The selected season has not started.")
 
@@ -389,21 +361,16 @@ def load_nba_player_logs(season):
             ESPN_BASE + "scoreboard",
             {"dates": day.strftime("%Y%m%d")},
         )
-
         if "events" not in board:
-            raise ValueError(
-                "ESPN returned an unexpected scoreboard."
-            )
+            raise ValueError("ESPN returned an unexpected scoreboard.")
 
         for event in board["events"]:
             completed = event.get("status", {}).get(
                 "type", {}
             ).get("completed", False)
             regular = event.get("season", {}).get("type") == 2
-
             if completed and regular:
                 games[str(event["id"])] = event
-
         day += timedelta(days=1)
 
     if not games:
@@ -413,31 +380,22 @@ def load_nba_player_logs(season):
         )
 
     rows = []
-
     for game_id, event in games.items():
         summary = saved_fetch(
             ESPN_BASE + "summary", {"event": game_id}
         )
         competitors = event["competitions"][0]["competitors"]
-        teams = {
-            str(item["team"]["id"]): item
-            for item in competitors
-        }
+        teams = {str(item["team"]["id"]): item for item in competitors}
         groups = summary.get("boxscore", {}).get("players", [])
-
         if not groups:
-            raise ValueError(
-                f"No player box score for game {game_id}."
-            )
+            raise ValueError(f"No player box score for game {game_id}.")
 
         game_rows = []
-
         for group in groups:
             team_id = str(group["team"]["id"])
             team = teams[team_id]
             opponent = next(
-                item for key, item in teams.items()
-                if key != team_id
+                item for key, item in teams.items() if key != team_id
             )
             home = team["homeAway"] == "home"
             team_name = team["team"]["abbreviation"]
@@ -449,7 +407,6 @@ def load_nba_player_logs(season):
                     "MIN", "PTS", "REB", "AST",
                     "STL", "BLK", "TO", "3PT",
                 }
-
                 if not required.issubset(labels):
                     raise ValueError(
                         f"Unexpected stat columns: game {game_id}."
@@ -458,7 +415,6 @@ def load_nba_player_logs(season):
                 for athlete in section.get("athletes", []):
                     if athlete.get("didNotPlay"):
                         continue
-
                     values = athlete.get("stats", [])
                     if not values:
                         continue
@@ -469,14 +425,11 @@ def load_nba_player_logs(season):
 
                     stats = dict(zip(labels, values))
                     played = stat_minutes(stats["MIN"])
-
                     if played is None:
                         raise ValueError(
                             f"Missing minutes: game {game_id}."
                         )
-
                     player = athlete["athlete"]
-                    threes = str(stats["3PT"]).split("-")[0]
 
                     game_rows.append({
                         "PLAYER_ID": str(player["id"]),
@@ -488,8 +441,7 @@ def load_nba_player_logs(season):
                         "HOME_AWAY": "Home" if home else "Away",
                         "MATCHUP": (
                             f"{team_name} "
-                            f"{'vs.' if home else '@'} "
-                            f"{opponent_name}"
+                            f"{'vs.' if home else '@'} {opponent_name}"
                         ),
                         "MIN": played,
                         "PTS": stat_number(stats["PTS"]),
@@ -498,7 +450,9 @@ def load_nba_player_logs(season):
                         "STL": stat_number(stats["STL"]),
                         "BLK": stat_number(stats["BLK"]),
                         "TOV": stat_number(stats["TO"]),
-                        "FG3M": stat_number(threes),
+                        "FG3M": stat_number(
+                            str(stats["3PT"]).split("-")[0]
+                        ),
                         "SOURCE": "ESPN",
                     })
 
@@ -506,7 +460,6 @@ def load_nba_player_logs(season):
             raise ValueError(
                 f"No usable player records: game {game_id}."
             )
-
         rows.extend(game_rows)
 
     logs = pd.DataFrame(rows)
@@ -526,22 +479,18 @@ def load_nba_player_logs(season):
 # ---------------- DEEP PLAYER HISTORY ----------------
 
 def normalize_player(name):
+    name = str(name)
     if "," in name:
         last, first = name.split(",", 1)
         name = first.strip() + " " + last.strip()
-
     name = unicodedata.normalize("NFKD", name)
-    name = "".join(
-        c for c in name if not unicodedata.combining(c)
-    )
+    name = "".join(c for c in name if not unicodedata.combining(c))
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def espn_teams():
-    data = saved_fetch(
-        ESPN_BASE + "teams", {"limit": 100}
-    )
+    data = saved_fetch(ESPN_BASE + "teams", {"limit": 100})
     return [
         item["team"]
         for item in data["sports"][0]["leagues"][0]["teams"]
@@ -552,7 +501,6 @@ def resolve_player(name):
     seed = st.session_state.get(
         "nba_history", {}
     ).get("logs", pd.DataFrame())
-
     if seed.empty:
         return None
 
@@ -561,7 +509,6 @@ def resolve_player(name):
         == normalize_player(name)
     ]
     ids = matches["PLAYER_ID"].astype(str).unique()
-
     if len(ids) == 1:
         return ids[0], matches.iloc[0]["PLAYER_NAME"]
     return None
@@ -569,10 +516,8 @@ def resolve_player(name):
 
 def parse_player_log(data, player_id, player_name, season):
     required = {
-        "MIN", "PTS", "REB", "AST",
-        "STL", "BLK", "TO", "3PT",
+        "MIN", "PTS", "REB", "AST", "STL", "BLK", "TO", "3PT",
     }
-
     if not required.issubset(data.get("labels", [])):
         raise ValueError(
             "ESPN game-log fields are missing. "
@@ -580,39 +525,31 @@ def parse_player_log(data, player_id, player_name, season):
         )
 
     rows = []
-
     for part in data.get("seasonTypes", []):
         if "Regular Season" not in part.get("displayName", ""):
             continue
-
         for category in part.get("categories", []):
             for item in category.get("events", []):
                 game_id = str(item["eventId"])
                 event = data.get("events", {}).get(game_id)
-
                 if not event:
                     raise ValueError(
                         "ESPN returned a game without matchup metadata."
                     )
-
                 values = item.get("stats", [])
                 if len(values) != len(data["labels"]):
-                    raise ValueError(
-                        "Incomplete player game-log row."
-                    )
+                    raise ValueError("Incomplete player game-log row.")
 
                 stats = dict(zip(data["labels"], values))
                 minute = stat_minutes(stats["MIN"])
                 if minute is None or minute <= 0:
                     continue
-
                 if event.get("atVs") not in ("vs", "@"):
                     raise ValueError("Unknown home/away marker.")
 
                 home = event["atVs"] == "vs"
                 team = event.get("team", {})
                 opponent = event["opponent"]
-
                 rows.append({
                     "PLAYER_ID": str(player_id),
                     "PLAYER_NAME": player_name,
@@ -639,14 +576,12 @@ def parse_player_log(data, player_id, player_name, season):
                     ),
                     "SOURCE": "ESPN",
                 })
-
     return rows
 
 
 def fetch_player_history(player_id, player_name, season):
     year = int(season.split("-")[0])
     rows = []
-
     for start in (year, year - 1):
         label = f"{start}-{str(start + 1)[-2:]}"
         url = (
@@ -656,9 +591,7 @@ def fetch_player_history(player_id, player_name, season):
         )
         data = saved_fetch(url, {"season": start + 1})
         rows.extend(
-            parse_player_log(
-                data, player_id, player_name, label
-            )
+            parse_player_log(data, player_id, player_name, label)
         )
 
     if not rows:
@@ -666,7 +599,6 @@ def fetch_player_history(player_id, player_name, season):
             "No regular-season appearances returned "
             "for these two seasons."
         )
-
     frame = pd.DataFrame(rows).drop_duplicates(
         ["PLAYER_ID", "GAME_ID"]
     )
@@ -679,13 +611,9 @@ def fetch_player_history(player_id, player_name, season):
 def market_columns(card):
     if str(card["Period"]).lower() != "result":
         return None
-
     name = str(card["Stat"]).lower()
-    name = re.sub(
-        r"\s*\(incl\.?\s*overtime\)\s*", "", name
-    )
+    name = re.sub(r"\s*\(incl\.?\s*overtime\)\s*", "", name)
     name = name.replace("over under player ", "").strip()
-
     mapping = {
         "points": ["PTS"],
         "rebounds": ["REB"],
@@ -709,20 +637,13 @@ def market_columns(card):
 
 def window_summary(frame, line, label):
     count = len(frame)
-
     if not count:
         return {
-            "Window": label,
-            "Games": 0,
-            "Average": None,
-            "MORE": "Unavailable",
-            "LESS": "Unavailable",
-            "Ties": 0,
+            "Window": label, "Games": 0, "Average": None,
+            "MORE": "Unavailable", "LESS": "Unavailable", "Ties": 0,
         }
-
     more = int((frame["VALUE"] > line).sum())
     less = int((frame["VALUE"] < line).sum())
-
     return {
         "Window": label,
         "Games": count,
@@ -732,11 +653,12 @@ def window_summary(frame, line, label):
         "Ties": count - more - less,
     }
 
+
+# ---------------- ROSTER AND INJURIES ----------------
+
 def render_player_availability(card):
     st.markdown("#### Roster & availability")
-
     identity = resolve_player(card["Player"])
-
     if identity is None:
         st.info(
             "Load the NBA discovery batch first. "
@@ -745,77 +667,120 @@ def render_player_availability(card):
         return
 
     player_id, player_name = identity
-    availability_key = (
-        f"availability_{card['Fixture ID']}_{player_id}"
+    state_key = (
+        f"availability_v3_{card['Fixture ID']}_{player_id}"
     )
 
     if st.button(
-        "Check ESPN roster & injuries",
-        key=f"check_{availability_key}",
+        "Refresh roster & injury report",
+        key=f"refresh_{state_key}",
     ):
+        st.session_state.pop(state_key, None)
         try:
-            participants = str(card["Game"]).split(" vs ")
-            teams = espn_teams()
-
-            matched_teams = [
-                team
-                for team in teams
-                if normalize_player(team["displayName"])
-                in {
-                    normalize_player(name)
-                    for name in participants
-                }
+            names = {
+                normalize_player(name)
+                for name in str(card["Game"]).split(" vs ")
+            }
+            teams = [
+                team for team in espn_teams()
+                if normalize_player(team["displayName"]) in names
             ]
-
-            if len(matched_teams) != 2:
+            if len(teams) != 2:
                 raise ValueError(
-                    "The two matchup teams could not be matched."
+                    "Could not identify both matchup teams."
                 )
 
-            roster_matches = []
-
-            with st.spinner("Checking ESPN rosters..."):
-                for team in matched_teams:
-                    roster = saved_fetch(
-                        ESPN_BASE
-                        + f"teams/{team['id']}/roster",
-                        {},
+            matches = []
+            with st.spinner("Checking ESPN roster..."):
+                for team in teams:
+                    roster_url = (
+                        ESPN_BASE + f"teams/{team['id']}/roster"
                     )
-
+                    roster = saved_fetch(
+                        roster_url, {}, ttl_seconds=300
+                    )
                     for athlete in roster.get("athletes", []):
                         if str(athlete.get("id")) == str(player_id):
-                            roster_matches.append({
+                            matches.append({
                                 "team": team["displayName"],
+                                "team_id": str(team["id"]),
                                 "position": athlete.get(
                                     "position", {}
                                 ).get("abbreviation", "Unavailable"),
                                 "status": athlete.get(
                                     "status", {}
                                 ).get("name", "Unavailable"),
-                                "injuries": athlete.get(
-                                    "injuries", []
-                                ),
-                                "source_timestamp": roster.get(
+                                "roster_timestamp": roster.get(
                                     "timestamp", "Unavailable"
+                                ),
+                                "roster_fetched_at": cached_response_time(
+                                    roster_url, {}
                                 ),
                             })
 
-            if len(roster_matches) != 1:
+            if len(matches) != 1:
                 raise ValueError(
-                    "A unique roster match was not found "
-                    "on the two matchup teams."
+                    "Player was not uniquely matched "
+                    "to either matchup roster."
                 )
 
-            st.session_state[availability_key] = roster_matches[0]
+            result = matches[0]
+            result.update({
+                "injuries": [],
+                "injury_error": None,
+                "injury_timestamp": "Unavailable",
+                "injury_fetched_at": None,
+            })
 
-        except Exception as exc:
-            st.session_state.pop(availability_key, None)
-            st.error(f"ESPN availability check failed: {exc}")
+            try:
+                injury_url = ESPN_BASE + "injuries"
+                with st.spinner("Checking ESPN injury report..."):
+                    report = saved_fetch(
+                        injury_url, {}, ttl_seconds=60
+                    )
+                groups = report.get("injuries")
+                if not isinstance(groups, list):
+                    raise ValueError(
+                        "Unexpected injury report format."
+                    )
 
-    result = st.session_state.get(availability_key)
+                for group in groups:
+                    for injury in group.get("injuries", []):
+                        athlete = injury.get("athlete", {})
+                        athlete_id = athlete.get("id")
+                        if athlete_id is not None:
+                            is_match = str(athlete_id) == str(player_id)
+                        else:
+                            is_match = (
+                                normalize_player(
+                                    athlete.get("displayName", "")
+                                ) == normalize_player(player_name)
+                                and str(group.get("id", ""))
+                                == result["team_id"]
+                            )
+                        if is_match:
+                            result["injuries"].append(injury)
 
+                result["injury_timestamp"] = report.get(
+                    "timestamp", "Unavailable"
+                )
+                result["injury_fetched_at"] = cached_response_time(
+                    injury_url, {}
+                )
+            except Exception as error:
+                result["injury_error"] = str(error)
+
+            result["checked_at"] = datetime.now(
+                timezone.utc
+            ).isoformat()
+            st.session_state[state_key] = result
+
+        except Exception as error:
+            st.error(f"Availability check failed: {error}")
+
+    result = st.session_state.get(state_key)
     if result is None:
-        st.caption("Availability has not been checked.")
+        st.caption("Click Refresh to check availability.")
         return
 
     st.write(f"**Player:** {player_name}")
@@ -823,13 +788,19 @@ def render_player_availability(card):
     st.write(f"**Position:** {result['position']}")
     st.write(f"**Roster status:** {result['status']}")
 
-    injuries = result["injuries"]
-
-    if injuries:
-        for injury in injuries:
+    if result["injury_error"]:
+        st.warning(
+            "Injury report unavailable: " + result["injury_error"]
+        )
+    elif result["injuries"]:
+        for injury in result["injuries"]:
             st.write(
-                "**Reported injury status:** "
+                "**ESPN injury designation:** "
                 + str(injury.get("status", "Unavailable"))
+            )
+            st.caption(
+                "Injury entry updated: "
+                + str(injury.get("date", "Unavailable"))
             )
             note = (
                 injury.get("shortComment")
@@ -839,25 +810,175 @@ def render_player_availability(card):
                 st.write(str(note))
     else:
         st.info(
-            "No injury entry was returned by this roster feed. "
-            "Game availability is not confirmed."
+            "No matching injury entry was returned. "
+            "This does not confirm availability for this game."
         )
 
     st.write("**Confirmed starter:** Unavailable")
     st.caption(
-        f"Source: ESPN roster · "
-        f"Source timestamp: {result['source_timestamp']}. "
-        "Responses may be cached for up to one hour. "
-        "Active roster status does not confirm that "
-        "the player will play tonight."
+        f"Roster response timestamp: {result['roster_timestamp']} · "
+        f"Injury feed timestamp: {result['injury_timestamp']}"
+    )
+    st.caption(
+        f"Roster fetched by app (UTC): "
+        f"{result['roster_fetched_at'] or 'Unavailable'}"
+    )
+    st.caption(
+        f"Injury feed fetched by app (UTC): "
+        f"{result['injury_fetched_at'] or 'Unavailable'}"
+    )
+    st.caption(
+        f"Last button check (UTC): {result['checked_at']}"
     )
 
+    if result["injury_fetched_at"]:
+        age = (
+            datetime.now(timezone.utc)
+            - datetime.fromisoformat(result["injury_fetched_at"])
+        ).total_seconds()
+        if age >= 60:
+            st.warning(
+                "The injury response is over 60 seconds old. "
+                "Click Refresh to check again."
+            )
+
+    st.caption(
+        "Manual refresh · Injury cache: up to 60 seconds · "
+        "Roster cache: up to 5 minutes. "
+        "Feed timestamps are not individual news-update times. "
+        "Active roster status does not confirm playing or starting."
+    )
+
+
+# ---------------- STATIC HISTORY GRAPH ----------------
+
+def render_history_graph(sample, h2h_games, card):
+    options = ["Last 5", "Last 10", "Last 15", "Last 20", "H2H"]
+    chart_window = st.radio(
+        "Games to display",
+        options,
+        index=3,
+        horizontal=True,
+        key="player_history_chart_window_v2",
+    )
+
+    if chart_window == "H2H":
+        if h2h_games is None or h2h_games.empty:
+            st.info("No confirmed H2H games are available for this chart.")
+            return
+        chart_data = h2h_games.sort_values(
+            "GAME_DATE"
+        ).reset_index(drop=True)
+    else:
+        window_size = int(chart_window.split()[-1])
+        chart_data = (
+            sample.sort_values("GAME_DATE", ascending=False)
+            .head(window_size)
+            .sort_values("GAME_DATE")
+            .reset_index(drop=True)
+        )
+
+    if chart_data.empty:
+        st.info("No games available for this chart.")
+        return
+
+    prop_line = float(card["Line"])
+    chart_width, chart_height = 1000, 360
+    left, right, top, bottom = 55, 20, 35, 65
+    plot_width = chart_width - left - right
+    plot_height = chart_height - top - bottom
+    maximum = max(
+        float(chart_data["VALUE"].max()), prop_line, 1.0
+    ) * 1.2
+
+    def chart_y(value):
+        return top + plot_height * (1 - value / maximum)
+
+    svg = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" '
+        f'viewBox="0 0 {chart_width} {chart_height}" '
+        'style="width:100%;height:100%;font-family:Arial">'
+    ]
+
+    for tick in range(5):
+        value = maximum * tick / 4
+        y = chart_y(value)
+        svg.append(
+            f'<line x1="{left}" y1="{y}" '
+            f'x2="{chart_width-right}" y2="{y}" '
+            'stroke="#d1d5db" stroke-width="1"/>'
+            f'<text x="{left-10}" y="{y+4}" '
+            'text-anchor="end" fill="#64748b" '
+            f'font-size="12">{value:g}</text>'
+        )
+
+    slot_width = plot_width / len(chart_data)
+    bar_width = min(slot_width * 0.62, 55)
+
+    for index, row in chart_data.iterrows():
+        value = float(row["VALUE"])
+        center = left + slot_width * (index + 0.5)
+        y = chart_y(value)
+        height = max(chart_y(0) - y, 0)
+        color = (
+            "#16a34a" if value > prop_line
+            else "#dc2626" if value < prop_line
+            else "#94a3b8"
+        )
+        opponent = html.escape(str(row["MATCHUP"]).split()[-1])
+        date_label = row["GAME_DATE"].strftime("%m/%d")
+        svg.append(
+            f'<rect x="{center-bar_width/2}" y="{y}" '
+            f'width="{bar_width}" height="{height}" '
+            f'fill="{color}" rx="3"/>'
+            f'<text x="{center}" y="{y-7}" '
+            'text-anchor="middle" fill="#475569" '
+            f'font-size="13">{value:g}</text>'
+            f'<text x="{center}" y="{chart_y(0)+22}" '
+            'text-anchor="middle" fill="#475569" '
+            f'font-size="12">{opponent}</text>'
+            f'<text x="{center}" y="{chart_y(0)+40}" '
+            'text-anchor="middle" fill="#64748b" '
+            f'font-size="10">{date_label}</text>'
+        )
+
+    line_y = chart_y(prop_line)
+    svg.append(
+        f'<line x1="{left}" y1="{line_y}" '
+        f'x2="{chart_width-right}" y2="{line_y}" '
+        'stroke="#2563eb" stroke-width="2" '
+        'stroke-dasharray="7,5"/>'
+        f'<text x="{chart_width-right}" y="{line_y-7}" '
+        'text-anchor="end" fill="#2563eb" '
+        f'font-size="13">Prop: {prop_line:g}</text>'
+    )
+    svg.append("</svg>")
+    components.html(
+        '<div style="height:360px;overflow:hidden">'
+        + "".join(svg) + "</div>",
+        height=370,
+        scrolling=False,
+    )
+    st.caption(
+        f"Showing {len(chart_data)} games, oldest to newest. "
+        "Green: above line · Red: below line · Gray: tie."
+    )
+    st.caption(f"Comparison line: {prop_line:g}")
+    st.dataframe(
+        chart_data[
+            ["GAME_DATE", "SEASON", "MATCHUP", "MIN", "VALUE"]
+        ].sort_values("GAME_DATE", ascending=False),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
+# ---------------- PLAYER BREAKDOWN ----------------
 
 def render_card_history(card):
     render_player_availability(card)
     st.write("Defense matchup: Unavailable")
     columns = market_columns(card)
-
     if columns is None:
         st.info(
             "History unavailable for this market or period. "
@@ -866,7 +987,6 @@ def render_card_history(card):
         return
 
     matched = resolve_player(str(card["Player"]))
-
     if matched is None:
         st.info(
             "Load the seven-day NBA discovery batch below first. "
@@ -875,45 +995,32 @@ def render_card_history(card):
         return
 
     player_id, name = matched
-    season = st.session_state.get(
-        "nba_history_season", "2026-27"
-    )
+    season = st.session_state.get("nba_history_season", "2026-27")
     key = f"{player_id}:{season}"
     card_key = ":".join(
-        str(card[column])
-        for column in [
+        str(card[column]) for column in [
             "Fixture ID", "Platform", "Player ID",
             "Stat Key", "Period", "Line", "Line Type",
         ]
     )
-    history = st.session_state.get(
-        "deep_history", {}
-    ).get(key)
+    history = st.session_state.get("deep_history", {}).get(key)
 
     if history is None:
-        clicked = st.button(
+        if not st.button(
             "Load 5 / 10 / 15 / 20 history",
             key="history:" + card_key,
-        )
-
-        if not clicked:
+        ):
             st.caption(
                 "Two season requests on first load. "
                 "Saved responses are reused for one hour."
             )
             return
-
         try:
             with st.spinner(
                 "Loading this player's current and previous season..."
             ):
-                history = fetch_player_history(
-                    player_id, name, season
-                )
-            st.session_state.setdefault(
-                "deep_history", {}
-            )[key] = history
-
+                history = fetch_player_history(player_id, name, season)
+            st.session_state.setdefault("deep_history", {})[key] = history
         except Exception as error:
             st.error(
                 "Historical data unavailable: "
@@ -926,16 +1033,12 @@ def render_card_history(card):
     )
     if pd.isna(cutoff):
         st.info(
-            "Missing fixture start time: "
-            "historical comparison unavailable."
+            "Missing fixture start time: historical comparison unavailable."
         )
         return
 
     cutoff = min(cutoff, pd.Timestamp.now(tz="UTC"))
-    sample = history[
-        history["GAME_DATE"] < cutoff
-    ].copy()
-
+    sample = history[history["GAME_DATE"] < cutoff].copy()
     sample["VALUE"] = sample[columns].sum(
         axis=1, min_count=len(columns)
     )
@@ -945,29 +1048,19 @@ def render_card_history(card):
     )
 
     summaries = []
-
     for n in (5, 10, 15, 20):
         label = (
-            f"Last {n}"
-            if len(sample) >= n
+            f"Last {n}" if len(sample) >= n
             else f"Last {n} ({len(sample)} available)"
         )
         summaries.append(
-            window_summary(
-                sample.head(n), float(card["Line"]), label
-            )
+            window_summary(sample.head(n), float(card["Line"]), label)
         )
 
     current = sample[sample["SEASON"] == season]
-
     summaries.append(
-        window_summary(
-            current,
-            float(card["Line"]),
-            f"{season} season",
-        )
+        window_summary(current, float(card["Line"]), f"{season} season")
     )
-
     for location in ("Home", "Away"):
         summaries.append(
             window_summary(
@@ -977,6 +1070,7 @@ def render_card_history(card):
             )
         )
 
+    h2h_games = None
     try:
         participants = str(card["Game"]).split(" vs ")
         lookup = {
@@ -988,29 +1082,22 @@ def render_card_history(card):
             for participant in participants
         ]
         latest_team = (
-            str(sample.iloc[0]["TEAM_ID"])
-            if not sample.empty
-            else None
+            str(sample.iloc[0]["TEAM_ID"]) if not sample.empty else None
         )
         opponents = [
             team_id for team_id in ids
             if team_id and team_id != latest_team
         ]
-
         if (
-            len(ids) == 2
-            and all(ids)
-            and latest_team in ids
-            and len(opponents) == 1
+            len(ids) == 2 and all(ids)
+            and latest_team in ids and len(opponents) == 1
         ):
-            h2h = sample[
+            h2h_games = sample[
                 sample["OPPONENT_ID"] == opponents[0]
             ]
             summaries.append(
                 window_summary(
-                    h2h,
-                    float(card["Line"]),
-                    "H2H (two seasons)",
+                    h2h_games, float(card["Line"]), "H2H (two seasons)"
                 )
             )
         else:
@@ -1018,11 +1105,8 @@ def render_card_history(card):
                 "H2H unavailable: current matchup/team "
                 "mapping needs confirmation."
             )
-
     except Exception:
-        st.caption(
-            "H2H unavailable: ESPN team mapping did not load."
-        )
+        st.caption("H2H unavailable: ESPN team mapping did not load.")
 
     st.dataframe(
         pd.DataFrame(summaries),
@@ -1030,249 +1114,77 @@ def render_card_history(card):
         use_container_width=True,
     )
     st.caption(
-        "Regular-season appearances only. Rolling windows may "
-        "span two seasons. Home/away uses the selected season. "
-        "MORE/LESS percentages include ties in the denominator; "
-        "platform settlement is not applied. "
-        "Historical rates are not predicted probabilities."
+        "Regular-season appearances only. Rolling windows may span "
+        "two seasons. Home/away uses the selected season. MORE/LESS "
+        "percentages include ties in the denominator; platform "
+        "settlement is not applied. Historical rates are not "
+        "predicted probabilities."
     )
-
     if missing:
         st.warning(
-            f"{missing} games excluded because "
-            "a required stat was missing."
+            f"{missing} games excluded because a required stat was missing."
         )
+    if sample.empty:
+        return
 
-    if not sample.empty:
+    st.caption(
+        f"Loaded coverage: {sample['GAME_DATE'].min():%Y-%m-%d} "
+        f"to {sample['GAME_DATE'].max():%Y-%m-%d}."
+    )
+    if not current.empty:
         st.caption(
-            f"Loaded coverage: "
-            f"{sample['GAME_DATE'].min():%Y-%m-%d} to "
-            f"{sample['GAME_DATE'].max():%Y-%m-%d}."
+            f"Current season average minutes: {current['MIN'].mean():.1f}"
         )
+    else:
+        st.caption("No selected-season appearances returned.")
 
-        if not current.empty:
-            st.caption(
-                "Current season average minutes: "
-                f"{current['MIN'].mean():.1f}"
-            )
-        else:
-            st.caption(
-                "No selected-season appearances returned."
-            )
-
-        import html
-        import streamlit.components.v1 as components
-
-        h2h_games = locals().get("h2h")
-
-        st.markdown("#### Head-to-head stat averages")
-
-        if h2h_games is None:
-            st.info(
-                "H2H unavailable: opponent mapping could not "
-                "be confirmed."
-            )
-        elif h2h_games.empty:
-            st.info(
-                "No H2H appearances found in the loaded seasons."
-            )
-        else:
-            stat_labels = {
-                "MIN": "Minutes",
-                "PTS": "Points",
-                "REB": "Rebounds",
-                "AST": "Assists",
-                "STL": "Steals",
-                "BLK": "Blocks",
-                "TOV": "Turnovers",
-                "FG3M": "Threes made",
-            }
-
-            h2h_rows = []
-
-            for column, label in stat_labels.items():
-                if column in h2h_games.columns:
-                    values = pd.to_numeric(
-                        h2h_games[column],
-                        errors="coerce",
-                    ).dropna()
-
-                    h2h_rows.append({
-                        "Stat": label,
-                        "Average": (
-                            round(float(values.mean()), 2)
-                            if not values.empty else None
-                        ),
-                        "Games with data": len(values),
-                    })
-
-            st.dataframe(
-                pd.DataFrame(h2h_rows),
-                hide_index=True,
-                use_container_width=True,
-            )
-
-            seasons_shown = ", ".join(
-                sorted(
-                    h2h_games["SEASON"].dropna().unique()
-                )
-            )
-
-            st.caption(
-                f"{len(h2h_games)} H2H appearances · "
-                f"Seasons: {seasons_shown} · "
-                f"{h2h_games['GAME_DATE'].min():%Y-%m-%d} "
-                f"to "
-                f"{h2h_games['GAME_DATE'].max():%Y-%m-%d}. "
-                "These are historical results against the team, "
-                "not a specific defender."
-            )
-
-        chart_window = st.radio(
-            "Games to display",
-            ["Last 5", "Last 10", "Last 15", "Last 20", "H2H"],
-            index=3,
-            horizontal=True,
-            key="player_history_chart_window_v2",
-        )
-
-        if chart_window == "H2H":
-            if h2h_games is None or h2h_games.empty:
-                st.info(
-                    "No confirmed H2H games are available "
-                    "for this chart."
-                )
-                return
-
-            chart_data = (
-                h2h_games.sort_values("GAME_DATE")
-                .reset_index(drop=True)
-            )
-        else:
-            window_size = int(chart_window.split()[-1])
-
-            chart_data = (
-                sample.sort_values(
-                    "GAME_DATE",
-                    ascending=False,
-                )
-                .head(window_size)
-                .sort_values("GAME_DATE")
-                .reset_index(drop=True)
-            )   
-        
-
-        prop_line = float(card["Line"])
-        chart_width = 1000
-        chart_height = 360
-        left, right, top, bottom = 55, 20, 35, 65
-        plot_width = chart_width - left - right
-        plot_height = chart_height - top - bottom
-
-        maximum = max(
-            float(chart_data["VALUE"].max()),
-            prop_line,
-            1.0,
-        ) * 1.2
-
-        def chart_y(value):
-            return top + plot_height * (1 - value / maximum)
-
-        svg = [
-            f'<svg xmlns="http://www.w3.org/2000/svg" '
-            f'viewBox="0 0 {chart_width} {chart_height}" '
-            'style="width:100%;height:100%;font-family:Arial">'
-        ]
-
-        for tick in range(5):
-            value = maximum * tick / 4
-            y = chart_y(value)
-            svg.append(
-                f'<line x1="{left}" y1="{y}" '
-                f'x2="{chart_width-right}" y2="{y}" '
-                'stroke="#d1d5db" stroke-width="1"/>'
-                f'<text x="{left-10}" y="{y+4}" '
-                'text-anchor="end" fill="#64748b" '
-                f'font-size="12">{value:g}</text>'
-            )
-
-        slot_width = plot_width / max(len(chart_data), 1)
-        bar_width = min(slot_width * 0.62, 55)
-
-        for index, row in chart_data.iterrows():
-            value = float(row["VALUE"])
-            center = left + slot_width * (index + 0.5)
-            y = chart_y(value)
-            height = max(chart_y(0) - y, 0)
-
-            color = (
-                "#16a34a" if value > prop_line
-                else "#dc2626" if value < prop_line
-                else "#94a3b8"
-            )
-
-            opponent = html.escape(
-                str(row["MATCHUP"]).split()[-1]
-            )
-            date_label = row["GAME_DATE"].strftime("%m/%d")
-
-            svg.append(
-                f'<rect x="{center-bar_width/2}" y="{y}" '
-                f'width="{bar_width}" height="{height}" '
-                f'fill="{color}" rx="3"/>'
-                f'<text x="{center}" y="{y-7}" '
-                'text-anchor="middle" fill="#475569" '
-                f'font-size="13">{value:g}</text>'
-                f'<text x="{center}" y="{chart_y(0)+22}" '
-                'text-anchor="middle" fill="#475569" '
-                f'font-size="12">{opponent}</text>'
-                f'<text x="{center}" y="{chart_y(0)+40}" '
-                'text-anchor="middle" fill="#64748b" '
-                f'font-size="10">{date_label}</text>'
-            )
-
-        line_y = chart_y(prop_line)
-        svg.append(
-            f'<line x1="{left}" y1="{line_y}" '
-            f'x2="{chart_width-right}" y2="{line_y}" '
-            'stroke="#2563eb" stroke-width="2" '
-            'stroke-dasharray="7,5"/>'
-            f'<text x="{chart_width-right}" y="{line_y-7}" '
-            'text-anchor="end" fill="#2563eb" '
-            f'font-size="13">Prop: {prop_line:g}</text>'
-        )
-        svg.append("</svg>")
-
-        components.html(
-            '<div style="height:360px;overflow:hidden">'
-            + "".join(svg)
-            + "</div>",
-            height=370,
-            scrolling=False,
-        )
-
-        st.caption(
-            f"Showing {len(chart_data)} games, oldest to newest. "
-            "Green: above line · Red: below line · Gray: tie."
-        )
-        st.caption(f"Comparison line: {card['Line']:g}")
-
+    st.markdown("#### Head-to-head stat averages")
+    if h2h_games is None:
+        st.info("H2H unavailable: opponent mapping could not be confirmed.")
+    elif h2h_games.empty:
+        st.info("No H2H appearances found in the loaded seasons.")
+    else:
+        labels = {
+            "MIN": "Minutes", "PTS": "Points", "REB": "Rebounds",
+            "AST": "Assists", "STL": "Steals", "BLK": "Blocks",
+            "TOV": "Turnovers", "FG3M": "Threes made",
+        }
+        h2h_rows = []
+        for column, label in labels.items():
+            if column in h2h_games.columns:
+                values = pd.to_numeric(
+                    h2h_games[column], errors="coerce"
+                ).dropna()
+                h2h_rows.append({
+                    "Stat": label,
+                    "Average": (
+                        round(float(values.mean()), 2)
+                        if not values.empty else None
+                    ),
+                    "Games with data": len(values),
+                })
         st.dataframe(
-            sample.head(20)[
-                [
-                    "GAME_DATE", "SEASON", "MATCHUP",
-                    "MIN", "VALUE",
-                ]
-            ],
+            pd.DataFrame(h2h_rows),
             hide_index=True,
+            use_container_width=True,
         )
+        seasons_shown = ", ".join(
+            sorted(h2h_games["SEASON"].dropna().unique())
+        )
+        st.caption(
+            f"{len(h2h_games)} H2H appearances · Seasons: {seasons_shown} · "
+            f"{h2h_games['GAME_DATE'].min():%Y-%m-%d} to "
+            f"{h2h_games['GAME_DATE'].max():%Y-%m-%d}. "
+            "Historical results against the team, not a specific defender."
+        )
+
+    render_history_graph(sample, h2h_games, card)
 
 
 # ---------------- APP HEADER ----------------
 
 st.title("🎯 Elite Individual Analytics Lab")
 st.caption("Real NBA market inventory · Historical research")
-
 st.sidebar.header("📡 Data connection")
 
 if st.secrets.get("ODDS_API_KEY", ""):
@@ -1288,9 +1200,8 @@ if "nba_history" in st.session_state:
 else:
     st.sidebar.info("Historical box scores: not loaded")
 
-st.sidebar.info(
-    "Player-card history: open Matchup & history to load"
-)
+st.sidebar.info("Player-card history: open View breakdown")
+st.sidebar.info("Availability: manual ESPN refresh")
 st.sidebar.info("P1/P2 projections: not connected")
 st.sidebar.info("ROI tracking: not connected")
 
@@ -1298,12 +1209,11 @@ st.sidebar.info("ROI tracking: not connected")
 # ---------------- NBA SCANNER ----------------
 
 st.subheader("🏀 NBA Pregame Scanner + Line Inventory")
-
 max_games = st.slider("Games to scan", 1, 5, 3)
-
 st.caption(
     f"Fresh scan uses up to {max_games + 2} API calls. "
-    "Odds are cached for 30 minutes."
+    "Odds are cached for 30 minutes. "
+    "Breakdown and availability buttons do not run this scan."
 )
 
 if st.button(
@@ -1311,20 +1221,15 @@ if st.button(
     use_container_width=True,
 ):
     try:
-        with st.spinner(
-            "Loading NBA fixtures and market lines..."
-        ):
+        with st.spinner("Loading NBA fixtures and market lines..."):
             games = upcoming_nba()[:max_games]
             all_rows, summaries, errors = [], [], []
-
             if not games:
                 st.warning(
-                    "No upcoming NBA games returned "
-                    "for the next three days."
+                    "No upcoming NBA games returned for the next three days."
                 )
             else:
                 catalog = market_catalog()
-
                 for game in games:
                     try:
                         rows, summary = decode_game(
@@ -1334,12 +1239,10 @@ if st.button(
                         )
                         all_rows.extend(rows)
                         summaries.extend(summary)
-
                     except ValueError as error:
                         errors.append(
                             f"{game.get('participant1Name', '?')} vs "
-                            f"{game.get('participant2Name', '?')}: "
-                            f"{error}"
+                            f"{game.get('participant2Name', '?')}: {error}"
                         )
 
             st.session_state["v4_rows"] = all_rows
@@ -1348,7 +1251,6 @@ if st.button(
             st.session_state["v4_scan_at"] = (
                 datetime.now(timezone.utc).isoformat()
             )
-
     except ValueError as error:
         st.error(str(error))
 
@@ -1360,7 +1262,6 @@ if "v4_rows" in st.session_state:
         st.warning(message)
 
     summary = st.session_state.get("v4_summary", [])
-
     if summary:
         with st.expander("Platform coverage"):
             st.dataframe(
@@ -1370,169 +1271,111 @@ if "v4_rows" in st.session_state:
             )
 
     rows = st.session_state["v4_rows"]
-
     if not rows:
-        st.info(
-            "No active named NBA player-prop outcomes returned."
-        )
+        st.info("No active named NBA player-prop outcomes returned.")
     else:
         df = pd.DataFrame(rows)
-
         group_keys = [
-            "Fixture ID", "Platform", "Player",
-            "Stat Key", "Period",
+            "Fixture ID", "Platform", "Player", "Stat Key", "Period",
         ]
-
         df["Distinct Thresholds"] = df.groupby(
             group_keys, dropna=False
         )["Line"].transform("nunique").astype(int)
-
-        df["Multiple Thresholds"] = (
-            df["Distinct Thresholds"] > 1
-        )
+        df["Multiple Thresholds"] = df["Distinct Thresholds"] > 1
 
         a, b, c = st.columns(3)
         a.metric("Active prop outcomes", len(df))
-        b.metric(
-            "Line + direction decoded",
-            int(df["Decoded"].sum()),
-        )
+        b.metric("Line + direction decoded", int(df["Decoded"].sum()))
         c.metric(
             "Tier explicitly verified",
             int((df["Line Type"] != "Unverified").sum()),
         )
-
         st.caption(
             "Last scan completed (UTC): "
             + st.session_state.get("v4_scan_at", "Unavailable")
-            + " · Source responses may be cached "
-            "for up to 30 minutes."
+            + " · Source responses may be cached for up to 30 minutes."
         )
 
-        platform = st.selectbox(
-            "Platform", ["All"] + list(BOOKS)
-        )
+        platform = st.selectbox("Platform", ["All"] + list(BOOKS))
         show = st.radio(
             "View",
             [
-                "All active props",
-                "Decoded only",
-                "Multiple thresholds",
-                "Unverified line types",
+                "All active props", "Decoded only",
+                "Multiple thresholds", "Unverified line types",
             ],
             horizontal=True,
         )
-
         filtered = (
-            df.copy()
-            if platform == "All"
+            df.copy() if platform == "All"
             else df[df["Platform"] == platform].copy()
         )
-
         if show == "Decoded only":
             filtered = filtered[filtered["Decoded"]]
         elif show == "Multiple thresholds":
-            filtered = filtered[
-                filtered["Multiple Thresholds"]
-            ]
+            filtered = filtered[filtered["Multiple Thresholds"]]
         elif show == "Unverified line types":
-            filtered = filtered[
-                filtered["Line Type"] == "Unverified"
-            ]
+            filtered = filtered[filtered["Line Type"] == "Unverified"]
 
         st.subheader("Player cards")
-
         search = st.text_input(
-            "Find a player",
-            placeholder="Type a player's name...",
+            "Find a player", placeholder="Type a player's name..."
         )
         stat_filter = st.selectbox(
             "Stat",
-            ["All"] + sorted(
-                filtered["Stat"].dropna().unique().tolist()
-            ),
+            ["All"] + sorted(filtered["Stat"].dropna().unique().tolist()),
         )
         tier_filter = st.selectbox(
             "Line type",
-            [
-                "All", "Standard", "Goblin",
-                "Demon", "Unverified",
-            ],
+            ["All", "Standard", "Goblin", "Demon", "Unverified"],
         )
-
         cards = filtered[filtered["Decoded"]].copy()
-
         if search.strip():
             cards = cards[
                 cards["Player"].str.contains(
-                    search.strip(),
-                    case=False,
-                    regex=False,
-                    na=False,
+                    search.strip(), case=False, regex=False, na=False
                 )
             ]
         if stat_filter != "All":
             cards = cards[cards["Stat"] == stat_filter]
         if tier_filter != "All":
-            cards = cards[
-                cards["Line Type"] == tier_filter
-            ]
+            cards = cards[cards["Line Type"] == tier_filter]
 
         card_keys = [
             "Fixture ID", "Platform", "Player ID",
             "Stat Key", "Period", "Line", "Line Type",
         ]
-
-        cards = cards.drop_duplicates(
-            card_keys
-        ).sort_values(["Player", "Stat", "Line"])
-
+        cards = cards.drop_duplicates(card_keys).sort_values(
+            ["Player", "Stat", "Line"]
+        )
         st.caption(
-            "Real historical research is available "
-            "in Matchup & history. "
+            "Historical research is available in View breakdown. "
             "Model recommendations and photos are pending."
         )
 
         total_pages = max(1, (len(cards) + 11) // 12)
-
         page = st.selectbox(
             "Page",
             range(1, total_pages + 1),
-            format_func=lambda number: (
-                f"{number} of {total_pages}"
-            ),
+            format_func=lambda number: f"{number} of {total_pages}",
         )
-        visible = cards.iloc[
-            (page - 1) * 12:page * 12
-        ]
-
+        visible = cards.iloc[(page - 1) * 12:page * 12]
         if visible.empty:
-            st.info(
-                "No decoded lines match these filters."
-            )
+            st.info("No decoded lines match these filters.")
 
         columns = st.columns(3)
-
         for index, (_, card) in enumerate(visible.iterrows()):
-            card_id = "|".join(
-                str(card[field]) for field in card_keys
-            )
-
+            card_id = "|".join(str(card[field]) for field in card_keys)
             with columns[index % 3]:
                 with st.container(border=True):
                     st.subheader(str(card["Player"]))
                     st.caption(str(card["Game"]))
-                    st.write(
-                        f"**{card['Stat']} · {card['Line']:g}**"
-                    )
+                    st.write(f"**{card['Stat']} · {card['Line']:g}**")
                     st.caption(
                         f"{str(card['Platform']).upper()} · "
-                        f"{card['Line Type']} · "
-                        f"Period: {card['Period']}"
+                        f"{card['Line Type']} · Period: {card['Period']}"
                     )
                     st.write("**Model pick:** Pending")
                     st.write("**Projection:** Unavailable")
-
                     if st.button(
                         "View breakdown",
                         key=f"breakdown_{card_id}",
@@ -1543,10 +1386,8 @@ if "v4_rows" in st.session_state:
                         )
 
         selected_card = st.session_state.get("selected_prop_card")
-
         if selected_card is not None:
             st.divider()
-
             with st.container(border=True):
                 st.subheader(
                     f"{selected_card['Player']} — Player breakdown"
@@ -1562,30 +1403,23 @@ if "v4_rows" in st.session_state:
                     "Model projections and pick explanations "
                     "are not connected yet."
                 )
-
-                render_card_history(selected_card)  
+                render_card_history(selected_card)
 
         with st.expander("View raw market data"):
             st.dataframe(
-                filtered.drop(
-                    columns=["Stat Key", "Period"]
-                ),
+                filtered.drop(columns=["Stat Key", "Period"]),
                 use_container_width=True,
                 hide_index=True,
             )
 
         with st.expander("Grouped threshold inventory"):
             grouped = (
-                df.groupby(
-                    group_keys + ["Game", "Stat"],
-                    dropna=False,
-                )
+                df.groupby(group_keys + ["Game", "Stat"], dropna=False)
                 .agg(
                     Thresholds=(
                         "Line",
                         lambda values: ", ".join(
-                            str(value)
-                            for value in sorted(
+                            str(value) for value in sorted(
                                 set(values.dropna())
                             )
                         ),
@@ -1594,17 +1428,13 @@ if "v4_rows" in st.session_state:
                     Active_Outcomes=("Player", "size"),
                     Explicit_Tiers=(
                         "Line Type",
-                        lambda values: ", ".join(
-                            sorted(set(values))
-                        ),
+                        lambda values: ", ".join(sorted(set(values))),
                     ),
                 )
                 .reset_index()
             )
             st.dataframe(
-                grouped,
-                use_container_width=True,
-                hide_index=True,
+                grouped, use_container_width=True, hide_index=True
             )
 
         st.download_button(
@@ -1613,7 +1443,6 @@ if "v4_rows" in st.session_state:
             file_name="nba_prop_inventory_v4.csv",
             mime="text/csv",
         )
-
         st.caption(
             "Zero or missing handicaps remain flagged for review. "
             "Multiple thresholds do not establish "
@@ -1626,13 +1455,13 @@ if "v4_rows" in st.session_state:
 
 st.divider()
 st.subheader("NBA historical stats")
-
 st.info(
-    "First load the discovery batch. Then scan lines and "
-    "expand a player card to load current and previous "
-    "season history. Saved ESPN responses use a local "
-    "SQLite cache. Streamlit can erase local files on "
-    "redeploy; external durable storage is still pending."
+    "First load the discovery batch. Then open a player breakdown "
+    "to load current and previous season history. "
+    "If no board has been scanned, the Scan button loads odds. "
+    "Saved ESPN responses use a local SQLite cache. Streamlit "
+    "can erase local files on redeploy; external durable storage "
+    "is still pending."
 )
 
 history_season = st.selectbox(
@@ -1643,50 +1472,39 @@ history_season = st.selectbox(
 
 if st.button("LOAD NBA DISCOVERY BATCH"):
     try:
-        with st.spinner(
-            "Requesting real NBA player game logs..."
-        ):
+        with st.spinner("Requesting real NBA player game logs..."):
             history = load_nba_player_logs(history_season)
-
         st.session_state["nba_history"] = history
         st.session_state["nba_history_season"] = history_season
-
     except Exception as error:
         st.session_state.pop("nba_history", None)
         st.session_state.pop("nba_history_season", None)
         st.error("NBA historical connection failed.")
         st.code(
-            f"{type(error).__name__}: {error}",
-            language="text",
+            f"{type(error).__name__}: {error}", language="text"
         )
         st.caption("No sample data was substituted.")
 
 if (
     "nba_history" in st.session_state
-    and st.session_state.get(
-        "nba_history_season"
-    ) == history_season
+    and st.session_state.get("nba_history_season") == history_season
 ):
     history = st.session_state["nba_history"]
     logs = history["logs"]
-
     st.success(
-        f"Loaded {len(logs):,} player-game records "
-        f"for {history_season}."
+        f"Loaded {len(logs):,} player-game records for {history_season}."
     )
     st.caption(
         "Source: ESPN · Seven-calendar-day discovery batch · "
         f"Regular season · Latest game returned: "
         f"{logs['GAME_DATE'].max():%Y-%m-%d} · "
-        f"Retrieved at (UTC): {history['retrieved_at']} · "
-        "Cache: 1 hour"
+        f"Retrieved at (UTC): {history['retrieved_at']} · Cache: 1 hour"
     )
     st.dataframe(
         logs[
             [
                 "PLAYER_NAME", "GAME_DATE", "MATCHUP", "MIN",
-                "PTS", "REB", "AST", "STL", "BLK", "TOV",
-                "FG3M",
+                "PTS", "REB", "AST", "STL", "BLK", "TOV", "FG3M",
             ]
         ].head(30),
         use_container_width=True,
@@ -1694,23 +1512,22 @@ if (
     )
     st.caption(
         "Showing 30 discovery records as a preview. "
-        "Open a player card to load its deeper history."
+        "Open a player breakdown to load deeper history."
     )
-
 
 with st.expander("What is connected and what remains"):
     st.write(
-        "Connected: NBA odds scanner, market decoding, "
-        "player cards, filters, historical research for "
-        "supported markets, grouped thresholds and CSV download."
+        "Connected: NBA odds scanner, market decoding, player cards, "
+        "filters, historical research for supported markets, "
+        "H2H averages, static game charts, manual ESPN roster and "
+        "injury checks, grouped thresholds and CSV download."
     )
     st.write(
-        "Load NBA discovery first, then load deeper history "
-        "inside a player card. Unmatched players and unsupported "
-        "markets remain unavailable."
+        "Unmatched players and unsupported markets remain unavailable. "
+        "Injury checks are not confirmed starting lineups."
     )
     st.write(
-        "Pending: photos, defensive rankings, injuries, "
+        "Pending: photos, defensive rankings, confirmed lineups, "
         "P1/P2 projections, NFL, fantasy scoring mappings, "
         "DraftKings lineup builders, saved picks, ROI audits "
         "and external durable storage."
