@@ -34,7 +34,7 @@ st.download_button(
             mime="text/csv",
         )
 
-st.caption(
+        st.caption(
             "Zero or missing handicaps remain flagged for review. "
             "Multiple thresholds do not establish Standard/Goblin/Demon "
             "classification. Market data is not a model recommendation."
