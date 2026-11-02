@@ -1121,6 +1121,7 @@ def render_history_graph(sample, h2h_games, card):
         "Pace, offensive/defensive efficiency, and league "
         "rankings are not connected yet."
     )
+    render_card_history(card):
     render_player_availability(card)
     st.markdown("#### Team scoring matchup")
 
