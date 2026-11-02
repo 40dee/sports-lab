@@ -939,10 +939,116 @@ def render_card_history(card):
                 "No selected-season appearances returned."
             )
 
-        st.bar_chart(
-            sample.head(20)
+                import html
+        import streamlit.components.v1 as components
+
+        chart_window = st.radio(
+            "Games to display",
+            [5, 10, 15, 20],
+            index=3,
+            horizontal=True,
+            key="player_history_chart_window",
+        )
+
+        chart_data = (
+            sample.sort_values("GAME_DATE", ascending=False)
+            .head(chart_window)
             .sort_values("GAME_DATE")
-            .set_index("GAME_DATE")["VALUE"]
+            .reset_index(drop=True)
+        )
+
+        prop_line = float(card["Line"])
+        chart_width = 1000
+        chart_height = 360
+        left, right, top, bottom = 55, 20, 35, 65
+        plot_width = chart_width - left - right
+        plot_height = chart_height - top - bottom
+
+        maximum = max(
+            float(chart_data["VALUE"].max()),
+            prop_line,
+            1.0,
+        ) * 1.2
+
+        def chart_y(value):
+            return top + plot_height * (1 - value / maximum)
+
+        svg = [
+            f'<svg xmlns="http://www.w3.org/2000/svg" '
+            f'viewBox="0 0 {chart_width} {chart_height}" '
+            'style="width:100%;height:100%;font-family:Arial">'
+        ]
+
+        for tick in range(5):
+            value = maximum * tick / 4
+            y = chart_y(value)
+            svg.append(
+                f'<line x1="{left}" y1="{y}" '
+                f'x2="{chart_width-right}" y2="{y}" '
+                'stroke="#d1d5db" stroke-width="1"/>'
+                f'<text x="{left-10}" y="{y+4}" '
+                'text-anchor="end" fill="#64748b" '
+                f'font-size="12">{value:g}</text>'
+            )
+
+        slot_width = plot_width / max(len(chart_data), 1)
+        bar_width = min(slot_width * 0.62, 55)
+
+        for index, row in chart_data.iterrows():
+            value = float(row["VALUE"])
+            center = left + slot_width * (index + 0.5)
+            y = chart_y(value)
+            height = max(chart_y(0) - y, 0)
+
+            color = (
+                "#16a34a" if value > prop_line
+                else "#dc2626" if value < prop_line
+                else "#94a3b8"
+            )
+
+            opponent = html.escape(
+                str(row["MATCHUP"]).split()[-1]
+            )
+            date_label = row["GAME_DATE"].strftime("%m/%d")
+
+            svg.append(
+                f'<rect x="{center-bar_width/2}" y="{y}" '
+                f'width="{bar_width}" height="{height}" '
+                f'fill="{color}" rx="3"/>'
+                f'<text x="{center}" y="{y-7}" '
+                'text-anchor="middle" fill="#475569" '
+                f'font-size="13">{value:g}</text>'
+                f'<text x="{center}" y="{chart_y(0)+22}" '
+                'text-anchor="middle" fill="#475569" '
+                f'font-size="12">{opponent}</text>'
+                f'<text x="{center}" y="{chart_y(0)+40}" '
+                'text-anchor="middle" fill="#64748b" '
+                f'font-size="10">{date_label}</text>'
+            )
+
+        line_y = chart_y(prop_line)
+        svg.append(
+            f'<line x1="{left}" y1="{line_y}" '
+            f'x2="{chart_width-right}" y2="{line_y}" '
+            'stroke="#2563eb" stroke-width="2" '
+            'stroke-dasharray="7,5"/>'
+            f'<text x="{chart_width-right}" y="{line_y-7}" '
+            'text-anchor="end" fill="#2563eb" '
+            f'font-size="13">Prop: {prop_line:g}</text>'
+        )
+        svg.append("</svg>")
+
+        components.html(
+            '<div style="height:360px;overflow:hidden">'
+            + "".join(svg)
+            + "</div>",
+            height=370,
+            scrolling=False,
+        )
+
+        st.caption(
+            f"Showing {len(chart_data)} games, oldest to newest. "
+            "Green: above line · Red: below line · Gray: tie."
         )
         st.caption(f"Comparison line: {card['Line']:g}")
 
