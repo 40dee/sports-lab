@@ -1193,7 +1193,7 @@ def render_team_advanced(card):
                 f"{type(error).__name__}: {error}",
                 language="text",
             )
-            )
+            
 
     result = st.session_state.get(state_key)
     if result is None:
