@@ -728,6 +728,63 @@ if st.button("CONNECT NBA GAME LOGS"):
         st.session_state["nba_history"] = history
         st.session_state["nba_history_season"] = history_season
 
+# NBA HISTORICAL DATA CONNECTION
+st.divider()
+st.subheader("NBA historical stats")
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_nba_player_logs(season):
+    from nba_api.stats.endpoints import leaguegamelog
+
+    logs = leaguegamelog.LeagueGameLog(
+        season=season,
+        season_type_all_star="Regular Season",
+        player_or_team_abbreviation="P",
+        timeout=30
+    ).get_data_frames()[0]
+
+    required = {
+        "PLAYER_ID", "PLAYER_NAME", "GAME_ID", "GAME_DATE",
+        "MATCHUP", "MIN", "PTS", "REB", "AST",
+        "STL", "BLK", "TOV", "FG3M"
+    }
+
+    if not required.issubset(logs.columns):
+        raise ValueError("NBA Stats returned an unexpected format.")
+
+    if logs.empty:
+        raise ValueError("No player game logs returned for this season.")
+
+    logs = logs.copy()
+    logs["GAME_DATE"] = pd.to_datetime(
+        logs["GAME_DATE"], errors="coerce"
+    )
+
+    if logs["GAME_DATE"].isna().any():
+        raise ValueError("Some game dates could not be read.")
+
+    logs = logs.drop_duplicates(["PLAYER_ID", "GAME_ID"])
+
+    return {
+        "logs": logs.sort_values("GAME_DATE", ascending=False),
+        "retrieved_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+history_season = st.selectbox(
+    "Historical season",
+    ["2026-27", "2025-26"],
+    key="history_season"
+)
+
+if st.button("CONNECT NBA GAME LOGS"):
+    try:
+        with st.spinner("Requesting real NBA player game logs..."):
+            history = load_nba_player_logs(history_season)
+
+        st.session_state["nba_history"] = history
+        st.session_state["nba_history_season"] = history_season
+
     except Exception:
         st.session_state.pop("nba_history", None)
         st.session_state.pop("nba_history_season", None)
@@ -736,6 +793,37 @@ if st.button("CONNECT NBA GAME LOGS"):
             "have timed out, been blocked, or returned an unexpected "
             "format. No sample data was substituted."
         )
+
+if (
+    "nba_history" in st.session_state
+    and st.session_state.get("nba_history_season") == history_season
+):
+    history = st.session_state["nba_history"]
+    logs = history["logs"]
+
+    st.success(
+        f"Loaded {len(logs):,} player-game records "
+        f"for {history_season}."
+    )
+
+    st.caption(
+        f"Source: NBA Stats · Regular season · "
+        f"Latest game returned: "
+        f"{logs['GAME_DATE'].max():%Y-%m-%d} · "
+        f"Retrieved at: {history['retrieved_at']} · "
+        f"Cache: 1 hour"
+    )
+
+    st.dataframe(
+        logs[
+            [
+                "PLAYER_NAME", "GAME_DATE", "MATCHUP", "MIN",
+                "PTS", "REB", "AST", "STL", "BLK", "TOV", "FG3M"
+            ]
+        ].head(30),
+        use_container_width=True,
+        hide_index=True
+    )
 
 if (
     "nba_history" in st.session_state
