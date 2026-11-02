@@ -1,4 +1,4 @@
-        with st.expander("Grouped threshold inventory"):
+with st.expander("Grouped threshold inventory"):
             grouped = (
                 df.groupby(
                     group_keys + ["Game", "Stat"],
