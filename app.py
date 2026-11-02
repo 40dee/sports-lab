@@ -27,14 +27,14 @@ with st.expander("Grouped threshold inventory"):
                 hide_index=True,
             )
 
-st.download_button(
+        st.download_button(
             "Download decoded inventory CSV",
             data=df.to_csv(index=False).encode("utf-8"),
             file_name="nba_prop_inventory_v4.csv",
             mime="text/csv",
         )
 
-st.caption(
+        st.caption(
             "Zero or missing handicaps remain flagged for review. "
             "Multiple thresholds do not establish Standard/Goblin/Demon "
             "classification. Market data is not a model recommendation."
