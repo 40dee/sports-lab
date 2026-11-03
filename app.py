@@ -1,4 +1,2672 @@
-"""Sports Lab: real NBA odds and historical research."""
+"""NBA workflow: durable records, forecasts, directional audits and paper ROI.
+No function in this section requests OddsPAPI or places an order.
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+import hashlib
+import json
+import math
+import os
+import sqlite3
+import time
+from datetime import datetime, timezone
+from decimal import Decimal, ROUND_CEILING
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def encode(value):
+    return json.dumps(
+        value,
+        default=str,
+        sort_keys=True,
+        allow_nan=False,
+    )
+
+
+def identity(card):
+    fields = (
+        "Fixture ID",
+        "Platform",
+        "Player",
+        "Stat Key",
+        "Period",
+        "Line",
+        "Line Type",
+    )
+    values = [str(card.get(field)) for field in fields]
+    return hashlib.sha256(encode(values).encode()).hexdigest()
+
+
+class Store:
+    """Use PostgreSQL when configured; otherwise use local SQLite."""
+
+    def __init__(
+        self,
+        path="sports_lab_workflow.sqlite3",
+        url=None,
+    ):
+        self.path = str(path)
+        self.url = url or os.getenv("DATABASE_URL", "")
+        self.remote = bool(self.url)
+
+        with self.connection() as con:
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS sports_records ("
+                "namespace TEXT NOT NULL, "
+                "key TEXT NOT NULL, "
+                "payload TEXT NOT NULL, "
+                "updated TEXT NOT NULL, "
+                "PRIMARY KEY(namespace,key))"
+            )
+
+    @contextmanager
+    def connection(self):
+        if self.remote:
+            import psycopg
+
+            con = psycopg.connect(
+                self.url,
+                connect_timeout=10,
+            )
+        else:
+            con = sqlite3.connect(
+                self.path,
+                timeout=30,
+            )
+            con.execute("PRAGMA busy_timeout=30000")
+
+        try:
+            yield con
+            con.commit()
+        except Exception:
+            con.rollback()
+            raise
+        finally:
+            con.close()
+
+    def query(self, sql, values=(), fetch=False):
+        with self.connection() as con:
+            statement = (
+                sql.replace("?", "%s")
+                if self.remote
+                else sql
+            )
+            cursor = con.execute(statement, values)
+            return cursor.fetchall() if fetch else None
+
+    def put(
+        self,
+        namespace,
+        key,
+        value,
+        immutable=False,
+    ):
+        suffix = (
+            "DO NOTHING"
+            if immutable
+            else (
+                "DO UPDATE SET "
+                "payload=excluded.payload, "
+                "updated=excluded.updated"
+            )
+        )
+
+        self.query(
+            "INSERT INTO sports_records VALUES (?,?,?,?) "
+            "ON CONFLICT(namespace,key) " + suffix,
+            (
+                namespace,
+                key,
+                encode(value),
+                now(),
+            ),
+        )
+
+    def get(self, namespace, key, default=None):
+        rows = self.query(
+            "SELECT payload FROM sports_records "
+            "WHERE namespace=? AND key=?",
+            (namespace, key),
+            True,
+        )
+        return json.loads(rows[0][0]) if rows else default
+
+    def items(self, namespace):
+        rows = self.query(
+            "SELECT key,payload FROM sports_records "
+            "WHERE namespace=? ORDER BY updated,key",
+            (namespace,),
+            True,
+        )
+        return [
+            (key, json.loads(payload))
+            for key, payload in rows
+        ]
+
+    def export(self):
+        rows = self.query(
+            "SELECT namespace,key,payload,updated "
+            "FROM sports_records ORDER BY namespace,key",
+            fetch=True,
+        )
+
+        return encode({
+            "format": "sports-lab-workspace-v2",
+            "records": [list(row) for row in rows],
+        })
+
+    def restore(self, value):
+        if (
+            value.get("format") != "sports-lab-workspace-v2"
+            or not isinstance(value.get("records"), list)
+        ):
+            raise ValueError("Unsupported workspace backup.")
+
+        allowed = {
+            "board",
+            "forecast",
+            "grade",
+            "model",
+            "model_review",
+            "ticket",
+            "maintenance",
+            "legacy",
+            "source",
+            "paper_forecast",
+            "paper_settlement",
+        }
+
+        checked = []
+
+        for row in value["records"]:
+            if (
+                not isinstance(row, list)
+                or len(row) != 4
+                or row[0] not in allowed
+            ):
+                raise ValueError("Invalid backup row.")
+
+            namespace, key, payload, stamp = row
+
+            if (
+                not all(isinstance(item, str) for item in row)
+                or len(key) > 300
+            ):
+                raise ValueError("Invalid backup fields.")
+
+            parsed = json.loads(payload)
+
+            if not isinstance(parsed, dict):
+                raise ValueError("Invalid record payload.")
+
+            pd.to_datetime(
+                stamp,
+                utc=True,
+                errors="raise",
+            )
+
+            checked.append((
+                namespace,
+                key,
+                encode(parsed),
+                stamp,
+            ))
+
+        with self.connection() as con:
+            sql = (
+                "INSERT INTO sports_records VALUES (?,?,?,?) "
+                "ON CONFLICT(namespace,key) DO NOTHING"
+            )
+
+            if self.remote:
+                sql = sql.replace("?", "%s")
+
+            for row in checked:
+                con.execute(sql, row)
+
+        return len(checked)
+
+
+def fee_estimate(
+    price,
+    count,
+    multiplier,
+    precision="0.0001",
+):
+    """Estimate one all-taker fill with explicit balance rounding."""
+
+    price = Decimal(str(price))
+    count = Decimal(str(count))
+    multiplier = Decimal(str(multiplier))
+    grid = Decimal(precision)
+
+    if not all(
+        value.is_finite()
+        for value in (price, count, multiplier, grid)
+    ):
+        raise ValueError("Fee inputs must be finite.")
+
+    if (
+        not 0 < price < 1
+        or count <= 0
+        or count != count.to_integral_value()
+        or multiplier < 0
+        or grid not in (Decimal(".0001"), Decimal(".01"))
+    ):
+        raise ValueError("Invalid fee inputs.")
+
+    trade_fee = (
+        multiplier
+        * Decimal(".07")
+        * count
+        * price
+        * (1 - price)
+    ).quantize(
+        Decimal(".000001"),
+        rounding=ROUND_CEILING,
+    )
+
+    cost = count * price
+
+    total = (
+        ((cost + trade_fee) / grid)
+        .to_integral_value(rounding=ROUND_CEILING)
+        * grid
+    )
+
+    return {
+        "fee": float(total - cost),
+        "total": float(total),
+        "break_even": float(total / count),
+    }
+
+
+def kalshi_fee_metadata(fetch, ticker):
+    market = fetch("markets/" + ticker).get("market", {})
+
+    if (
+        market.get("ticker") != ticker
+        or not market.get("event_ticker")
+    ):
+        raise ValueError(
+            "Exact contract event could not be verified."
+        )
+
+    event_ticker = market["event_ticker"]
+    series_ticker = ticker.split("-", 1)[0]
+
+    metadata = fetch(
+        "series/" + series_ticker
+    ).get("series", {})
+
+    if metadata.get("ticker") != series_ticker:
+        raise ValueError(
+            "Series fees could not be verified."
+        )
+
+    kind = metadata.get("fee_type")
+    multiplier = metadata.get("fee_multiplier")
+    changes = []
+    cursor = ""
+
+    for _ in range(20):
+        params = {
+            "event_ticker": event_ticker,
+            "limit": 1000,
+        }
+
+        if cursor:
+            params["cursor"] = cursor
+
+        page = fetch("events/fee_changes", params)
+
+        if not isinstance(
+            page.get("event_fee_changes"),
+            list,
+        ):
+            raise ValueError(
+                "Event fee overrides could not be verified."
+            )
+
+        changes.extend(
+            change
+            for change in page["event_fee_changes"]
+            if change.get("event_ticker") == event_ticker
+        )
+
+        cursor = page.get("cursor", "")
+
+        if not cursor:
+            break
+
+    if cursor:
+        raise ValueError(
+            "Event fee pagination incomplete."
+        )
+
+    effective = [
+        change
+        for change in changes
+        if pd.to_datetime(
+            change["scheduled_ts"],
+            utc=True,
+        ) <= pd.Timestamp.now(tz="UTC")
+    ]
+
+    if effective:
+        latest = max(
+            effective,
+            key=lambda change: pd.to_datetime(
+                change["scheduled_ts"],
+                utc=True,
+            ),
+        )
+
+        kind = latest.get("fee_type_override") or kind
+
+        if latest.get("fee_multiplier_override") is not None:
+            multiplier = latest["fee_multiplier_override"]
+
+    if (
+        kind not in (
+            "quadratic",
+            "quadratic_with_maker_fees",
+        )
+        or multiplier is None
+    ):
+        raise ValueError("This fee model is not mapped.")
+
+    if (
+        not math.isfinite(float(multiplier))
+        or float(multiplier) < 0
+    ):
+        raise ValueError("Invalid fee multiplier.")
+
+    return {
+        "type": kind,
+        "multiplier": float(multiplier),
+        "checked_at": now(),
+    }
+
+
+def completed_actual(summary, player_id, columns):
+    header = summary.get("header", {})
+    competitions = header.get("competitions", [])
+
+    if (
+        len(competitions) != 1
+        or not competitions[0]
+        .get("status", {})
+        .get("type", {})
+        .get("completed")
+    ):
+        return None
+
+    appearances = []
+
+    for group in summary.get("boxscore", {}).get("players", []):
+        for section in group.get("statistics", []):
+            labels = section.get("labels", [])
+
+            for athlete in section.get("athletes", []):
+                returned_id = (
+                    athlete.get("athlete", {}).get("id")
+                )
+
+                if str(returned_id) != str(player_id):
+                    continue
+
+                if athlete.get("didNotPlay"):
+                    appearances.append({
+                        "status": "DNP",
+                        "actual": None,
+                    })
+                    continue
+
+                values = athlete.get("stats", [])
+
+                if len(labels) != len(values):
+                    continue
+
+                stats = dict(zip(labels, values))
+                minute_parts = str(
+                    stats.get("MIN", "")
+                ).split(":")
+
+                try:
+                    minutes = float(minute_parts[0])
+
+                    if len(minute_parts) == 2:
+                        minutes += float(minute_parts[1]) / 60
+
+                    if minutes <= 0:
+                        appearances.append({
+                            "status": "DNP",
+                            "actual": None,
+                        })
+                        continue
+
+                    numeric = {}
+
+                    for column in columns:
+                        source_column = {
+                            "TOV": "TO",
+                            "FG3M": "3PT",
+                        }.get(column, column)
+
+                        raw = stats.get(source_column)
+
+                        if column == "FG3M":
+                            raw = str(raw).split("-")[0]
+
+                        number = float(raw)
+
+                        if (
+                            not math.isfinite(number)
+                            or number < 0
+                        ):
+                            raise ValueError("Missing stat.")
+
+                        numeric[column] = number
+
+                    appearances.append({
+                        "status": "FINAL",
+                        "actual": sum(numeric.values()),
+                        "minutes": minutes,
+                        "stats": numeric,
+                    })
+
+                except (ValueError, TypeError):
+                    continue
+
+    unique = {
+        encode(appearance): appearance
+        for appearance in appearances
+    }
+
+    return (
+        next(iter(unique.values()))
+        if len(unique) == 1
+        else None
+    )
+
+
+class Workflow:
+    def __init__(self, engine, store):
+        self.e = engine
+        self.store = store
+
+    def event_for(self, card):
+        start = pd.to_datetime(
+            card["Start (UTC)"],
+            utc=True,
+        )
+
+        date = start.tz_convert(
+            "America/New_York"
+        ).strftime("%Y%m%d")
+
+        board = self.e["saved_fetch"](
+            self.e["ESPN_BASE"] + "scoreboard",
+            {"dates": date},
+            ttl_seconds=300,
+        )
+
+        team_key = self.e["engine_team_key"]
+
+        wanted = {
+            team_key(name)
+            for name in str(card["Game"]).split(" vs ")
+        }
+
+        events = []
+
+        for event in board.get("events", []):
+            stamp = pd.to_datetime(
+                event.get("date"),
+                utc=True,
+                errors="coerce",
+            )
+
+            if (
+                pd.isna(stamp)
+                or abs((stamp - start).total_seconds()) > 900
+            ):
+                continue
+
+            for competition in event.get("competitions", []):
+                competitors = competition.get(
+                    "competitors",
+                    [],
+                )
+
+                returned_teams = {
+                    team_key(
+                        item.get("team", {}).get(
+                            "displayName",
+                            "",
+                        )
+                    )
+                    for item in competitors
+                }
+
+                if (
+                    len(competitors) == 2
+                    and returned_teams == wanted
+                ):
+                    events.append((event, competition))
+
+        if len(events) != 1:
+            raise ValueError(
+                "No unique ESPN fixture matches "
+                "the teams and start time."
+            )
+
+        return events[0]
+
+    def player(self, card):
+        team_key = self.e["engine_team_key"]
+        normalize = self.e["normalize_player"]
+
+        names = {
+            team_key(name)
+            for name in card["Game"].split(" vs ")
+        }
+
+        teams = [
+            team
+            for team in self.e["espn_teams"]()
+            if team_key(team["displayName"]) in names
+        ]
+
+        if len(teams) != 2:
+            raise ValueError(
+                "Matchup team identities are unavailable."
+            )
+
+        matches = []
+
+        for team in teams:
+            url = (
+                self.e["ESPN_BASE"]
+                + f"teams/{team['id']}/roster"
+            )
+
+            roster = self.e["saved_fetch"](
+                url,
+                {},
+                ttl_seconds=300,
+            )
+
+            for athlete in roster.get("athletes", []):
+                if normalize(
+                    athlete.get("displayName", "")
+                ) == normalize(card["Player"]):
+                    matches.append((
+                        team,
+                        athlete,
+                        self.e["cached_response_time"](
+                            url,
+                            {},
+                        ),
+                    ))
+
+        if len(matches) != 1:
+            raise ValueError(
+                "Player does not uniquely match "
+                "a current matchup roster."
+            )
+
+        return matches[0]
+
+    def availability(self, player_id, team_id):
+        try:
+            url = self.e["ESPN_BASE"] + "injuries"
+
+            data = self.e["saved_fetch"](
+                url,
+                {},
+                ttl_seconds=60,
+            )
+
+            if not isinstance(data.get("injuries"), list):
+                raise ValueError("Invalid injury feed.")
+
+            entries = []
+
+            for group in data["injuries"]:
+                for injury in group.get("injuries", []):
+                    returned_id = (
+                        injury.get("athlete", {}).get("id")
+                    )
+
+                    if str(returned_id) == str(player_id):
+                        entries.append(injury)
+
+            return {
+                "entries": entries,
+                "checked_at": now(),
+                "fetched_at": self.e[
+                    "cached_response_time"
+                ](url, {}),
+                "available": True,
+            }
+
+        except Exception:
+            return {
+                "entries": [],
+                "available": False,
+                "checked_at": now(),
+            }
+
+    def enrich(
+        self,
+        result,
+        history,
+        card,
+        player,
+        event_id,
+        context,
+        availability,
+    ):
+        result = dict(result)
+
+        if any(
+            str(entry.get("status", "")).lower()
+            in ("out", "suspended")
+            for entry in availability.get("entries", [])
+        ):
+            raise ValueError(
+                "Player is listed out or suspended; "
+                "no playable projection."
+            )
+
+        components = result["components"]
+
+        weights = self.e.get(
+            "fantasy_weights",
+            lambda record: None,
+        )(card) or {}
+
+        baseline = sum(
+            float(component["Expected minutes"])
+            * float(component["Per minute"])
+            * weights.get(component["Stat"], 1.0)
+            for component in components
+        )
+
+        adjusted = float(result["projection"])
+
+        stat_key = (
+            "PrizePicks Fantasy"
+            if weights
+            else "+".join(sorted(
+                self.e["market_columns"](card)
+            ))
+        )
+
+        model = self.store.get(
+            "model",
+            stat_key,
+            {
+                "alpha": 1.0,
+                "version": "initial-v1",
+            },
+        )
+
+        alpha = float(model["alpha"])
+
+        forecast = max(
+            0.0,
+            baseline + alpha * (adjusted - baseline),
+        )
+
+        line = float(card["Line"])
+
+        result.update(
+            baseline=baseline,
+            matchup_projection=adjusted,
+            projection=forecast,
+            direction="MORE" if forecast > line else "LESS",
+            gap=forecast - line,
+            tie=abs(forecast - line) < 1e-9,
+            learning_model=model,
+            stat_group=stat_key,
+            event_id=str(event_id),
+            player_id=str(player["id"]),
+            game_context=context,
+            availability=availability,
+        )
+
+        columns = self.e["market_columns"](card)
+
+        sample = history.copy()
+        sample["GAME_DATE"] = pd.to_datetime(
+            sample["GAME_DATE"],
+            utc=True,
+        )
+
+        current = sample[
+            (
+                sample["SEASON"]
+                == self.e["current_season"]()
+            )
+            & (
+                sample["GAME_DATE"]
+                < pd.Timestamp.now(tz="UTC")
+            )
+        ].sort_values(
+            "GAME_DATE",
+            ascending=False,
+        ).head(15)
+
+        if "score_frame" in self.e:
+            values = self.e["score_frame"](
+                current,
+                card,
+            ).dropna()
+        else:
+            values = current[columns].apply(
+                pd.to_numeric,
+                errors="coerce",
+            ).sum(
+                axis=1,
+                min_count=len(columns),
+            ).dropna()
+
+        spread = (
+            float(values.std(ddof=1))
+            if len(values) > 1
+            else 0.0
+        )
+
+        result["standardized_gap"] = (
+            abs(result["gap"]) / spread
+            if spread > 1e-9
+            else None
+        )
+
+        result["historical_more_rate"] = (
+            float((values > line).mean())
+            if len(values)
+            else None
+        )
+
+        result["ranking_games"] = len(values)
+
+        # Experimental estimate, saved before the game.
+        # The calibration audit measures its actual hit rate.
+        if len(values) >= 3:
+            shifted = (
+                values
+                - float(values.mean())
+                + forecast
+            )
+
+            above = int((shifted > line).sum())
+            below = int((shifted < line).sum())
+
+            wins = (
+                above
+                if result["direction"] == "MORE"
+                else below
+            )
+
+            result["estimated_hit_probability"] = (
+                (wins + 1)
+                / (above + below + 2)
+            )
+
+            result["probability_sample_games"] = len(values)
+
+            result["probability_method"] = (
+                "experimental-centered-history-v1"
+            )
+
+            result["probability_note"] = (
+                "Uncalibrated shifted recent-game distribution; "
+                "conditional on playing and no tie. "
+                "Saved before the game. The percentage tracker "
+                "measures how these estimates actually perform."
+            )
+
+        for source_field in (
+            "advanced",
+            "position_data",
+            "games",
+        ):
+            source_value = result.get(source_field)
+
+            if source_value is not None:
+                source_id = hashlib.sha256(
+                    encode(source_value).encode()
+                ).hexdigest()
+
+                self.store.put(
+                    "source",
+                    source_id,
+                    {"data": source_value},
+                    immutable=True,
+                )
+
+                result[source_field] = {
+                    "source_ref": source_id,
+                }
+
+        result["warnings"] = list(
+            result.get("warnings", [])
+        )
+
+        if not availability["available"]:
+            result["warnings"].append(
+                "Injury report unavailable; "
+                "playing status is unverified."
+            )
+
+        elif availability["entries"]:
+            statuses = ", ".join(
+                str(entry.get("status", "Unknown"))
+                for entry in availability["entries"]
+            )
+
+            result["warnings"].append(
+                "Injury designation: " + statuses
+            )
+
+        result["warnings"].append(
+            "Blowout spread is context. No arbitrary minutes "
+            "deduction is applied; injured teammate usage and "
+            "minutes restrictions require verified inputs."
+        )
+
+        result["selection_allowed"] = not (
+            card.get("Platform") == "prizepicks"
+            and card.get("Line Type") in ("Goblin", "Demon")
+            and result["direction"] == "LESS"
+        )
+
+        if not result["selection_allowed"]:
+            result["warnings"].append(
+                "LESS is not selectable on this PrizePicks "
+                "tier. This is a directional forecast, "
+                "not an eligible entry."
+            )
+
+        return result
+
+    def freeze(
+        self,
+        card,
+        result,
+        season,
+        snapshot=None,
+    ):
+        event, competition = self.event_for(card)
+
+        start = pd.to_datetime(
+            card["Start (UTC)"],
+            utc=True,
+        )
+
+        state = competition.get(
+            "status",
+            event.get("status", {}),
+        ).get("type", {}).get("state")
+
+        if (
+            start <= pd.Timestamp.now(tz="UTC")
+            or state != "pre"
+        ):
+            raise ValueError(
+                "Fixture is no longer pregame; "
+                "no new record saved."
+            )
+
+        key = identity(card)
+
+        value = {
+            "id": key,
+            "created_at": now(),
+            "card": dict(card),
+            "season": season,
+            "result": result,
+            "event_id": str(event["id"]),
+            "snapshot": snapshot or {},
+            "odds_scan_at": self.e[
+                "st"
+            ].session_state.get("v4_scan_at"),
+        }
+
+        self.store.put(
+            "forecast",
+            key,
+            value,
+            immutable=True,
+        )
+
+        frozen = self.store.get("forecast", key)
+        self.record_paper_forecast(frozen)
+
+        return frozen
+
+    def calculate(self, card, season):
+        event, competition = self.event_for(card)
+
+        state = competition.get(
+            "status",
+            event.get("status", {}),
+        ).get("type", {}).get("state")
+
+        if state != "pre":
+            raise ValueError(
+                "Fixture is no longer pregame."
+            )
+
+        team, player, roster_time = self.player(card)
+
+        availability = self.availability(
+            player["id"],
+            team["id"],
+        )
+
+        statuses = {
+            str(entry.get("status", "")).strip().lower()
+            for entry in availability["entries"]
+        }
+
+        if statuses & {"out", "suspended"}:
+            raise ValueError(
+                "Player is listed out or suspended; "
+                "no playable projection."
+            )
+
+        history = self.e["fetch_player_history"](
+            str(player["id"]),
+            player["displayName"],
+            season,
+        )
+
+        position, evidence = self.e["engine_position"](
+            team,
+            player,
+            season,
+        )
+
+        optional = []
+
+        for name, arguments in (
+            ("load_team_advanced", (season,)),
+            ("load_position_defense", ()),
+        ):
+            try:
+                optional.append(
+                    self.e[name](*arguments)
+                )
+            except Exception:
+                optional.append(None)
+
+        result = self.e["calculate_player_projection"](
+            history,
+            card,
+            season,
+            team["displayName"],
+            position,
+            *optional,
+        )
+
+        context = self.e["engine_game_context"](card)
+
+        result = self.enrich(
+            result,
+            history,
+            card,
+            player,
+            event["id"],
+            context,
+            availability,
+        )
+
+        result["position_evidence"] = evidence
+        result["market"] = self.e["engine_no_vig"](card)
+
+        if card.get("Platform") == "kalshi":
+            try:
+                result["kalshi"] = self.e[
+                    "native_kalshi_quote"
+                ](card)
+            except Exception as error:
+                result["kalshi"] = {
+                    "available": False,
+                    "reason": str(error),
+                }
+
+        return self.freeze(
+            card,
+            result,
+            season,
+            {
+                "roster": player,
+                "roster_fetched_at": roster_time,
+            },
+        )
+
+    def board(self, rows, season, progress=None):
+        unique = {
+            identity(card): card
+            for card in rows
+            if card.get("Decoded")
+        }
+
+        outcomes = []
+
+        for index, (key, card) in enumerate(unique.items()):
+            try:
+                saved = self.store.get(
+                    "forecast",
+                    key,
+                )
+
+                value = saved or self.calculate(card, season)
+                result = value["result"]
+
+                future = (
+                    pd.to_datetime(
+                        card["Start (UTC)"],
+                        utc=True,
+                    )
+                    > pd.Timestamp.now(tz="UTC")
+                )
+
+                outcomes.append({
+                    "Player": card["Player"],
+                    "Platform": card["Platform"],
+                    "Stat": card["Stat"],
+                    "Line": float(card["Line"]),
+                    "Pick": result["direction"],
+                    "Projection": result["projection"],
+                    "Ranking score": result.get(
+                        "standardized_gap"
+                    ),
+                    "Games": result.get("ranking_games"),
+                    "Start (UTC)": card["Start (UTC)"],
+                    "Forecast ID": key,
+                    "Eligible side": result.get(
+                        "selection_allowed",
+                        True,
+                    ),
+                    "Status": (
+                        "Frozen"
+                        if future
+                        else "Started / historical forecast"
+                    ),
+                })
+
+            except Exception as error:
+                outcomes.append({
+                    "Player": card["Player"],
+                    "Platform": card["Platform"],
+                    "Stat": card["Stat"],
+                    "Line": card["Line"],
+                    "Status": str(error),
+                    "Forecast ID": key,
+                })
+
+            if progress:
+                progress(
+                    (index + 1) / max(1, len(unique))
+                )
+
+        return outcomes
+
+    def grade(self, limit=100, time_budget=120):
+        counts = {
+            "graded": 0,
+            "pending": 0,
+            "errors": 0,
+            "DNP": 0,
+        }
+
+        settled = {
+            key
+            for key, _ in self.store.items("grade")
+        }
+
+        pending = [
+            (key, frozen)
+            for key, frozen in self.store.items("forecast")
+            if key not in settled
+        ]
+
+        future = [
+            (key, frozen)
+            for key, frozen in pending
+            if pd.to_datetime(
+                frozen["card"]["Start (UTC)"],
+                utc=True,
+            ) > pd.Timestamp.now(tz="UTC")
+        ]
+
+        counts["pending"] = len(future)
+
+        future_ids = {
+            key
+            for key, _ in future
+        }
+
+        pending = [
+            (key, frozen)
+            for key, frozen in pending
+            if key not in future_ids
+        ]
+
+        began = time.monotonic()
+
+        for key, frozen in pending[:limit]:
+            if time.monotonic() - began > time_budget:
+                break
+
+            try:
+                card = frozen["card"]
+                result = frozen["result"]
+
+                start = pd.to_datetime(
+                    card["Start (UTC)"],
+                    utc=True,
+                )
+
+                created = pd.to_datetime(
+                    frozen["created_at"],
+                    utc=True,
+                )
+
+                if created >= start:
+                    raise ValueError(
+                        "Not a pregame forecast."
+                    )
+
+                if start > pd.Timestamp.now(tz="UTC"):
+                    counts["pending"] += 1
+                    continue
+
+                event_id = str(frozen["event_id"])
+
+                summary = self.e["saved_fetch"](
+                    self.e["ESPN_BASE"] + "summary",
+                    {"event": event_id},
+                    ttl_seconds=300,
+                )
+
+                returned_event = summary.get(
+                    "header",
+                    {},
+                ).get("id")
+
+                if str(returned_event) != event_id:
+                    raise ValueError(
+                        "Wrong game response."
+                    )
+
+                actual = completed_actual(
+                    summary,
+                    result["player_id"],
+                    self.e["market_columns"](card),
+                )
+
+                if actual is None:
+                    counts["pending"] += 1
+                    continue
+
+                weights = self.e.get(
+                    "fantasy_weights",
+                    lambda record: None,
+                )(card)
+
+                if (
+                    weights
+                    and actual.get("status") == "FINAL"
+                ):
+                    actual["actual"] = sum(
+                        actual["stats"][column] * weight
+                        for column, weight in weights.items()
+                    )
+
+                outcome = "DNP"
+
+                if actual["status"] == "FINAL":
+                    difference = (
+                        actual["actual"]
+                        - float(card["Line"])
+                    )
+
+                    if abs(difference) < 1e-9:
+                        outcome = "TIE"
+                    else:
+                        correct = (
+                            (difference > 0)
+                            == (result["direction"] == "MORE")
+                        )
+                        outcome = "WIN" if correct else "LOSS"
+
+                grade = dict(
+                    actual,
+                    outcome=outcome,
+                    graded_at=now(),
+                    event_id=event_id,
+                    note=(
+                        "Directional research grade; "
+                        "platform settlement and priced "
+                        "paper ROI are separate."
+                    ),
+                )
+
+                self.store.put(
+                    "grade",
+                    key,
+                    grade,
+                    immutable=True,
+                )
+
+                counter = (
+                    "DNP"
+                    if outcome == "DNP"
+                    else "graded"
+                )
+                counts[counter] += 1
+
+            except Exception:
+                counts["errors"] += 1
+
+        return counts
+
+    def record_paper_forecast(self, frozen):
+        key = frozen["id"]
+
+        if self.store.get(
+            "paper_forecast",
+            key,
+        ) is not None:
+            return
+
+        result = frozen["result"]
+        card = frozen["card"]
+
+        record = {
+            "forecast_id": key,
+            "platform": card.get("Platform"),
+            "created_at": now(),
+            "direction": result["direction"],
+            "priced": False,
+            "policy": "model-paper-v1",
+            "reason": (
+                "No verified matching price captured "
+                "at forecast time."
+            ),
+        }
+
+        if (
+            not result.get("selection_allowed", True)
+            or result.get("tie")
+        ):
+            record["reason"] = (
+                "Model side is not selectable on this tier, "
+                "or projection equals the line."
+            )
+
+        elif card.get("Platform") == "prizepicks":
+            record["reason"] = (
+                "Single-pick unit benchmark only. "
+                "PrizePicks entry ROI requires a frozen "
+                "multi-pick entry and its payout rules."
+            )
+
+        elif (
+            pd.Timestamp.now(tz="UTC")
+            - pd.to_datetime(
+                frozen["created_at"],
+                utc=True,
+            )
+        ).total_seconds() > 60:
+            record["reason"] = (
+                "Original forecast is older; "
+                "no new price is retrofitted to it."
+            )
+
+        else:
+            try:
+                if card.get("Platform") == "draftkings":
+                    scan = pd.to_datetime(
+                        frozen.get("odds_scan_at"),
+                        utc=True,
+                        errors="coerce",
+                    )
+
+                    created = pd.to_datetime(
+                        frozen["created_at"],
+                        utc=True,
+                    )
+
+                    if (
+                        pd.isna(scan)
+                        or not 0 <= (
+                            created - scan
+                        ).total_seconds() <= 1800
+                    ):
+                        raise ValueError(
+                            "Odds snapshot was missing or "
+                            "over 30 minutes old at freeze time."
+                        )
+
+                    market = result.get("market") or {}
+
+                    price_field = (
+                        "over_price"
+                        if result["direction"] == "MORE"
+                        else "under_price"
+                    )
+
+                    price = float(market[price_field])
+
+                    if (
+                        not math.isfinite(price)
+                        or abs(price) < 100
+                    ):
+                        raise ValueError(
+                            "Invalid American odds."
+                        )
+
+                    profit = (
+                        price / 100
+                        if price > 0
+                        else 100 / abs(price)
+                    )
+
+                    record.update(
+                        priced=True,
+                        stake=1.0,
+                        fees=0.0,
+                        win_payout=1 + profit,
+                        american_odds=price,
+                        price_captured_at=frozen[
+                            "odds_scan_at"
+                        ],
+                        reason=(
+                            "Flat $1 hypothetical straight prop; "
+                            "recorded sportsbook price, with "
+                            "no-vig used only as separate context."
+                        ),
+                    )
+
+                elif card.get("Platform") == "kalshi":
+                    quote = result.get("kalshi") or {}
+
+                    side = (
+                        "yes"
+                        if result["direction"] == "MORE"
+                        else "no"
+                    )
+
+                    prices = [
+                        row
+                        for row in quote.get("quotes", [])
+                        if str(
+                            row.get("Contract", "")
+                        ).lower() == side
+                    ]
+
+                    if len(prices) != 1:
+                        raise ValueError(
+                            "No unique matching contract ask."
+                        )
+
+                    stamp = pd.to_datetime(
+                        quote["read_at"],
+                        utc=True,
+                    )
+
+                    created = pd.to_datetime(
+                        frozen["created_at"],
+                        utc=True,
+                    )
+
+                    if not 0 <= (
+                        created - stamp
+                    ).total_seconds() <= 120:
+                        raise ValueError(
+                            "Contract quote is too old "
+                            "for the paper entry."
+                        )
+
+                    price = float(
+                        prices[0]["Ask ($ / contract)"]
+                    )
+
+                    fetch = self.e["kalshi_public"]
+
+                    metadata = kalshi_fee_metadata(
+                        fetch,
+                        quote["ticker"],
+                    )
+
+                    estimate = fee_estimate(
+                        price,
+                        1,
+                        metadata["multiplier"],
+                        ".0001",
+                    )
+
+                    book = fetch(
+                        "markets/"
+                        + quote["ticker"]
+                        + "/orderbook"
+                    ).get("orderbook_fp", {})
+
+                    opposite = (
+                        "no"
+                        if side == "yes"
+                        else "yes"
+                    )
+
+                    depth = sum(
+                        float(level[1])
+                        for level in book.get(
+                            opposite + "_dollars",
+                            [],
+                        )
+                        if abs(
+                            1 - float(level[0]) - price
+                        ) < 1e-6
+                    )
+
+                    if depth < 1:
+                        raise ValueError(
+                            "One contract of displayed "
+                            "liquidity could not be verified "
+                            "at the ask."
+                        )
+
+                    start = pd.to_datetime(
+                        card["Start (UTC)"],
+                        utc=True,
+                    )
+
+                    if pd.Timestamp.now(tz="UTC") >= start:
+                        raise ValueError(
+                            "Game started before paper "
+                            "entry pricing completed."
+                        )
+
+                    record.update(
+                        priced=True,
+                        stake=price,
+                        fees=estimate["fee"],
+                        contracts=1,
+                        side=side,
+                        ticker=quote["ticker"],
+                        price_captured_at=quote["read_at"],
+                        fee_metadata=metadata,
+                        reason=(
+                            "One hypothetical contract at "
+                            "the captured ask, all-taker fee "
+                            "estimate, direct-member rounding. "
+                            "This assumes a fill; "
+                            "no trade was placed."
+                        ),
+                    )
+
+            except Exception as error:
+                record["reason"] = str(error)
+
+        self.store.put(
+            "paper_forecast",
+            key,
+            record,
+            immutable=True,
+        )
+
+    def model_roi_rows(self):
+        grades = dict(self.store.items("grade"))
+        prices = dict(self.store.items("paper_forecast"))
+        rows = []
+
+        for key, frozen in self.store.items("forecast"):
+            result = frozen["result"]
+            card = frozen["card"]
+            grade = grades.get(key, {})
+            outcome = grade.get("outcome", "PENDING")
+
+            eligible = (
+                result.get("selection_allowed", True)
+                and not result.get("tie", False)
+            )
+
+            benchmark_stake = (
+                1.0
+                if eligible and outcome in ("WIN", "LOSS")
+                else 0.0
+            )
+
+            benchmark_profit = (
+                (1.0 if outcome == "WIN" else -1.0)
+                if benchmark_stake
+                else 0.0
+            )
+
+            price = prices.get(key, {})
+            settled = False
+            payout = None
+
+            cost = (
+                float(price.get("stake", 0))
+                + float(price.get("fees", 0))
+                if price.get("priced")
+                else None
+            )
+
+            note = price.get(
+                "reason",
+                "No entry price captured; "
+                "unit benchmark is still available.",
+            )
+
+            if eligible and price.get("priced"):
+                if (
+                    card.get("Platform") == "draftkings"
+                    and outcome != "PENDING"
+                ):
+                    if outcome == "WIN":
+                        payout = price["win_payout"]
+                    elif outcome == "LOSS":
+                        payout = 0.0
+                    else:
+                        payout = cost
+
+                    settled = True
+
+                elif card.get("Platform") == "kalshi":
+                    venue = self.store.get(
+                        "paper_settlement",
+                        key,
+                    )
+
+                    if venue:
+                        payout = float(venue["payout"])
+                        settled = True
+
+                    elif (
+                        pd.to_datetime(
+                            card["Start (UTC)"],
+                            utc=True,
+                        )
+                        <= pd.Timestamp.now(tz="UTC")
+                    ):
+                        try:
+                            market = self.e[
+                                "kalshi_public"
+                            ](
+                                "markets/" + price["ticker"]
+                            ).get("market", {})
+
+                            if (
+                                market.get("ticker")
+                                == price["ticker"]
+                                and market.get("status")
+                                == "finalized"
+                            ):
+                                if (
+                                    "settlement_value_dollars"
+                                    in market
+                                ):
+                                    value = float(
+                                        market[
+                                            "settlement_value_dollars"
+                                        ]
+                                    )
+                                elif market.get("result") == "yes":
+                                    value = 1.0
+                                elif market.get("result") == "no":
+                                    value = 0.0
+                                else:
+                                    value = float("nan")
+
+                                notional = float(
+                                    market.get(
+                                        "notional_value_dollars",
+                                        "1",
+                                    )
+                                )
+
+                                if (
+                                    math.isfinite(value)
+                                    and 0 <= value <= 1
+                                    and notional == 1
+                                ):
+                                    unit_payout = (
+                                        value
+                                        if price["side"] == "yes"
+                                        else 1 - value
+                                    )
+
+                                    payout = (
+                                        price["contracts"]
+                                        * unit_payout
+                                    )
+                                    settled = True
+
+                                    self.store.put(
+                                        "paper_settlement",
+                                        key,
+                                        {
+                                            "payout": payout,
+                                            "settlement_value_dollars": value,
+                                            "recorded_at": now(),
+                                            "venue_settlement_ts": market.get(
+                                                "settlement_ts"
+                                            ),
+                                        },
+                                        immutable=True,
+                                    )
+
+                        except Exception:
+                            pass
+
+            rows.append({
+                "Forecast ID": key,
+                "Player": card["Player"],
+                "Platform": card["Platform"],
+                "Stat": card["Stat"],
+                "Line": card["Line"],
+                "Model side": result["direction"],
+                "Result": outcome,
+                "Benchmark stake (units)": benchmark_stake,
+                "Benchmark profit (units)": benchmark_profit,
+                "Priced paper cost ($)": cost,
+                "Priced paper payout ($)": payout,
+                "Priced paper profit ($)": (
+                    payout - cost
+                    if settled
+                    else None
+                ),
+                "Paper settled": settled,
+                "Policy / missing price": note,
+            })
+
+        return rows
+    def probability_calibration(self):
+        grades = dict(self.store.items("grade"))
+        buckets = {}
+
+        for key, frozen in self.store.items("forecast"):
+            card = frozen["card"]
+            result = frozen["result"]
+
+            if (
+                card.get("Platform") != "prizepicks"
+                or not result.get("selection_allowed", True)
+                or result.get("tie")
+            ):
+                continue
+
+            probability = result.get(
+                "estimated_hit_probability"
+            )
+
+            if (
+                probability is None
+                or not math.isfinite(float(probability))
+                or not 0 <= float(probability) <= 1
+            ):
+                continue
+
+            created = pd.to_datetime(
+                frozen["created_at"],
+                utc=True,
+            )
+            start = pd.to_datetime(
+                card["Start (UTC)"],
+                utc=True,
+            )
+
+            if created >= start:
+                continue
+
+            tier = card.get("Line Type", "Unverified")
+
+            if tier == "Standard":
+                tier = "Regular"
+            elif tier not in ("Goblin", "Demon"):
+                tier = "Unverified"
+
+            decile = min(
+                9,
+                int(float(probability) * 10),
+            )
+
+            bucket = buckets.setdefault(
+                (tier, decile),
+                {
+                    "probabilities": [],
+                    "settled_probabilities": [],
+                    "wins": 0,
+                    "losses": 0,
+                    "ties": 0,
+                    "dnp": 0,
+                    "pending": 0,
+                },
+            )
+
+            bucket["probabilities"].append(
+                float(probability)
+            )
+
+            outcome = grades.get(
+                key,
+                {},
+            ).get("outcome", "PENDING")
+
+            field = {
+                "WIN": "wins",
+                "LOSS": "losses",
+                "TIE": "ties",
+                "DNP": "dnp",
+            }.get(outcome, "pending")
+
+            bucket[field] += 1
+
+            if outcome in ("WIN", "LOSS"):
+                bucket["settled_probabilities"].append(
+                    float(probability)
+                )
+
+        output = []
+
+        for (tier, decile), data in sorted(buckets.items()):
+            count = data["wins"] + data["losses"]
+
+            expected = (
+                sum(data["settled_probabilities"]) / count
+                if count
+                else None
+            )
+
+            actual = (
+                data["wins"] / count
+                if count
+                else None
+            )
+
+            if count:
+                z = 1.96
+                denominator = 1 + z * z / count
+
+                center = (
+                    actual + z * z / (2 * count)
+                ) / denominator
+
+                half = (
+                    z
+                    * math.sqrt(
+                        actual * (1 - actual) / count
+                        + z * z / (4 * count * count)
+                    )
+                    / denominator
+                )
+
+                interval = (
+                    f"{max(0, center - half):.1%}"
+                    f"–{min(1, center + half):.1%}"
+                )
+            else:
+                interval = "Awaiting finals"
+
+            label = (
+                f"{decile * 10}–{decile * 10 + 9}%"
+                if decile < 9
+                else "90–100%"
+            )
+
+            output.append({
+                "Tier": tier,
+                "Predicted bucket": label,
+                "Forecasts": len(data["probabilities"]),
+                "Decided": count,
+                "Hits": data["wins"],
+                "Misses": data["losses"],
+                "Average predicted (decided)": (
+                    f"{expected:.1%}"
+                    if expected is not None
+                    else "—"
+                ),
+                "Actual hit rate": (
+                    f"{actual:.1%}"
+                    if actual is not None
+                    else "Awaiting finals"
+                ),
+                "Actual 95% interval": interval,
+                "Ties": data["ties"],
+                "DNP": data["dnp"],
+                "Pending": data["pending"],
+            })
+
+        return output
+
+    def research_rows(self):
+        rows = []
+        grades = dict(self.store.items("grade"))
+
+        for key, frozen in self.store.items("forecast"):
+            grade = grades.get(key)
+            card = frozen["card"]
+            result = frozen["result"]
+
+            rows.append({
+                "ID": key,
+                "Player": card["Player"],
+                "Platform": card["Platform"],
+                "Stat": card["Stat"],
+                "Line": card["Line"],
+                "Pick": result["direction"],
+                "Projection": result["projection"],
+                "Actual": (
+                    grade.get("actual")
+                    if grade
+                    else None
+                ),
+                "Outcome": (
+                    grade.get("outcome")
+                    if grade
+                    else "PENDING"
+                ),
+                "Created (UTC)": frozen["created_at"],
+                "Event": frozen["event_id"],
+            })
+
+        return rows
+
+    def learn(self):
+        groups = {}
+        seen = set()
+        grades = dict(self.store.items("grade"))
+        reviews = self.store.items("model_review")
+
+        for key, frozen in self.store.items("forecast"):
+            result = frozen["result"]
+            card = frozen["card"]
+            grade = grades.get(key)
+
+            if (
+                not grade
+                or grade.get("status") != "FINAL"
+                or grade.get("outcome") == "TIE"
+            ):
+                continue
+
+            group = result.get("stat_group")
+
+            if (
+                not group
+                or result.get("baseline") is None
+            ):
+                continue
+
+            dedup = (
+                frozen["event_id"],
+                result["player_id"],
+                group,
+                float(card["Line"]),
+            )
+
+            if dedup in seen:
+                continue
+
+            seen.add(dedup)
+
+            groups.setdefault(group, []).append({
+                "start": card["Start (UTC)"],
+                "created": frozen["created_at"],
+                "event": frozen["event_id"],
+                "baseline": result["baseline"],
+                "adjusted": result["matchup_projection"],
+                "line": float(card["Line"]),
+                "actual": grade["actual"],
+            })
+
+        reports = []
+
+        for group, rows in groups.items():
+            frame = pd.DataFrame(rows).sort_values(
+                "start"
+            )
+
+            frame["day"] = pd.to_datetime(
+                frame["start"],
+                utc=True,
+            ).dt.strftime("%Y-%m-%d")
+
+            days = sorted(frame["day"].unique())
+
+            if (
+                len(frame) < 120
+                or frame["event"].nunique() < 25
+                or len(days) < 12
+            ):
+                reports.append({
+                    "stat": group,
+                    "status": (
+                        "Collecting settled pregame forecasts"
+                    ),
+                    "samples": len(frame),
+                })
+                continue
+
+            split = days[
+                max(1, int(len(days) * 0.75))
+            ]
+
+            previous = [
+                review["holdout_end"]
+                for _, review in reviews
+                if review.get("stat") == group
+            ]
+
+            if previous:
+                fresh_days = [
+                    day
+                    for day in days
+                    if day > max(previous)
+                ]
+
+                if len(fresh_days) < 4:
+                    continue
+
+                split = fresh_days[0]
+
+            train = frame[frame["day"] < split]
+            test = frame[frame["day"] >= split]
+
+            if (
+                len(train) < 80
+                or len(test) < 30
+                or test["event"].nunique() < 8
+            ):
+                continue
+
+            def accuracy(data, alpha):
+                prediction = (
+                    data["baseline"]
+                    + alpha * (
+                        data["adjusted"]
+                        - data["baseline"]
+                    )
+                )
+
+                correct = (
+                    (prediction > data["line"])
+                    == (data["actual"] > data["line"])
+                )
+
+                return float(correct.mean())
+
+            def mae(data, alpha):
+                prediction = (
+                    data["baseline"]
+                    + alpha * (
+                        data["adjusted"]
+                        - data["baseline"]
+                    )
+                )
+
+                return float(
+                    abs(
+                        prediction - data["actual"]
+                    ).mean()
+                )
+
+            candidate = max(
+                [0, 0.25, 0.5, 0.75, 1, 1.25, 1.5],
+                key=lambda alpha: (
+                    accuracy(train, alpha),
+                    -mae(train, alpha),
+                ),
+            )
+
+            incumbent = self.store.get(
+                "model",
+                group,
+                {"alpha": 1.0},
+            )
+
+            review_key = group + ":" + str(days[-1])
+
+            if self.store.get(
+                "model_review",
+                review_key,
+            ):
+                continue
+
+            score = accuracy(test, candidate)
+
+            incumbent_score = accuracy(
+                test,
+                float(incumbent["alpha"]),
+            )
+
+            baseline_score = accuracy(test, 0)
+
+            reference = max(
+                incumbent_score,
+                baseline_score,
+            )
+
+            promote = (
+                score >= incumbent_score + 0.01
+                and score >= baseline_score
+            )
+
+            report = {
+                "stat": group,
+                "alpha": candidate,
+                "train_samples": len(train),
+                "holdout_samples": len(test),
+                "holdout_start": split,
+                "holdout_end": days[-1],
+                "accuracy": score,
+                "reference_accuracy": reference,
+                "promoted": promote,
+                "reviewed_at": now(),
+                "method": (
+                    "Chronological date-grouped holdout; "
+                    "directional accuracy first, "
+                    "numeric error tie-break."
+                ),
+            }
+
+            if promote:
+                digest = hashlib.sha256(
+                    encode(report).encode()
+                ).hexdigest()[:12]
+
+                model = dict(
+                    report,
+                    version="learned-" + digest,
+                )
+
+                self.store.put(
+                    "model",
+                    group,
+                    model,
+                )
+
+            self.store.put(
+                "model_review",
+                review_key,
+                report,
+                immutable=True,
+            )
+
+            reports.append(report)
+
+        return reports
+
+    def settle_kalshi_tickets(self):
+        count = 0
+
+        for key, ticket in self.store.items("ticket"):
+            if (
+                ticket.get("status") != "OPEN"
+                or ticket.get("settlement_method")
+                != "kalshi_public_final"
+            ):
+                continue
+
+            try:
+                market = self.e["kalshi_public"](
+                    "markets/" + ticket["ticker"]
+                ).get("market", {})
+
+                if (
+                    market.get("ticker") != ticket["ticker"]
+                    or market.get("status") != "finalized"
+                ):
+                    continue
+
+                if "settlement_value_dollars" in market:
+                    yes_value = float(
+                        market["settlement_value_dollars"]
+                    )
+                elif market.get("result") in ("yes", "no"):
+                    yes_value = (
+                        1.0
+                        if market["result"] == "yes"
+                        else 0.0
+                    )
+                else:
+                    continue
+
+                if (
+                    not math.isfinite(yes_value)
+                    or not 0 <= yes_value <= 1
+                ):
+                    continue
+
+                notional = float(
+                    market.get(
+                        "notional_value_dollars",
+                        "1",
+                    )
+                )
+
+                if notional != 1:
+                    continue
+
+                unit = (
+                    yes_value
+                    if ticket["side"] == "yes"
+                    else 1 - yes_value
+                )
+
+                payout = (
+                    float(ticket["contracts"])
+                    * unit
+                )
+
+                value = save_ticket(
+                    self.store,
+                    {
+                        "id": key,
+                        "payout": payout,
+                    },
+                    settle=True,
+                )
+
+                value["settlement_source"] = (
+                    "Kalshi finalized public contract"
+                )
+
+                value["settlement_value_dollars"] = (
+                    yes_value
+                )
+
+                value["venue_settlement_ts"] = market.get(
+                    "settlement_ts"
+                )
+
+                self.store.put(
+                    "ticket",
+                    key,
+                    value,
+                )
+
+                count += 1
+
+            except Exception:
+                continue
+
+        return count
+
+    def maintenance(self, interactive=False):
+        count = self.grade(
+            limit=20 if interactive else 100,
+            time_budget=8 if interactive else 480,
+        )
+
+        reports = self.learn()
+        self.model_roi_rows()
+        settled_tickets = self.settle_kalshi_tickets()
+
+        status = {
+            "run_at": now(),
+            "grading": count,
+            "learning": reports,
+            "kalshi_tickets_settled": settled_tickets,
+        }
+
+        self.store.put(
+            "maintenance",
+            "last",
+            status,
+        )
+
+        return status
+
+
+def ticket_profit(ticket):
+    if ticket.get("status") != "SETTLED":
+        return None
+
+    return (
+        float(ticket["payout"])
+        - float(ticket["stake"])
+        - float(ticket.get("fees", 0))
+    )
+
+
+def save_ticket(store, ticket, settle=False):
+    key = str(ticket.get("id", "")).strip()
+
+    if not key or len(key) > 150:
+        raise ValueError(
+            "Enter a unique ticket or fill ID."
+        )
+
+    for field in ("stake", "fees", "payout"):
+        value = float(ticket.get(field, 0))
+
+        if (
+            not math.isfinite(value)
+            or value < 0
+        ):
+            raise ValueError(
+                "Cash amounts must be finite "
+                "and nonnegative."
+            )
+
+    existing = store.get("ticket", key)
+
+    if settle:
+        if existing is None:
+            raise ValueError("Ticket not found.")
+
+        ticket = dict(
+            existing,
+            payout=float(ticket["payout"]),
+            status="SETTLED",
+            settled_at=now(),
+        )
+
+    else:
+        if existing:
+            raise ValueError(
+                "That ticket ID already exists."
+            )
+
+        if float(ticket["stake"]) <= 0:
+            raise ValueError(
+                "Stake must be positive."
+            )
+
+        ticket = dict(
+            ticket,
+            status="OPEN",
+            payout=0,
+            created_at=now(),
+        )
+
+    store.put("ticket", key, ticket)
+    return ticket
+
+
+def render_workflow(wf, st, rows):
+    st.subheader("NBA workflow")
+
+    st.caption(
+        "Saved scans → complete supported board → "
+        "frozen forecasts → completed-game grades → "
+        "learning review. No odds calls are made here."
+    )
+
+    if wf.store.remote:
+        st.caption(
+            "Permanent PostgreSQL storage connected."
+        )
+    else:
+        st.caption(
+            "Local storage active. Download the full "
+            "workspace backup before redeploying; "
+            "set DATABASE_URL once for permanent storage."
+        )
+
+    with st.expander("Full workspace backup / restore"):
+        st.download_button(
+            "Download forecasts, grades, model and board",
+            wf.store.export(),
+            "sports_lab_workspace.json",
+            "application/json",
+        )
+
+        uploaded = st.file_uploader(
+            "Restore full workspace",
+            type=["json"],
+            key="full_restore",
+        )
+
+        if st.button(
+            "Restore missing workspace records",
+            disabled=uploaded is None,
+        ):
+            try:
+                if uploaded.size > 50 * 1024 * 1024:
+                    raise ValueError(
+                        "Maximum backup size is 50 MB."
+                    )
+
+                count = wf.store.restore(
+                    json.loads(uploaded.getvalue())
+                )
+
+                st.success(
+                    f"Checked {count} records. "
+                    "Existing records preserved. "
+                    "Reload the app to restore the board."
+                )
+
+            except Exception as error:
+                st.error(str(error))
+
+    if rows:
+        platforms = st.multiselect(
+            "Platforms to calculate",
+            ["prizepicks", "kalshi", "draftkings"],
+            default=[
+                "prizepicks",
+                "kalshi",
+                "draftkings",
+            ],
+        )
+
+        if st.button(
+            "Calculate and freeze complete supported NBA board",
+            type="primary",
+        ):
+            progress = st.progress(0.0)
+
+            selected_rows = [
+                row
+                for row in rows
+                if row.get("Platform") in platforms
+            ]
+
+            calculated = wf.board(
+                selected_rows,
+                wf.e["current_season"](),
+                progress.progress,
+            )
+
+            st.session_state["calculated_board"] = (
+                calculated
+            )
+
+            progress.empty()
+
+        calculated = st.session_state.get(
+            "calculated_board",
+            [],
+        )
+
+        if calculated:
+            frame = pd.DataFrame(calculated)
+
+            if "Ranking score" in frame:
+                frame = frame.sort_values(
+                    "Ranking score",
+                    ascending=False,
+                    na_position="last",
+                )
+
+            st.dataframe(
+                frame,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            st.download_button(
+                "Download calculated board",
+                frame.to_csv(index=False),
+                "nba_calculated_board.csv",
+                "text/csv",
+            )
+
+            st.caption(
+                "Rank uses projected distance from the line "
+                "divided by recent stat variability. "
+                "It is not a calibrated win probability "
+                "or a profit ranking. Unavailable players "
+                "stay visible with the reason; supported "
+                "calculations receive MORE or LESS."
+            )
+
+    with st.expander(
+        "Grades and learning",
+        expanded=True,
+    ):
+        if st.button(
+            "Refresh completed-game grades and learning review"
+        ):
+            with st.spinner(
+                "Checking ESPN finals and reviewing "
+                "settled forecasts..."
+            ):
+                st.json(
+                    wf.maintenance(interactive=True)
+                )
+
+        last = wf.store.get(
+            "maintenance",
+            "last",
+        )
+
+        if last:
+            st.caption(
+                "Last maintenance run: "
+                + last["run_at"]
+            )
+
+        research = wf.research_rows()
+
+        if research:
+            frame = pd.DataFrame(research)
+
+            decided = frame[
+                frame["Outcome"].isin(
+                    ["WIN", "LOSS"]
+                )
+            ]
+
+            rate = (
+                f"{(decided['Outcome'] == 'WIN').mean():.1%}"
+                if len(decided)
+                else "Awaiting finals"
+            )
+
+            st.metric(
+                "Directional accuracy",
+                rate,
+                f"{len(decided)} decided forecasts",
+            )
+
+            st.dataframe(
+                frame,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            st.download_button(
+                "Download audit",
+                frame.to_csv(index=False),
+                "nba_audit.csv",
+                "text/csv",
+            )
+
+        models = wf.store.items("model")
+
+        st.caption(
+            f"{len(models)} learned stat models active. "
+            "Initial formulas remain active until a "
+            "chronological holdout supports a change. "
+            "Research grades do not assume "
+            "sportsbook settlement."
+        )
+
+        st.caption(
+            "While open, maintenance runs at most "
+            "every 15 minutes. Unattended maintenance "
+            "uses this same app.py with --maintenance "
+            "and a configured DATABASE_URL."
+        )
+
+    with st.expander(
+        "PrizePicks percentage hit-rate tracker",
+        expanded=True,
+    ):
+        st.caption(
+            "Goblins, Regular and Demons are tracked "
+            "separately by their pregame estimated "
+            "hit probability: 40–49%, 50–59%, 60–69%, "
+            "and so on. The estimates are experimental, "
+            "not proven win probabilities. Actual hit rate "
+            "uses hits / (hits + misses); ties and DNP "
+            "are shown separately. Unverified tiers "
+            "remain separate."
+        )
+
+        calibration = wf.probability_calibration()
+
+        if calibration:
+            calibration_frame = pd.DataFrame(
+                calibration
+            )
+
+            st.dataframe(
+                calibration_frame,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            st.download_button(
+                "Download probability hit-rate audit",
+                calibration_frame.to_csv(index=False),
+                "prizepicks_probability_audit.csv",
+                "text/csv",
+            )
+
+        else:
+            st.info(
+                "New frozen PrizePicks forecasts will "
+                "populate these groups. Older forecasts "
+                "without a saved percentage are "
+                "not backfilled."
+            )
+
+    with st.expander(
+        "Automatic model paper ROI",
+        expanded=True,
+    ):
+        st.caption(
+            "Tracks the app’s frozen MORE/LESS selections "
+            "automatically. No betting-account connection "
+            "or actual wager is needed. Benchmark policy: "
+            "+1 unit for a win, −1 for a loss; ties, DNP, "
+            "unavailable sides and exact projection ties "
+            "do not risk a benchmark unit."
+        )
+
+        roi_rows = wf.model_roi_rows()
+
+        if not roi_rows:
+            st.info(
+                "Calculate a board to start the paper "
+                "record. Results fill in after "
+                "games finish."
+            )
+
+        else:
+            frame = pd.DataFrame(roi_rows)
+            summaries = []
+
+            for platform, group in frame.groupby(
+                "Platform"
+            ):
+                stake = float(
+                    group[
+                        "Benchmark stake (units)"
+                    ].sum()
+                )
+
+                profit = float(
+                    group[
+                        "Benchmark profit (units)"
+                    ].sum()
+                )
+
+                priced = group[
+                    group["Paper settled"]
+                ]
+
+                cash_cost = float(
+                    priced[
+                        "Priced paper cost ($)"
+                    ].sum()
+                )
+
+                cash_profit = float(
+                    priced[
+                        "Priced paper profit ($)"
+                    ].sum()
+                )
+
+                summaries.append({
+                    "Platform": platform,
+                    "Decided benchmark picks": int(stake),
+                    "Benchmark net units": profit,
+                    "1:1 benchmark ROI": (
+                        f"{profit / stake:.1%}"
+                        if stake
+                        else "Awaiting finals"
+                    ),
+                    "Settled priced paper picks": len(priced),
+                    "Priced paper profit ($)": round(
+                        cash_profit,
+                        4,
+                    ),
+                    "Priced paper ROI": (
+                        f"{cash_profit / cash_cost:.1%}"
+                        if cash_cost
+                        else "No settled priced entries"
+                    ),
+                })
+
+            st.dataframe(
+                pd.DataFrame(summaries),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            st.dataframe(
+                frame,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            st.download_button(
+                "Download automatic paper ROI",
+                frame.to_csv(index=False),
+                "model_paper_roi.csv",
+                "text/csv",
+            )
+
+        st.caption(
+            "The 1:1 benchmark compares model directions; "
+            "it is not a PrizePicks payout. DraftKings "
+            "priced paper ROI uses a captured same-line "
+            "price and flat $1 stake. Kalshi uses one "
+            "hypothetical contract, verified displayed "
+            "depth and an estimated taker fee; its "
+            "official final value handles fair-price "
+            "settlements. Missing or stale prices are "
+            "never invented. PrizePicks entry ROI remains "
+            "separate until a multi-pick entry and "
+            "payout rules are frozen."
+        )
+
+
+# ================= STREAMLIT APPLICATION =================
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,78 +2690,129 @@ st.set_page_config(
 
 BASE = "https://api.oddspapi.io/v4"
 BOOKS = ("prizepicks", "kalshi", "draftkings")
+
 ESPN_BASE = (
     "https://site.api.espn.com/apis/site/v2/"
     "sports/basketball/nba/"
 )
+
 HISTORY_DB = Path("sports_lab_history.sqlite3")
+
+
+def setting(name, default=""):
+    import os
+
+    if os.getenv(name):
+        return os.environ[name]
+
+    try:
+        return st.secrets.get(name, default)
+    except Exception:
+        return default
 
 
 # ---------------- ODDS CONNECTION ----------------
 
 def api_get(path, params):
-    key = st.secrets.get("ODDS_API_KEY", "")
+    key = setting("ODDS_API_KEY", "")
+
     if not key:
-        raise ValueError("Set ODDS_API_KEY in Streamlit Secrets.")
+        raise ValueError(
+            "Set ODDS_API_KEY in Streamlit Secrets."
+        )
 
     try:
         response = requests.get(
             BASE + path,
-            params={**params, "apiKey": key},
+            params={
+                **params,
+                "apiKey": key,
+            },
             timeout=60,
         )
+
     except requests.RequestException:
-        raise ValueError("Unable to connect to OddsPAPI.") from None
+        raise ValueError(
+            "Unable to connect to OddsPAPI."
+        ) from None
 
     if response.status_code != 200:
         raise ValueError(
-            f"OddsPAPI {path}: HTTP {response.status_code}."
+            f"OddsPAPI {path}: "
+            f"HTTP {response.status_code}."
         )
 
     try:
         return response.json()
     except ValueError:
-        raise ValueError("OddsPAPI returned invalid JSON.") from None
+        raise ValueError(
+            "OddsPAPI returned invalid JSON."
+        ) from None
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def upcoming_nba():
     start = datetime.now(timezone.utc)
     end = start + timedelta(days=3)
+
     data = api_get(
         "/fixtures",
         {
             "sportId": 11,
-            "from": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "to": end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "from": start.strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
+            "to": end.strftime(
+                "%Y-%m-%dT%H:%M:%SZ"
+            ),
             "statusId": 0,
         },
     )
 
     if not isinstance(data, list):
-        raise ValueError("Unexpected fixtures response structure.")
+        raise ValueError(
+            "Unexpected fixtures response structure."
+        )
 
     return sorted(
         [
-            game for game in data
+            game
+            for game in data
             if isinstance(game, dict)
             and game.get("fixtureId")
             and (
-                "nba" in str(game.get("tournamentName", "")).lower()
-                or str(game.get("tournamentSlug", "")).lower() == "nba"
+                "nba"
+                in str(
+                    game.get("tournamentName", "")
+                ).lower()
+                or str(
+                    game.get("tournamentSlug", "")
+                ).lower() == "nba"
             )
         ],
-        key=lambda game: str(game.get("startTime", "")),
+        key=lambda game: str(
+            game.get("startTime", "")
+        ),
     )
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def market_catalog():
-    data = api_get("/markets", {"language": "en"})
+    data = api_get(
+        "/markets",
+        {"language": "en"},
+    )
+
     if isinstance(data, dict):
-        data = data.get("markets", data.get("data", []))
+        data = data.get(
+            "markets",
+            data.get("data", []),
+        )
+
     if not isinstance(data, list):
-        raise ValueError("Unexpected market catalog structure.")
+        raise ValueError(
+            "Unexpected market catalog structure."
+        )
 
     return {
         str(market["marketId"]): market
@@ -120,29 +2839,51 @@ def game_odds(fixture_id):
 def numeric_line(value):
     if isinstance(value, bool) or value is None:
         return None
+
     try:
         number = float(value)
-        return number if 0 <= number <= 1000 else None
+        return (
+            number
+            if 0 <= number <= 1000
+            else None
+        )
     except (ValueError, TypeError):
         return None
 
 
 def outcome_direction(definition, outcome_id):
     options = definition.get("outcomes", [])
+
     if not isinstance(options, list):
         return None
+
     for option in options:
         if (
             isinstance(option, dict)
-            and str(option.get("outcomeId")) == str(outcome_id)
+            and str(option.get("outcomeId"))
+            == str(outcome_id)
         ):
-            name = str(option.get("outcomeName", "")).strip().lower()
-            return {"over": "MORE", "under": "LESS"}.get(name)
+            name = str(
+                option.get("outcomeName", "")
+            ).strip().lower()
+
+            return {
+                "over": "MORE",
+                "under": "LESS",
+            }.get(name)
+
     return None
 
 
 def explicit_tier(*records):
-    fields = ("lineType", "tier", "label", "badge", "projectionType")
+    fields = (
+        "lineType",
+        "tier",
+        "label",
+        "badge",
+        "projectionType",
+    )
+
     text = " ".join(
         str(record[field]).lower()
         for record in records
@@ -150,17 +2891,20 @@ def explicit_tier(*records):
         for field in fields
         if record.get(field) is not None
     )
+
     for token, label in (
         ("goblin", "Goblin"),
         ("demon", "Demon"),
         ("standard", "Standard"),
         ("regular", "Standard"),
     ):
-        if re.search(r"\b" + token + r"\b", text):
+        if re.search(
+            r"\b" + token + r"\b",
+            text,
+        ):
             return label
+
     return "Unverified"
-
-
 def decode_game(game, odds, catalog):
     fixture_id = str(game["fixtureId"])
     matchup = (
@@ -286,10 +3030,10 @@ def saved_fetch(url, params, ttl_seconds=3600):
     finally:
         con.close()
 
-    now = datetime.now(timezone.utc)
+    fetched_now = datetime.now(timezone.utc)
     if found:
         age = (
-            now - datetime.fromisoformat(found[0])
+            fetched_now - datetime.fromisoformat(found[0])
         ).total_seconds()
         if 0 <= age < ttl_seconds:
             return json.loads(found[1])
@@ -347,11 +3091,11 @@ def load_nba_player_logs(season):
     year = int(season.split("-")[0])
     season_start = datetime(year, 10, 1, tzinfo=timezone.utc)
     season_end = datetime(year + 1, 7, 1, tzinfo=timezone.utc)
-    now = datetime.now(timezone.utc)
-    if now < season_start:
+    current_time = datetime.now(timezone.utc)
+    if current_time < season_start:
         raise ValueError("The selected season has not started.")
 
-    end = min(now, season_end - timedelta(days=1))
+    end = min(current_time, season_end - timedelta(days=1))
     start = max(season_start, end - timedelta(days=6))
     games = {}
     day = start
@@ -655,14 +3399,13 @@ def window_summary(frame, line, label):
 
 
 # ---------------- ROSTER AND INJURIES ----------------
-
 def render_player_availability(card):
     st.markdown("#### Roster & availability")
     identity = resolve_player(card["Player"])
     if identity is None:
         st.info(
-            "Load the NBA discovery batch first. "
-            "A unique ESPN player match is required."
+            "A unique current ESPN player match is required. "
+            "The roster feed may be unavailable or the name ambiguous."
         )
         return
 
@@ -770,7 +3513,10 @@ def render_player_availability(card):
 
     result = st.session_state.get(state_key)
     if result is None:
-        st.caption("Click Refresh to check availability.")
+        st.caption(
+            "Use Refresh for the detailed report. "
+            "The projection workflow also checks injuries automatically."
+        )
         return
 
     st.write(f"**Player:** {player_name}")
@@ -933,8 +3679,6 @@ def render_team_scoring(card):
             "or defense versus position."
         )
 
-    
-
 
 # ---------------- STATIC HISTORY GRAPH ----------------
 
@@ -1059,12 +3803,10 @@ def render_history_graph(sample, h2h_games, card):
     )
 
 
-# ---------------- PLAYER BREAKDOWN ----------------
-
+# ---------------- TEAM EFFICIENCY ----------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_team_advanced(season):
     from html.parser import HTMLParser
-    import math
 
     class TeamTables(HTMLParser):
         def __init__(self):
@@ -1130,8 +3872,6 @@ def load_team_advanced(season):
             "The expected regular-season team table was not found."
         )
 
-    # First matching table is overall.
-    # Subsequent tables contain last-five, home and road splits.
     headers = table[0]
     records = []
     for values in table[1:]:
@@ -1228,12 +3968,10 @@ def load_team_advanced(season):
 def render_team_advanced(card):
     st.markdown("#### Team efficiency & pace")
     season = st.session_state.get(
-        "nba_history_season", "2026-27"
+        "nba_history_season", current_season()
     )
 
     try:
-        # One shared request per season per hour.
-        # Opening another card reuses the cached table.
         with st.spinner("Loading team efficiency and rankings..."):
             result = load_team_advanced(season)
 
@@ -1289,18 +4027,15 @@ def render_team_advanced(card):
         f"Source: NBAstuffer · {season} regular season · "
         f"App fetched (UTC): {result['fetched_at']}."
     )
-
     st.markdown(
         f"[View source table]({result['source_url']})"
     )
-
     st.caption(
         "Offense/defense: points scored/allowed per 100 possessions. "
         "Pace: possessions per 48 minutes. "
         "Rankings calculated across all 30 teams; ties share a rank. "
         "Rank 1 means highest offense, lowest defense, or fastest pace."
     )
-
     st.caption(
         "Loads automatically when you open a breakdown. "
         "Shared responses cached for one hour. No OddsPAPI calls. "
@@ -1308,17 +4043,16 @@ def render_team_advanced(card):
         "source freshness is unconfirmed. "
         "These figures may differ from NBA Stats."
     )
-
     st.caption(
         "Season-to-date team figures, not reconstructed as of an "
-        "earlier fixture. Defense versus position and P2 adjustments "
-        "are not connected yet."
+        "earlier fixture. The projection below shows which "
+        "matchup factors were available."
     )
+
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_position_defense():
     from html.parser import HTMLParser
-    import math
 
     class PositionTableParser(HTMLParser):
         def __init__(self):
@@ -1421,17 +4155,16 @@ def load_position_defense():
             "Position": position,
         }
         for stat, index in stat_indexes.items():
-            # Each source cell contains the value followed by a rank.
             value = float(cells[index].split()[0])
             if not math.isfinite(value) or value < 0:
                 raise ValueError("Invalid position-defense value.")
             record[stat] = value
 
-        identity = (abbreviation, position)
-        previous = records.get(identity)
+        row_identity = (abbreviation, position)
+        previous = records.get(row_identity)
         if previous is not None and previous != record:
             raise ValueError("Conflicting position-defense rows.")
-        records[identity] = record
+        records[row_identity] = record
 
     expected = {
         (team, position)
@@ -1552,6 +4285,8 @@ def render_position_defense(card):
         "Shared cache: up to one hour · No OddsPAPI calls."
     )
     st.markdown(f"[View source table]({result['url']})")
+
+
 # ---------------- CONNECTED PROJECTION ENGINE ----------------
 
 ENGINE_VERSION = "minutes-rates-matchup-v1"
@@ -1559,9 +4294,7 @@ ENGINE_VERSION = "minutes-rates-matchup-v1"
 
 def engine_team_key(name):
     return normalize_player(name).replace("losangeles", "la")
-def engine_game_context(card):
-    import math
-
+ def engine_game_context(card):
     try:
         start = pd.to_datetime(
             card["Start (UTC)"], utc=True, errors="raise"
@@ -1835,7 +4568,7 @@ def render_game_context(context):
     st.caption(
         "Displayed and saved as game context. "
         "No blowout minutes deduction or automatic UNDER "
-        "rule is applied yet."
+        "rule is applied."
     )
     st.caption(
         f"Source: {context['source']} · "
@@ -1844,6 +4577,8 @@ def render_game_context(context):
         "Cache: up to 5 minutes. Fetch time is not the "
         "sportsbook quote-update time. No OddsPAPI calls."
     )
+
+
 def engine_position(team, athlete, season):
     roster_position = athlete.get("position", {}).get(
         "abbreviation", "Unavailable"
@@ -1930,9 +4665,9 @@ def engine_position(team, athlete, season):
         )
 
     return roster_position, evidence
-def engine_no_vig(card):
-    import math
 
+
+def engine_no_vig(card):
     fields = (
         "Fixture ID", "Market ID", "Period", "Line", "Line Type",
     )
@@ -1967,11 +4702,11 @@ def engine_no_vig(card):
             else -price / (-price + 100)
         )
 
-        identity = (
+        pair_identity = (
             str(row["Player ID"]),
             str(row["Market ID"]),
         )
-        sides = pairs.setdefault(identity, {})
+        sides = pairs.setdefault(pair_identity, {})
         direction = row.get("Direction")
 
         if direction in ("MORE", "LESS"):
@@ -2000,32 +4735,30 @@ def engine_no_vig(card):
         })
 
     return valid[0] if len(valid) == 1 else None
-
-
 def calculate_player_projection(
     history, card, season, team_name, position,
     advanced=None, position_data=None,
 ):
-    import math
-
-    now = pd.Timestamp.now(tz="UTC")
+    current_time = pd.Timestamp.now(tz="UTC")
     start = pd.to_datetime(
         card["Start (UTC)"], utc=True, errors="coerce"
     )
 
-    if pd.isna(start) or start <= now:
+    if pd.isna(start) or start <= current_time:
         raise ValueError(
             "New projections require a future fixture start time."
         )
 
     current_year = (
-        now.year if now.month >= 10 else now.year - 1
+        current_time.year
+        if current_time.month >= 10
+        else current_time.year - 1
     )
-    current_season = (
+    current_season_label = (
         f"{current_year}-{str(current_year + 1)[-2:]}"
     )
 
-    if season != current_season:
+    if season != current_season_label:
         raise ValueError(
             "Choose the current season for a pregame projection."
         )
@@ -2047,7 +4780,7 @@ def calculate_player_projection(
         sample["GAME_DATE"], utc=True
     )
     sample = sample[
-        (sample["GAME_DATE"] < now)
+        (sample["GAME_DATE"] < current_time)
         & (sample["SEASON"] == season)
     ]
     sample["MIN"] = pd.to_numeric(
@@ -2197,7 +4930,6 @@ def calculate_player_projection(
                         / (opponent_pace / league_pace)
                     )
 
-                    # Initial settings, not learned weights.
                     matchup = max(
                         0.90,
                         min(
@@ -2261,13 +4993,11 @@ def calculate_player_projection(
 
 
 def render_calculated_pick(history, card, season):
-    import hashlib
-
     st.markdown("#### Calculated projection")
 
     try:
-        identity = resolve_player(card["Player"])
-        if identity is None:
+        matched_identity = resolve_player(card["Player"])
+        if matched_identity is None:
             raise ValueError(
                 "A unique ESPN player identity is required."
             )
@@ -2295,7 +5025,7 @@ def render_calculated_pick(history, card, season):
             )
 
             for athlete in roster.get("athletes", []):
-                if str(athlete.get("id")) == str(identity[0]):
+                if str(athlete.get("id")) == str(matched_identity[0]):
                     matches.append((
                         team,
                         athlete,
@@ -2348,6 +5078,7 @@ def render_calculated_pick(history, card, season):
         market = engine_no_vig(card)
         result["position_evidence"] = position_evidence
         result["market"] = market
+        result["kalshi"] = render_kalshi(card)
         result["game_context"] = engine_game_context(card)
         render_game_context(result["game_context"])
         result["roster"] = {
@@ -2355,58 +5086,28 @@ def render_calculated_pick(history, card, season):
             "athlete": athlete,
         }
         result["availability_check"] = st.session_state.get(
-            f"availability_v3_{card['Fixture ID']}_{identity[0]}"
+            f"availability_v3_{card['Fixture ID']}_{matched_identity[0]}"
         )
         result["warnings"].extend(missing)
         result["warnings"].append(
             "Conditional on playing the estimated minutes. "
             "Injury-driven role changes, confirmed lineups, "
-            "and blowout risk are not modeled in this version."
+            "and blowout minutes changes are not modeled."
         )
 
-        frozen = {
-            "card": dict(card),
-            "season": season,
-            "result": result,
-            "odds_scan_at": st.session_state.get("v4_scan_at"),
-        }
-        payload = json.dumps(
-            frozen,
-            sort_keys=True,
-            default=str,
-            allow_nan=False,
+        event, competition = workflow.event_for(card)
+        availability = workflow.availability(
+            matched_identity[0], team["id"]
         )
-        snapshot_id = hashlib.sha256(
-            payload.encode()
-        ).hexdigest()
-
-        saved = False
-        start = pd.to_datetime(
-            card["Start (UTC)"], utc=True
+        result = workflow.enrich(
+            result, history, card, athlete, event["id"],
+            result["game_context"], availability
         )
-
-        if pd.Timestamp.now(tz="UTC") < start:
-            con = history_connection()
-            try:
-                with con:
-                    con.execute(
-                        "CREATE TABLE IF NOT EXISTS "
-                        "prediction_snapshots "
-                        "(id TEXT PRIMARY KEY, "
-                        "created TEXT, payload TEXT)"
-                    )
-                    con.execute(
-                        "INSERT OR IGNORE INTO "
-                        "prediction_snapshots VALUES (?,?,?)",
-                        (
-                            snapshot_id,
-                            datetime.now(timezone.utc).isoformat(),
-                            payload,
-                        ),
-                    )
-                saved = True
-            finally:
-                con.close()
+        workflow.freeze(
+            card, result, season,
+            {"roster": athlete, "roster_fetched_at": roster_time}
+        )
+        saved = True
 
     except Exception as error:
         st.error(
@@ -2431,6 +5132,18 @@ def render_calculated_pick(history, card, season):
         f"Matchup position: **{position}**"
     )
 
+    if result.get("estimated_hit_probability") is not None:
+        st.write(
+            "**Estimated hit probability:** "
+            f"{result['estimated_hit_probability']:.1%} · "
+            f"{result.get('probability_sample_games', 0)} recent games"
+        )
+        st.caption(result.get(
+            "probability_note",
+            "Experimental estimate; see the hit-rate tracker "
+            "for realized performance."
+        ))
+
     if result["tie"]:
         st.caption(
             "Projection equals line. LESS is only a fixed "
@@ -2452,7 +5165,7 @@ def render_calculated_pick(history, card, season):
             "Matching same-market prices only. "
             "These are market estimates, not the model's "
             "win probabilities. They are not blended into "
-            "the projection in this version."
+            "the projection."
         )
     else:
         st.caption(
@@ -2465,8 +5178,8 @@ def render_calculated_pick(history, card, season):
         "stat/minute, using available current-season appearances. "
         "Pace adjustment capped at ±10%. Position adjustment "
         "uses 25% of the tempo-adjusted difference from the "
-        "position average, capped at ±10%. These settings "
-        "have not been learned or validated."
+        "position average, capped at ±10%. These initial "
+        "settings have not been validated."
     )
 
     for warning in dict.fromkeys(result["warnings"]):
@@ -2474,25 +5187,25 @@ def render_calculated_pick(history, card, season):
 
     st.caption(
         "No OddsPAPI requests are made by this section. "
-        "Automatic learning is not active."
+        "Learning reviews settled forecasts; initial formulas "
+        "remain until a model passes its chronological holdout."
     )
     st.caption(
-        "Pregame calculation saved locally."
+        "Pregame calculation recorded. The first frozen forecast "
+        "is retained for official grading; reopening does not rewrite it."
         if saved else
         "Fixture started before saving; no pregame record saved."
     )
     st.caption(
-        "The historical response-cache backup also includes "
-        "these prediction snapshots. Local SQLite storage "
-        "can be lost on redeployment; permanent external "
-        "storage is not configured yet."
+        "Use the full workspace backup for forecasts, grades, "
+        "paper records and models. Configure DATABASE_URL "
+        "for permanent storage."
     )
-def render_card_history(card):
+ def render_card_history(card):
     render_player_availability(card)
     render_team_scoring(card)
     render_team_advanced(card)
     render_position_defense(card)
-    
 
     columns = market_columns(card)
     if columns is None:
@@ -2505,32 +5218,19 @@ def render_card_history(card):
     matched = resolve_player(str(card["Player"]))
     if matched is None:
         st.info(
-            "Load the seven-day NBA discovery batch below first. "
+            "No unique current roster match was found. "
             "Unmatched or ambiguous players remain unavailable."
         )
         return
 
     player_id, name = matched
-    season = st.session_state.get("nba_history_season", "2026-27")
-    key = f"{player_id}:{season}"
-    card_key = ":".join(
-        str(card[column]) for column in [
-            "Fixture ID", "Platform", "Player ID",
-            "Stat Key", "Period", "Line", "Line Type",
-        ]
+    season = st.session_state.get(
+        "nba_history_season", current_season()
     )
+    key = f"{player_id}:{season}"
     history = st.session_state.get("deep_history", {}).get(key)
 
     if history is None:
-        if not st.button(
-            "Load 5 / 10 / 15 / 20 history",
-            key="history:" + card_key,
-        ):
-            st.caption(
-                "Two season requests on first load. "
-                "Saved responses are reused for one hour."
-            )
-            return
         try:
             with st.spinner(
                 "Loading this player's current and previous season..."
@@ -2543,6 +5243,7 @@ def render_card_history(card):
                 f"{type(error).__name__}: {error}"
             )
             return
+
     render_calculated_pick(history, card, season)
 
     cutoff = pd.to_datetime(
@@ -2557,9 +5258,7 @@ def render_card_history(card):
 
     cutoff = min(cutoff, pd.Timestamp.now(tz="UTC"))
     sample = history[history["GAME_DATE"] < cutoff].copy()
-    sample["VALUE"] = sample[columns].sum(
-        axis=1, min_count=len(columns)
-    )
+    sample["VALUE"] = score_frame(sample, card)
     missing = int(sample["VALUE"].isna().sum())
     sample = sample.dropna(subset=["VALUE"]).sort_values(
         "GAME_DATE", ascending=False
@@ -2700,13 +5399,653 @@ def render_card_history(card):
     render_history_graph(sample, h2h_games, card)
 
 
+# ---------------- SAVED WORKSPACE AND KALSHI ----------------
+
+def workspace_store(key, value):
+    con = history_connection()
+    try:
+        with con:
+            con.execute(
+                "CREATE TABLE IF NOT EXISTS workspace "
+                "(key TEXT PRIMARY KEY, payload TEXT)"
+            )
+            con.execute(
+                "INSERT OR REPLACE INTO workspace VALUES (?,?)",
+                (key, json.dumps(
+                    value, default=str, allow_nan=False
+                )),
+            )
+    finally:
+        con.close()
+
+
+def workspace_load(key):
+    con = history_connection()
+    try:
+        con.execute(
+            "CREATE TABLE IF NOT EXISTS workspace "
+            "(key TEXT PRIMARY KEY, payload TEXT)"
+        )
+        row = con.execute(
+            "SELECT payload FROM workspace WHERE key=?",
+            (key,),
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+    finally:
+        con.close()
+
+
+BOARD_FIELDS = (
+    "v4_rows", "v4_summary", "v4_errors", "v4_scan_at",
+)
+
+
+def validate_board(board):
+    if (
+        not isinstance(board, dict)
+        or not all(key in board for key in BOARD_FIELDS)
+    ):
+        raise ValueError("Not a Sports Lab board backup.")
+
+    if (
+        not isinstance(board["v4_rows"], list)
+        or len(board["v4_rows"]) > 100000
+    ):
+        raise ValueError("Invalid board rows.")
+
+    required = {
+        "Game", "Fixture ID", "Start (UTC)", "Platform",
+        "Player", "Stat", "Stat Key", "Period", "Line",
+        "Raw Handicap", "Direction", "Line Status", "Line Type",
+        "Odds", "Market ID", "Outcome ID", "Player ID", "Decoded",
+    }
+
+    for row in board["v4_rows"]:
+        if (
+            not isinstance(row, dict)
+            or not required.issubset(row)
+        ):
+            raise ValueError("Board row fields are missing.")
+
+        if (
+            row["Platform"] not in BOOKS
+            or type(row["Decoded"]) is not bool
+        ):
+            raise ValueError("Invalid platform or decoding flag.")
+
+        if row["Decoded"]:
+            line = float(row["Line"])
+            if (
+                not 0 < line <= 1000
+                or row["Direction"] not in ("MORE", "LESS")
+            ):
+                raise ValueError("Invalid decoded threshold.")
+
+    if (
+        not isinstance(board["v4_summary"], list)
+        or not isinstance(board["v4_errors"], list)
+    ):
+        raise ValueError("Invalid board metadata.")
+
+    stamp = pd.to_datetime(
+        board["v4_scan_at"], utc=True, errors="raise"
+    )
+    if (
+        pd.isna(stamp)
+        or stamp > pd.Timestamp.now(tz="UTC") + pd.Timedelta(minutes=5)
+    ):
+        raise ValueError("Invalid scan time.")
+
+    return {key: board[key] for key in BOARD_FIELDS}
+
+
+def render_saved_workspace():
+    if "v4_rows" not in st.session_state:
+        try:
+            board = workspace_load("board")
+            if board:
+                st.session_state.update(validate_board(board))
+        except Exception as error:
+            st.warning(f"Saved board could not be restored: {error}")
+
+    with st.expander("Save / restore scanned board — no odds calls"):
+        st.caption(
+            "Download this backup before updating code. "
+            "Restore it if local storage was reset. "
+            "Original scan times are preserved; restoring "
+            "does not refresh prices."
+        )
+        if "v4_rows" in st.session_state:
+            board = {
+                key: st.session_state.get(key)
+                for key in BOARD_FIELDS
+            }
+            st.download_button(
+                "Download board backup",
+                json.dumps(board, default=str),
+                "sports_lab_board.json",
+                "application/json",
+            )
+
+        uploaded = st.file_uploader(
+            "Restore board backup",
+            type=["json"],
+            key="restore_board_upload",
+        )
+        if st.button(
+            "Restore saved board",
+            disabled=uploaded is None,
+        ):
+            try:
+                if uploaded.size > 25 * 1024 * 1024:
+                    raise ValueError("Backup exceeds 25 MB.")
+
+                board = validate_board(
+                    json.loads(uploaded.getvalue())
+                )
+                workspace_store("board", board)
+                st.session_state.update(board)
+                st.session_state.pop("selected_prop_card", None)
+                st.rerun()
+            except Exception as error:
+                st.error(f"Restore failed: {error}")
+
+    if "v4_scan_at" in st.session_state:
+        stamp = pd.to_datetime(
+            st.session_state["v4_scan_at"], utc=True
+        )
+        age = max(
+            0,
+            (pd.Timestamp.now(tz="UTC") - stamp).total_seconds() / 60,
+        )
+        st.caption(
+            f"Saved board age: {age:.0f} minutes. "
+            "New prices require the explicit scan button."
+        )
+        if age > 30:
+            st.warning(
+                "Saved odds are over 30 minutes old. "
+                "Projections can use this board, but confirm "
+                "current lines and prices before acting."
+            )
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def kalshi_public(path, params=None):
+    response = requests.get(
+        "https://external-api.kalshi.com/trade-api/v2/" + path,
+        params=params or {},
+        timeout=15,
+    )
+    if response.status_code == 404:
+        return {}
+    response.raise_for_status()
+    return response.json()
+
+
+def native_kalshi_quote(card):
+    columns = market_columns(card)
+    series_map = {
+        "KXNBAPTS": ["PTS"],
+        "KXNBAREB": ["REB"],
+        "KXNBAAST": ["AST"],
+        "KXNBA3PT": ["FG3M"],
+        "KXNBASTL": ["STL"],
+        "KXNBABLK": ["BLK"],
+        "KXNBAPA": ["PTS", "AST"],
+        "KXNBAPR": ["PTS", "REB"],
+        "KXNBARA": ["REB", "AST"],
+        "KXNBAPRA": ["PTS", "REB", "AST"],
+    }
+    series = {
+        frozenset(value): key
+        for key, value in series_map.items()
+    }.get(frozenset(columns or []))
+
+    if not series:
+        raise ValueError(
+            "Native contract mapping is not available for this stat."
+        )
+
+    line = float(card["Line"])
+    if (
+        not math.isfinite(line)
+        or abs((line + 0.5) - round(line + 0.5)) > 1e-6
+    ):
+        raise ValueError(
+            "Only exact half-point thresholds map "
+            "to these Kalshi contracts."
+        )
+
+    start = pd.to_datetime(card["Start (UTC)"], utc=True)
+    if pd.Timestamp.now(tz="UTC") >= start:
+        raise ValueError("Pregame quotes are closed for this fixture.")
+
+    names = {
+        engine_team_key(name)
+        for name in str(card["Game"]).split(" vs ")
+    }
+    teams = [
+        team for team in espn_teams()
+        if engine_team_key(team["displayName"]) in names
+    ]
+    if len(teams) != 2:
+        raise ValueError(
+            "Matchup teams could not be uniquely verified."
+        )
+
+    aliases = {
+        "GS": "GSW", "NY": "NYK", "NO": "NOP", "SA": "SAS",
+        "WSH": "WAS", "PHO": "PHX", "UTAH": "UTA",
+    }
+    codes = [
+        aliases.get(team["abbreviation"], team["abbreviation"])
+        for team in teams
+    ]
+    date = start.tz_convert(
+        "America/New_York"
+    ).strftime("%y%b%d").upper()
+
+    found = {}
+    for first, second in (codes, codes[::-1]):
+        event_ticker = f"{series}-{date}{first}{second}"
+        event = kalshi_public("events/" + event_ticker)
+        metadata = event.get("event", {})
+
+        if (
+            metadata.get("event_ticker") != event_ticker
+            or metadata.get("series_ticker") != series
+        ):
+            continue
+
+        for market in event.get(
+            "markets", metadata.get("markets", [])
+        ):
+            title = str(
+                market.get("title")
+                or market.get("yes_sub_title", "")
+            )
+            player_name = title.split(":", 1)[0]
+
+            if (
+                normalize_player(player_name)
+                != normalize_player(card["Player"])
+            ):
+                continue
+            if (
+                market.get("strike_type") != "greater"
+                or market.get("market_type") != "binary"
+            ):
+                continue
+            if abs(
+                float(market.get("floor_strike", -999)) - line
+            ) > 1e-6:
+                continue
+            if market.get("event_ticker") != event_ticker:
+                continue
+
+            found[market["ticker"]] = market
+
+    if len(found) != 1:
+        raise ValueError(
+            "No unique native Kalshi contract matches "
+            "this player, fixture and exact line."
+        )
+
+    ticker = next(iter(found))
+    market = kalshi_public("markets/" + ticker).get("market", {})
+
+    if (
+        market.get("ticker") != ticker
+        or market.get("status") not in ("active", "open")
+    ):
+        raise ValueError("Matched contract is not active.")
+
+    if (
+        pd.to_datetime(market["close_time"], utc=True)
+        <= pd.Timestamp.now(tz="UTC")
+    ):
+        raise ValueError("Matched contract has closed.")
+
+    if float(market.get("notional_value_dollars", "1")) != 1:
+        raise ValueError("Unsupported contract payout.")
+
+    quotes = []
+    for side, direction in (("yes", "MORE"), ("no", "LESS")):
+        ask = float(market.get(side + "_ask_dollars") or "nan")
+        if math.isfinite(ask) and 0 < ask < 1:
+            quotes.append({
+                "Contract": side.upper(),
+                "Direction": direction,
+                "Ask ($ / contract)": ask,
+                "Break-even before fees": f"{ask:.1%}",
+            })
+
+    return {
+        "ticker": ticker,
+        "quotes": quotes,
+        "rules": market.get("rules_primary", ""),
+        "secondary_rules": market.get("rules_secondary", ""),
+        "raw": market,
+        "read_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def render_kalshi(card):
+    if str(card.get("Platform", "")).lower() != "kalshi":
+        return None
+
+    st.markdown("#### Kalshi contract pricing")
+    try:
+        quote = native_kalshi_quote(card)
+        st.caption(quote["ticker"])
+
+        if quote["quotes"]:
+            st.dataframe(
+                pd.DataFrame(quote["quotes"]),
+                hide_index=True,
+                use_container_width=True,
+            )
+        else:
+            st.info("No valid ask quote returned.")
+
+        st.caption(
+            "Indicative public quotes, cached up to 60 seconds. "
+            "Exchange prices are separate from sportsbook "
+            "no-vig estimates and the model projection."
+        )
+
+        with st.expander("Kalshi cost and fee estimate"):
+            quantity = int(st.number_input(
+                "Contracts",
+                min_value=1,
+                max_value=10000,
+                value=1,
+                key="kalshi_qty",
+            ))
+            precision = st.selectbox(
+                "Balance rounding",
+                [
+                    "Direct member ($0.0001)",
+                    "Non-direct member ($0.01)",
+                ],
+                key="kalshi_precision",
+            )
+
+            try:
+                fees = kalshi_fee_metadata(
+                    kalshi_public, quote["ticker"]
+                )
+                book = kalshi_public(
+                    "markets/" + quote["ticker"] + "/orderbook"
+                ).get("orderbook_fp", {})
+
+                costs = []
+                for row in quote["quotes"]:
+                    side = row["Contract"].lower()
+                    opposite = "no" if side == "yes" else "yes"
+                    ask = row["Ask ($ / contract)"]
+
+                    depth = sum(
+                        float(level[1])
+                        for level in book.get(
+                            opposite + "_dollars", []
+                        )
+                        if abs(
+                            1 - float(level[0]) - ask
+                        ) < 1e-6
+                    )
+
+                    estimate = fee_estimate(
+                        ask,
+                        quantity,
+                        fees["multiplier"],
+                        ".0001" if precision.startswith("Direct")
+                        else ".01",
+                    )
+                    costs.append({
+                        "Side": side.upper(),
+                        "Contracts": quantity,
+                        "At best ask": depth,
+                        "Enough displayed depth": depth >= quantity,
+                        "Fee estimate ($)": estimate["fee"],
+                        "Total cost estimate ($)": estimate["total"],
+                        "Break-even with fee": (
+                            f"{estimate['break_even']:.2%}"
+                        ),
+                    })
+
+                quote["fee_metadata"] = fees
+                st.dataframe(
+                    pd.DataFrame(costs),
+                    hide_index=True,
+                    use_container_width=True,
+                )
+                st.caption(
+                    "Estimate assumes one all-taker fill at the "
+                    "displayed ask and selected balance precision. "
+                    "Partial fills, rebates and broker-specific "
+                    "fees may differ. No order is submitted."
+                )
+            except Exception as error:
+                st.info(
+                    f"Fee/depth estimate unavailable: {error}"
+                )
+
+        with st.expander("Kalshi settlement rules"):
+            st.write(quote["rules"])
+            st.write(quote["secondary_rules"])
+
+        return quote
+
+    except Exception as error:
+        st.info(f"Kalshi price unavailable: {error}")
+        return {
+            "available": False,
+            "reason": str(error),
+        }
+
+
+# Resolve directly against current matchup rosters.
+
+_seed_resolve_player = resolve_player
+
+
+def _resolve_player_current(name):
+    card = st.session_state.get("selected_prop_card", {})
+    if not card:
+        return _seed_resolve_player(name)
+
+    names = {
+        engine_team_key(value)
+        for value in str(card.get("Game", "")).split(" vs ")
+    }
+    matches = {}
+
+    for team in espn_teams():
+        if engine_team_key(team["displayName"]) not in names:
+            continue
+
+        roster = saved_fetch(
+            ESPN_BASE + f"teams/{team['id']}/roster",
+            {},
+            ttl_seconds=300,
+        )
+        for athlete in roster.get("athletes", []):
+            if (
+                normalize_player(athlete.get("displayName", ""))
+                == normalize_player(name)
+            ):
+                matches[str(athlete["id"])] = athlete["displayName"]
+
+    return next(iter(matches.items())) if len(matches) == 1 else None
+
+
+def resolve_player(name):
+    try:
+        return _resolve_player_current(name)
+    except Exception:
+        return None
+
+
+# ---------------- PRIZEPICKS FANTASY SCORING ----------------
+
+_base_market_columns = market_columns
+
+
+def fantasy_weights(card):
+    name = str(card.get("Stat", "")).lower()
+    if (
+        "fantasy" in name
+        and card.get("Platform") == "prizepicks"
+        and str(card.get("Period", "")).lower() == "result"
+    ):
+        return {
+            "PTS": 1.0,
+            "REB": 1.2,
+            "AST": 1.5,
+            "STL": 3.0,
+            "BLK": 3.0,
+            "TOV": -1.0,
+        }
+    return None
+
+
+def market_columns(card):
+    weights = fantasy_weights(card)
+    return list(weights) if weights else _base_market_columns(card)
+
+
+def score_frame(frame, card):
+    columns = market_columns(card)
+    weights = fantasy_weights(card) or {
+        column: 1.0 for column in columns
+    }
+    numeric = frame[columns].apply(
+        pd.to_numeric, errors="coerce"
+    )
+    return numeric.mul(
+        pd.Series(weights)
+    ).sum(axis=1, min_count=len(columns))
+
+
+_base_calculate_player_projection = calculate_player_projection
+
+
+def calculate_player_projection(
+    history, card, season, team_name, position,
+    advanced=None, position_data=None,
+):
+    result = _base_calculate_player_projection(
+        history, card, season, team_name, position,
+        advanced, position_data,
+    )
+    weights = fantasy_weights(card)
+
+    if weights:
+        for component in result["components"]:
+            component["Fantasy weight"] = weights[component["Stat"]]
+
+        result["projection"] = sum(
+            component["Projection"] * weights[component["Stat"]]
+            for component in result["components"]
+        )
+        result["gap"] = result["projection"] - float(card["Line"])
+        result["direction"] = (
+            "MORE" if result["gap"] > 0 else "LESS"
+        )
+        result["tie"] = abs(result["gap"]) < 1e-9
+        result["scoring"] = {
+            "platform": "PrizePicks",
+            "weights": weights,
+            "source": (
+                "https://www.prizepicks.com/playbook-article/"
+                "how-to-play-prizepicks-nba-fantasy-scoring-system"
+            ),
+        }
+
+    return result
+
+
+# ---------------- COMPLETE NBA WORKFLOW ----------------
+
+def current_season():
+    stamp = datetime.now(timezone.utc)
+    year = stamp.year if stamp.month >= 10 else stamp.year - 1
+    return f"{year}-{str(year + 1)[-2:]}"
+
+
+_database_url = (
+    os.getenv("DATABASE_URL")
+    or setting("DATABASE_URL", "")
+)
+
+try:
+    workflow_store = Store(url=_database_url)
+except Exception:
+    st.error(
+        "Permanent storage connection failed. Check DATABASE_URL; "
+        "no fallback was made that could lose your saved work."
+    )
+    st.stop()
+
+workflow = Workflow(globals(), workflow_store)
+_local_workspace_load = workspace_load
+
+
+def workspace_store(key, value):
+    workflow_store.put("board", key, value)
+def workspace_load(key):
+    value = workflow_store.get("board", key)
+    if value is None:
+        value = _local_workspace_load(key)
+        if value is not None:
+            workspace_store(key, value)
+    return value
+
+
+# Scheduled maintenance uses this same app.py.
+# It exits before the UI and never executes the paid scan.
+
+import sys
+
+if "--maintenance" in sys.argv:
+    if not _database_url:
+        raise SystemExit(
+            "Set DATABASE_URL for scheduled grading and learning."
+        )
+
+    _report = workflow.maintenance()
+    print({
+        "run_at": _report["run_at"],
+        "grading": _report["grading"],
+        "model_reviews": len(_report["learning"]),
+    })
+    raise SystemExit(0)
+
+
+# Optional password for this shared personal workspace.
+
+import hmac
+
+_password = (
+    os.getenv("APP_PASSWORD")
+    or setting("APP_PASSWORD", "")
+)
+
+if _password:
+    entered = st.text_input("App password", type="password")
+    if not hmac.compare_digest(entered, _password):
+        st.stop()
+
+
 # ---------------- APP HEADER ----------------
 
 st.title("🎯 Elite Individual Analytics Lab")
 st.caption("Real NBA market inventory · Historical research")
 st.sidebar.header("📡 Data connection")
 
-if st.secrets.get("ODDS_API_KEY", ""):
+if setting("ODDS_API_KEY", ""):
     st.sidebar.success("ODDS_API_KEY configured")
 else:
     st.sidebar.warning("ODDS_API_KEY missing")
@@ -2719,20 +6058,59 @@ if "nba_history" in st.session_state:
 else:
     st.sidebar.info("Historical box scores: not loaded")
 
-st.sidebar.info("Player-card history: open View breakdown")
-st.sidebar.info("Availability: manual ESPN refresh")
-st.sidebar.info("P1/P2 projections: not connected")
-st.sidebar.info("ROI tracking: not connected")
+st.sidebar.info("Player history: select a player row")
+st.sidebar.info(
+    "Availability: automatic forecast checks and manual refresh"
+)
+st.sidebar.info(
+    "Projection: minutes, rates, pace and position defense"
+)
+st.sidebar.info(
+    "Grades, learning and paper ROI: NBA workflow panel"
+)
 
 
 # ---------------- NBA SCANNER ----------------
 
 st.subheader("🏀 NBA Pregame Scanner + Line Inventory")
+render_saved_workspace()
+
+try:
+    _maintenance = workflow_store.get("maintenance", "last")
+    _age = (
+        (
+            pd.Timestamp.now(tz="UTC")
+            - pd.to_datetime(_maintenance["run_at"], utc=True)
+        ).total_seconds()
+        if _maintenance
+        else float("inf")
+    )
+
+    if _age >= 900:
+        workflow.maintenance(interactive=True)
+
+except Exception:
+    st.warning(
+        "Automatic grading could not finish. Saved forecasts "
+        "remain available; retry in the workflow panel."
+    )
+
+with st.expander(
+    "Calculate board · Grades · Learning · ROI",
+    expanded="v4_rows" not in st.session_state,
+):
+    render_workflow(
+        workflow,
+        st,
+        st.session_state.get("v4_rows", []),
+    )
+
 max_games = st.slider("Games to scan", 1, 5, 3)
+
 st.caption(
     f"Fresh scan uses up to {max_games + 2} API calls. "
     "Odds are cached for 30 minutes. "
-    "Breakdown and availability buttons do not run this scan."
+    "Breakdown, grading and availability do not run this scan."
 )
 
 if st.button(
@@ -2743,25 +6121,32 @@ if st.button(
         with st.spinner("Loading NBA fixtures and market lines..."):
             games = upcoming_nba()[:max_games]
             all_rows, summaries, errors = [], [], []
+
             if not games:
                 st.warning(
-                    "No upcoming NBA games returned for the next three days."
+                    "No upcoming NBA games returned "
+                    "for the next three days."
                 )
+
             else:
                 catalog = market_catalog()
+
                 for game in games:
                     try:
-                        rows, summary = decode_game(
+                        decoded_rows, summary = decode_game(
                             game,
                             game_odds(str(game["fixtureId"])),
                             catalog,
                         )
-                        all_rows.extend(rows)
+
+                        all_rows.extend(decoded_rows)
                         summaries.extend(summary)
+
                     except ValueError as error:
                         errors.append(
                             f"{game.get('participant1Name', '?')} vs "
-                            f"{game.get('participant2Name', '?')}: {error}"
+                            f"{game.get('participant2Name', '?')}: "
+                            f"{error}"
                         )
 
             st.session_state["v4_rows"] = all_rows
@@ -2770,17 +6155,27 @@ if st.button(
             st.session_state["v4_scan_at"] = (
                 datetime.now(timezone.utc).isoformat()
             )
+
+            workspace_store(
+                "board",
+                {
+                    key: st.session_state[key]
+                    for key in BOARD_FIELDS
+                },
+            )
+
     except ValueError as error:
         st.error(str(error))
 
 
-# ---------------- RESULTS AND PLAYER CARDS ----------------
+# ---------------- RESULTS AND PLAYER LINES ----------------
 
 if "v4_rows" in st.session_state:
     for message in st.session_state.get("v4_errors", []):
         st.warning(message)
 
     summary = st.session_state.get("v4_summary", [])
+
     if summary:
         with st.expander("Platform coverage"):
             st.dataframe(
@@ -2790,270 +6185,502 @@ if "v4_rows" in st.session_state:
             )
 
     rows = st.session_state["v4_rows"]
+
     if not rows:
-        st.info("No active named NBA player-prop outcomes returned.")
+        st.info(
+            "No active named NBA player-prop outcomes returned."
+        )
+
     else:
         df = pd.DataFrame(rows)
+
         group_keys = [
-            "Fixture ID", "Platform", "Player", "Stat Key", "Period",
+            "Fixture ID",
+            "Platform",
+            "Player",
+            "Stat Key",
+            "Period",
         ]
+
         df["Distinct Thresholds"] = df.groupby(
-            group_keys, dropna=False
+            group_keys,
+            dropna=False,
         )["Line"].transform("nunique").astype(int)
-        df["Multiple Thresholds"] = df["Distinct Thresholds"] > 1
+
+        df["Multiple Thresholds"] = (
+            df["Distinct Thresholds"] > 1
+        )
 
         a, b, c = st.columns(3)
+
         a.metric("Active prop outcomes", len(df))
-        b.metric("Line + direction decoded", int(df["Decoded"].sum()))
+
+        b.metric(
+            "Line + direction decoded",
+            int(df["Decoded"].sum()),
+        )
+
         c.metric(
             "Tier explicitly verified",
             int((df["Line Type"] != "Unverified").sum()),
         )
+
         st.caption(
             "Last scan completed (UTC): "
             + st.session_state.get("v4_scan_at", "Unavailable")
-            + " · Source responses may be cached for up to 30 minutes."
+            + " · Source responses may be cached "
+            "for up to 30 minutes."
         )
 
-        platform = st.selectbox("Platform", ["All"] + list(BOOKS))
+        platform = st.selectbox(
+            "Platform",
+            ["All"] + list(BOOKS),
+        )
+
         show = st.radio(
             "View",
             [
-                "All active props", "Decoded only",
-                "Multiple thresholds", "Unverified line types",
+                "All active props",
+                "Decoded only",
+                "Multiple thresholds",
+                "Unverified line types",
             ],
             horizontal=True,
         )
+
         filtered = (
-            df.copy() if platform == "All"
+            df.copy()
+            if platform == "All"
             else df[df["Platform"] == platform].copy()
         )
+
         if show == "Decoded only":
             filtered = filtered[filtered["Decoded"]]
+
         elif show == "Multiple thresholds":
             filtered = filtered[filtered["Multiple Thresholds"]]
-        elif show == "Unverified line types":
-            filtered = filtered[filtered["Line Type"] == "Unverified"]
 
-        st.subheader("Player cards")
+        elif show == "Unverified line types":
+            filtered = filtered[
+                filtered["Line Type"] == "Unverified"
+            ]
+
+        st.subheader("Player lines")
+
         search = st.text_input(
-            "Find a player", placeholder="Type a player's name..."
+            "Find a player",
+            placeholder="Type a player's name...",
         )
+
         stat_filter = st.selectbox(
             "Stat",
-            ["All"] + sorted(filtered["Stat"].dropna().unique().tolist()),
+            ["All"] + sorted(
+                filtered["Stat"].dropna().unique().tolist()
+            ),
         )
+
         tier_filter = st.selectbox(
             "Line type",
-            ["All", "Standard", "Goblin", "Demon", "Unverified"],
+            [
+                "All",
+                "Standard",
+                "Goblin",
+                "Demon",
+                "Unverified",
+            ],
         )
 
         cards = filtered[filtered["Decoded"]].copy()
+
         if search.strip():
             cards = cards[
                 cards["Player"].str.contains(
-                    search.strip(), case=False, regex=False, na=False
+                    search.strip(),
+                    case=False,
+                    regex=False,
+                    na=False,
                 )
             ]
+
         if stat_filter != "All":
             cards = cards[cards["Stat"] == stat_filter]
+
         if tier_filter != "All":
             cards = cards[cards["Line Type"] == tier_filter]
 
         card_keys = [
-            "Fixture ID", "Platform", "Player ID",
-            "Stat Key", "Period", "Line", "Line Type",
+            "Fixture ID",
+            "Platform",
+            "Player ID",
+            "Stat Key",
+            "Period",
+            "Line",
+            "Line Type",
         ]
-        cards = cards.drop_duplicates(card_keys).sort_values(
+
+        cards = cards.drop_duplicates(
+            card_keys
+        ).sort_values(
             ["Player", "Stat", "Line"]
         )
+
         st.caption(
-            "Historical research is available in View breakdown. "
-            "Model recommendations and photos are pending."
+            "Select a row for its full breakdown. "
+            "The main list displays frozen pregame forecasts."
         )
 
-        total_pages = max(1, (len(cards) + 11) // 12)
-        page = st.selectbox(
-            "Page",
-            range(1, total_pages + 1),
-            format_func=lambda number: f"{number} of {total_pages}",
+        forecasts = dict(
+            workflow_store.items("forecast")
         )
-        visible = cards.iloc[(page - 1) * 12:page * 12]
-        if visible.empty:
-            st.info("No decoded lines match these filters.")
 
-        columns = st.columns(3)
-        for index, (_, card) in enumerate(visible.iterrows()):
-            card_id = "|".join(str(card[field]) for field in card_keys)
-            with columns[index % 3]:
-                with st.container(border=True):
-                    st.subheader(str(card["Player"]))
-                    st.caption(str(card["Game"]))
-                    st.write(f"**{card['Stat']} · {card['Line']:g}**")
-                    st.caption(
-                        f"{str(card['Platform']).upper()} · "
-                        f"{card['Line Type']} · Period: {card['Period']}"
+        line_rows = []
+        records = []
+
+        stat_names = {
+            "PTS": "PTS",
+            "REB": "REB",
+            "AST": "AST",
+            "STL": "STL",
+            "BLK": "BLK",
+            "TOV": "TO",
+            "FG3M": "3PM",
+        }
+
+        for _, card in cards.iterrows():
+            record = card.to_dict()
+            frozen = forecasts.get(identity(record))
+            result = frozen["result"] if frozen else None
+            stat_columns = market_columns(record)
+
+            if fantasy_weights(record):
+                label = "Fantasy"
+
+            elif stat_columns:
+                label = "+".join(
+                    stat_names[column]
+                    for column in stat_columns
+                )
+
+            else:
+                label = str(record["Stat"])
+
+            if result:
+                model_side = (
+                    "🟢 MORE"
+                    if result["direction"] == "MORE"
+                    else "🔴 LESS"
+                )
+            else:
+                model_side = "Calculate board"
+
+            estimated_probability = (
+                result.get("estimated_hit_probability")
+                if result
+                else None
+            )
+
+            line_rows.append({
+                "Player": str(record["Player"]),
+                "Stat": label,
+                "Line": float(record["Line"]),
+                "Model side": model_side,
+                "Projection": (
+                    round(result["projection"], 2)
+                    if result
+                    else None
+                ),
+                "Est. hit %": (
+                    round(100 * estimated_probability, 1)
+                    if estimated_probability is not None
+                    else None
+                ),
+                "Platform": str(record["Platform"]).upper(),
+                "Tier": record["Line Type"],
+                "Eligible side": (
+                    result.get("selection_allowed", True)
+                    if result
+                    else None
+                ),
+            })
+
+            records.append(record)
+
+        if line_rows:
+            st.caption(
+                "Tap a row to open its full breakdown below. "
+                "Confirm current lines before entering a play."
+            )
+
+            selection = st.dataframe(
+                pd.DataFrame(line_rows),
+                hide_index=True,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="player_lines_table",
+                height=min(
+                    680,
+                    38 + 35 * len(line_rows),
+                ),
+                column_config={
+                    "Line": st.column_config.NumberColumn(
+                        format="%.1f"
+                    ),
+                    "Projection": st.column_config.NumberColumn(
+                        format="%.2f"
+                    ),
+                },
+            )
+
+            if selection.selection.rows:
+                chosen = selection.selection.rows[0]
+
+                if 0 <= chosen < len(records):
+                    st.session_state["selected_prop_card"] = (
+                        records[chosen]
                     )
-                    st.write("**Model pick:** Pending")
-                    st.write("**Projection:** Unavailable")
-                    if st.button(
-                        "View breakdown",
-                        key=f"breakdown_{card_id}",
-                        use_container_width=True,
-                    ):
-                        st.session_state["selected_prop_card"] = (
-                            card.to_dict()
-                        )
 
-        selected_card = st.session_state.get("selected_prop_card")
+        else:
+            st.info(
+                "No decoded lines match these filters."
+            )
+
+        selected_card = st.session_state.get(
+            "selected_prop_card"
+        )
+
         if selected_card is not None:
             st.divider()
+
             with st.container(border=True):
                 st.subheader(
-                    f"{selected_card['Player']} — Player breakdown"
+                    f"{selected_card['Player']} "
+                    "— Player breakdown"
                 )
-                st.caption(str(selected_card["Game"]))
+
+                st.caption(
+                    str(selected_card["Game"])
+                )
+
                 st.write(
                     f"**{str(selected_card['Platform']).upper()} · "
                     f"{selected_card['Stat']} · "
                     f"{selected_card['Line']:g}**"
                 )
+
                 st.caption(
-                    "Historical results are shown below. "
-                    "Model projections and pick explanations "
-                    "are not connected yet."
+                    "History, availability, matchup inputs, "
+                    "pricing and projection details."
                 )
+
                 render_card_history(selected_card)
 
         with st.expander("View raw market data"):
             st.dataframe(
-                filtered.drop(columns=["Stat Key", "Period"]),
+                filtered.drop(
+                    columns=["Stat Key", "Period"]
+                ),
                 use_container_width=True,
                 hide_index=True,
             )
 
         with st.expander("Grouped threshold inventory"):
             grouped = (
-                df.groupby(group_keys + ["Game", "Stat"], dropna=False)
+                df.groupby(
+                    group_keys + ["Game", "Stat"],
+                    dropna=False,
+                )
                 .agg(
                     Thresholds=(
                         "Line",
                         lambda values: ", ".join(
-                            str(value) for value in sorted(
+                            str(value)
+                            for value in sorted(
                                 set(values.dropna())
                             )
                         ),
                     ),
-                    Threshold_Count=("Line", "nunique"),
-                    Active_Outcomes=("Player", "size"),
+                    Threshold_Count=(
+                        "Line",
+                        "nunique",
+                    ),
+                    Active_Outcomes=(
+                        "Player",
+                        "size",
+                    ),
                     Explicit_Tiers=(
                         "Line Type",
-                        lambda values: ", ".join(sorted(set(values))),
+                        lambda values: ", ".join(
+                            sorted(set(values))
+                        ),
                     ),
                 )
                 .reset_index()
             )
+
             st.dataframe(
-                grouped, use_container_width=True, hide_index=True
+                grouped,
+                use_container_width=True,
+                hide_index=True,
             )
 
         st.download_button(
             "Download decoded inventory CSV",
-            data=df.to_csv(index=False).encode("utf-8"),
+            data=df.to_csv(
+                index=False
+            ).encode("utf-8"),
             file_name="nba_prop_inventory_v4.csv",
             mime="text/csv",
         )
+
         st.caption(
             "Zero or missing handicaps remain flagged for review. "
             "Multiple thresholds do not establish "
             "Standard/Goblin/Demon classification. "
-            "Market data is not a model recommendation."
+            "Unverified tiers remain separate."
         )
 
 
-# ---------------- HISTORICAL DATA PANEL ----------------
+# ---------------- OPTIONAL DISCOVERY PREVIEW ----------------
 
 st.divider()
-st.subheader("NBA historical stats")
-st.info(
-    "First load the discovery batch. Then open a player breakdown "
-    "to load current and previous season history. "
-    "If no board has been scanned, the Scan button loads odds. "
-    "Saved ESPN responses use a local SQLite cache. Streamlit "
-    "can erase local files on redeploy; external durable storage "
-    "is still pending."
-)
 
-history_season = st.selectbox(
-    "Historical season",
-    ["2026-27", "2025-26"],
-    key="history_season",
-)
-
-if st.button("LOAD NBA DISCOVERY BATCH"):
-    try:
-        with st.spinner("Requesting real NBA player game logs..."):
-            history = load_nba_player_logs(history_season)
-        st.session_state["nba_history"] = history
-        st.session_state["nba_history_season"] = history_season
-    except Exception as error:
-        st.session_state.pop("nba_history", None)
-        st.session_state.pop("nba_history_season", None)
-        st.error("NBA historical connection failed.")
-        st.code(
-            f"{type(error).__name__}: {error}", language="text"
-        )
-        st.caption("No sample data was substituted.")
-
-if (
-    "nba_history" in st.session_state
-    and st.session_state.get("nba_history_season") == history_season
+with st.expander(
+    "Optional NBA historical discovery preview"
 ):
-    history = st.session_state["nba_history"]
-    logs = history["logs"]
-    st.success(
-        f"Loaded {len(logs):,} player-game records for {history_season}."
-    )
-    st.caption(
-        "Source: ESPN · Seven-calendar-day discovery batch · "
-        f"Regular season · Latest game returned: "
-        f"{logs['GAME_DATE'].max():%Y-%m-%d} · "
-        f"Retrieved at (UTC): {history['retrieved_at']} · Cache: 1 hour"
-    )
-    st.dataframe(
-        logs[
-            [
-                "PLAYER_NAME", "GAME_DATE", "MATCHUP", "MIN",
-                "PTS", "REB", "AST", "STL", "BLK", "TOV", "FG3M",
-            ]
-        ].head(30),
-        use_container_width=True,
-        hide_index=True,
-    )
-    st.caption(
-        "Showing 30 discovery records as a preview. "
-        "Open a player breakdown to load deeper history."
+    st.info(
+        "Player breakdowns resolve current roster identities "
+        "automatically. This optional discovery batch provides "
+        "a league preview. Saved ESPN responses use a local cache. "
+        "The main board and forecasts use permanent storage "
+        "when DATABASE_URL is configured."
     )
 
-with st.expander("What is connected and what remains"):
-    st.write(
-        "Connected: NBA odds scanner, market decoding, player cards, "
-        "filters, historical research for supported markets, "
-        "H2H averages, static game charts, team scoring comparisons, "
-        "manual ESPN roster and injury checks, grouped thresholds "
-        "and CSV download."
+    _season_year = int(
+        current_season().split("-")[0]
     )
+
+    _previous_season = (
+        f"{_season_year - 1}-{str(_season_year)[-2:]}"
+    )
+
+    history_season = st.selectbox(
+        "Historical season",
+        [
+            current_season(),
+            _previous_season,
+        ],
+        key="history_season",
+    )
+
+    if st.button("LOAD NBA DISCOVERY BATCH"):
+        try:
+            with st.spinner(
+                "Requesting real NBA player game logs..."
+            ):
+                history = load_nba_player_logs(
+                    history_season
+                )
+
+            st.session_state["nba_history"] = history
+            st.session_state["nba_history_season"] = (
+                history_season
+            )
+
+        except Exception as error:
+            st.session_state.pop(
+                "nba_history",
+                None,
+            )
+
+            st.session_state.pop(
+                "nba_history_season",
+                None,
+            )
+
+            st.error(
+                "NBA historical connection failed."
+            )
+
+            st.code(
+                f"{type(error).__name__}: {error}",
+                language="text",
+            )
+
+            st.caption(
+                "No sample data was substituted."
+            )
+
+    if (
+        "nba_history" in st.session_state
+        and st.session_state.get(
+            "nba_history_season"
+        ) == history_season
+    ):
+        history = st.session_state["nba_history"]
+        logs = history["logs"]
+
+        st.success(
+            f"Loaded {len(logs):,} player-game records "
+            f"for {history_season}."
+        )
+
+        st.caption(
+            "Source: ESPN · Seven-calendar-day discovery batch · "
+            f"Regular season · Latest game returned: "
+            f"{logs['GAME_DATE'].max():%Y-%m-%d} · "
+            f"Retrieved at (UTC): {history['retrieved_at']} · "
+            "Cache: 1 hour"
+        )
+
+        st.dataframe(
+            logs[
+                [
+                    "PLAYER_NAME",
+                    "GAME_DATE",
+                    "MATCHUP",
+                    "MIN",
+                    "PTS",
+                    "REB",
+                    "AST",
+                    "STL",
+                    "BLK",
+                    "TOV",
+                    "FG3M",
+                ]
+            ].head(30),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+with st.expander(
+    "What is connected and what remains"
+):
+    st.write(
+        "Connected: NBA odds scanner, market decoding, compact "
+        "player lines, historical research, rolling windows, H2H, "
+        "static charts, team efficiency, position defense, "
+        "roster/depth-chart matching, injury checks, projections, "
+        "game-market context, matching prop pricing, frozen forecasts, "
+        "automatic research grading, guarded learning reviews, "
+        "model paper ROI and percentage tracking by PrizePicks tier."
+    )
+
     st.write(
         "Unmatched players and unsupported markets remain unavailable. "
-        "Injury checks are not confirmed starting lineups."
+        "Depth charts and active roster status are not confirmed "
+        "starting lineups. Initial percentage estimates are "
+        "experimental and are audited against real outcomes."
     )
+
     st.write(
-        "Pending: photos, pace and efficiency rankings, "
-        "defense versus position, confirmed lineups, "
-        "P1/P2 projections, NFL, fantasy scoring mappings, "
-        "DraftKings lineup builders, saved picks, ROI audits "
-        "and external durable storage."
+        "Outside this NBA release: other sports, salary-cap lineup "
+        "builders, additional fantasy scoring systems and verified "
+        "starting-lineup feeds. Permanent storage and scheduled "
+        "maintenance require DATABASE_URL."
     )
+
 
 if HISTORY_DB.exists():
     st.download_button(
@@ -3062,3 +6689,6 @@ if HISTORY_DB.exists():
         file_name="sports_lab_history.sqlite3",
         mime="application/vnd.sqlite3",
     )
+
+
+# ================= END OF APP.PY =================
