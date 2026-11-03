@@ -1066,185 +1066,256 @@ def render_history_graph(sample, h2h_games, card):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def load_team_advanced(season):
-    params = {
-        "MeasureType": "Advanced",
-        "PerMode": "PerGame",
-        "LeagueID": "00",
-        "Season": season,
-        "SeasonType": "Regular Season",
-        "LastNGames": 0,
-        "Month": 0,
-        "OpponentTeamID": 0,
-        "PaceAdjust": "N",
-        "PlusMinus": "N",
-        "Rank": "N",
-        "Period": 0,
-    }
+    from html.parser import HTMLParser
+    import math
 
+    class TeamTables(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.tables = []
+            self.table = None
+            self.row = None
+            self.cell = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "table":
+                self.table = []
+            elif tag == "tr" and self.table is not None:
+                self.row = []
+            elif tag in ("td", "th") and self.row is not None:
+                self.cell = []
+
+        def handle_data(self, data):
+            if self.cell is not None:
+                self.cell.append(data)
+
+        def handle_endtag(self, tag):
+            if tag in ("td", "th") and self.cell is not None:
+                self.row.append(
+                    " ".join("".join(self.cell).split())
+                )
+                self.cell = None
+            elif tag == "tr" and self.row is not None:
+                self.table.append(self.row)
+                self.row = None
+            elif tag == "table" and self.table is not None:
+                self.tables.append(self.table)
+                self.table = None
+
+    year = int(season.split("-")[0])
+    if season != f"{year}-{str(year + 1)[-2:]}":
+        raise ValueError("Invalid season format.")
+
+    url = (
+        f"https://www.nbastuffer.com/"
+        f"{year}-{year + 1}-nba-team-stats/"
+    )
     response = requests.get(
-        "https://stats.nba.com/stats/leaguedashteamstats",
-        params=params,
-        headers={
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://www.nba.com/",
-        },
-        timeout=12,
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=(5, 15),
     )
     response.raise_for_status()
-    payload = response.json()
 
-    if payload.get("parameters", {}).get("Season") != season:
-        raise ValueError("NBA Stats returned a different season.")
+    parser = TeamTables()
+    parser.feed(response.text)
 
-    tables = payload.get("resultSets", [])
-    if not tables:
-        raise ValueError("NBA Stats returned no tables.")
-
-    table = tables[0]
-    frame = pd.DataFrame(
-        table["rowSet"],
-        columns=table["headers"],
+    required = {"TEAM", "GP", "PACE", "oEFF", "dEFF"}
+    table = next(
+        (
+            table for table in parser.tables
+            if table and required.issubset(table[0])
+        ),
+        None,
     )
-
-    numeric_fields = [
-        "GP",
-        "OFF_RATING",
-        "DEF_RATING",
-        "PACE",
-        "OFF_RATING_RANK",
-        "DEF_RATING_RANK",
-        "PACE_RANK",
-    ]
-    required = {"TEAM_ID", "TEAM_NAME", *numeric_fields}
-
-    if not required.issubset(frame.columns):
-        raise ValueError("Required NBA team stats are missing.")
-
-    for field in numeric_fields:
-        frame[field] = pd.to_numeric(
-            frame[field], errors="coerce"
+    if table is None:
+        raise ValueError(
+            "The expected regular-season team table was not found."
         )
+
+    # First matching table is overall.
+    # Subsequent tables contain last-five, home and road splits.
+    headers = table[0]
+    records = []
+    for values in table[1:]:
+        if values == headers:
+            continue
+        if len(values) != len(headers):
+            raise ValueError("Incomplete team statistics row.")
+        records.append(dict(zip(headers, values)))
+
+    names = {
+        "Atlanta": "Atlanta Hawks",
+        "Boston": "Boston Celtics",
+        "Brooklyn": "Brooklyn Nets",
+        "Charlotte": "Charlotte Hornets",
+        "Chicago": "Chicago Bulls",
+        "Cleveland": "Cleveland Cavaliers",
+        "Dallas": "Dallas Mavericks",
+        "Denver": "Denver Nuggets",
+        "Detroit": "Detroit Pistons",
+        "Golden State": "Golden State Warriors",
+        "Houston": "Houston Rockets",
+        "Indiana": "Indiana Pacers",
+        "LA Clippers": "Los Angeles Clippers",
+        "LA Lakers": "Los Angeles Lakers",
+        "Memphis": "Memphis Grizzlies",
+        "Miami": "Miami Heat",
+        "Milwaukee": "Milwaukee Bucks",
+        "Minnesota": "Minnesota Timberwolves",
+        "New Orleans": "New Orleans Pelicans",
+        "New York": "New York Knicks",
+        "Oklahoma City": "Oklahoma City Thunder",
+        "Orlando": "Orlando Magic",
+        "Philadelphia": "Philadelphia 76ers",
+        "Phoenix": "Phoenix Suns",
+        "Portland": "Portland Trail Blazers",
+        "Sacramento": "Sacramento Kings",
+        "San Antonio": "San Antonio Spurs",
+        "Toronto": "Toronto Raptors",
+        "Utah": "Utah Jazz",
+        "Washington": "Washington Wizards",
+    }
 
     if (
-        len(frame) != 30
-        or frame["TEAM_ID"].nunique() != 30
-        or frame[list(required)].isna().any().any()
-        or (frame["GP"] <= 0).any()
+        len(records) != 30
+        or {row["TEAM"] for row in records} != set(names)
     ):
         raise ValueError(
-            "Complete statistics for all 30 teams are unavailable."
+            "Expected 30 unique NBA teams. No substitute data used."
         )
+
+    rows = []
+    for record in records:
+        games, pace, offense, defense = (
+            float(record[column])
+            for column in ("GP", "PACE", "oEFF", "dEFF")
+        )
+
+        if not all(
+            math.isfinite(value) and value > 0
+            for value in (games, pace, offense, defense)
+        ):
+            raise ValueError("Missing or invalid team statistic.")
+
+        if not games.is_integer():
+            raise ValueError("Invalid game count.")
+
+        rows.append({
+            "TEAM_NAME": names[record["TEAM"]],
+            "GP": int(games),
+            "OFF_RATING": offense,
+            "DEF_RATING": defense,
+            "PACE": pace,
+        })
+
+    frame = pd.DataFrame(rows)
+
+    for value, rank, ascending in (
+        ("OFF_RATING", "OFF_RATING_RANK", False),
+        ("DEF_RATING", "DEF_RATING_RANK", True),
+        ("PACE", "PACE_RANK", False),
+    ):
+        frame[rank] = frame[value].rank(
+            ascending=ascending,
+            method="min",
+        ).astype(int)
 
     return {
         "data": frame,
+        "source_url": url,
         "fetched_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 def render_team_advanced(card):
     st.markdown("#### Team efficiency & pace")
-
     season = st.session_state.get(
         "nba_history_season", "2026-27"
     )
-    state_key = (
-        f"team_advanced_{card['Fixture ID']}_{season}"
-    )
 
-    def team_name_key(name):
-        return normalize_player(name).replace(
-            "losangeles", "la"
-        )
+    try:
+        # One shared request per season per hour.
+        # Opening another card reuses the cached table.
+        with st.spinner("Loading team efficiency and rankings..."):
+            result = load_team_advanced(season)
 
-    if st.button(
-        "Load NBA efficiency & pace",
-        key=f"load_{state_key}",
-    ):
-        st.session_state.pop(state_key, None)
-
-        try:
-            with st.spinner(
-                "Loading NBA team efficiency and rankings..."
-            ):
-                result = load_team_advanced(season)
-
-            names = {
-                team_name_key(name)
-                for name in str(card["Game"]).split(" vs ")
-            }
-            frame = result["data"]
-            matched = frame[
-                frame["TEAM_NAME"].map(team_name_key).isin(names)
-            ].copy()
-
-            if len(names) != 2 or len(matched) != 2:
-                raise ValueError(
-                    "Both matchup teams could not be matched."
-                )
-
-            st.session_state[state_key] = {
-                "data": matched,
-                "fetched_at": result["fetched_at"],
-            }
-
-        except Exception as error:
-            st.error("NBA efficiency data could not be loaded.")
-            st.code(
-                f"{type(error).__name__}: {error}",
-                language="text",
+        def team_key(name):
+            return normalize_player(name).replace(
+                "losangeles", "la"
             )
-            
 
-    result = st.session_state.get(state_key)
-    if result is None:
-        st.caption(
-            "Click Load to request team efficiency. "
-            "This does not use OddsPAPI."
+        names = {
+            team_key(name)
+            for name in str(card["Game"]).split(" vs ")
+        }
+
+        frame = result["data"]
+        matched = frame[
+            frame["TEAM_NAME"].map(team_key).isin(names)
+        ].copy()
+
+        if len(names) != 2 or len(matched) != 2:
+            raise ValueError(
+                "Both matchup teams could not be matched."
+            )
+
+    except Exception as error:
+        st.error(
+            "Team efficiency data unavailable. "
+            "Other research remains available."
+        )
+        st.code(
+            f"{type(error).__name__}: {error}",
+            language="text",
         )
         return
 
-    display = result["data"][
-        [
-            "TEAM_NAME",
-            "GP",
-            "OFF_RATING",
-            "OFF_RATING_RANK",
-            "DEF_RATING",
-            "DEF_RATING_RANK",
-            "PACE",
-            "PACE_RANK",
-        ]
-    ].rename(columns={
+    labels = {
         "TEAM_NAME": "Team",
         "GP": "Games",
-        "OFF_RATING": "Offensive rating",
+        "OFF_RATING": "Offensive efficiency",
         "OFF_RATING_RANK": "Offense rank",
-        "DEF_RATING": "Defensive rating",
+        "DEF_RATING": "Defensive efficiency",
         "DEF_RATING_RANK": "Defense rank",
         "PACE": "Pace",
         "PACE_RANK": "Pace rank",
-    })
+    }
 
     st.dataframe(
-        display,
+        matched[list(labels)].rename(columns=labels),
         hide_index=True,
         use_container_width=True,
     )
+
     st.caption(
-        f"Source: NBA Stats · {season} regular season · "
-        f"App fetched (UTC): {result['fetched_at']} · "
-        "Responses cached for one hour."
+        f"Source: NBAstuffer · {season} regular season · "
+        f"App fetched (UTC): {result['fetched_at']}."
     )
+
+    st.markdown(
+        f"[View source table]({result['source_url']})"
+    )
+
     st.caption(
-        "Offensive rating: points scored per 100 possessions. "
-        "Defensive rating: points allowed per 100 possessions. "
+        "Offense/defense: points scored/allowed per 100 possessions. "
         "Pace: possessions per 48 minutes. "
-        "Rank 1 means best offense, best defense, or fastest pace."
+        "Rankings calculated across all 30 teams; ties share a rank. "
+        "Rank 1 means highest offense, lowest defense, or fastest pace."
     )
+
     st.caption(
-        "Season-to-date statistics, not reconstructed as of an "
-        "earlier fixture. These are team-level statistics; "
-        "defense versus position and P2 adjustments are pending."
+        "Loads automatically when you open a breakdown. "
+        "Shared responses cached for one hour. No OddsPAPI calls. "
+        "Fetch time is not the publisher update time; "
+        "source freshness is unconfirmed. "
+        "These figures may differ from NBA Stats."
+    )
+
+    st.caption(
+        "Season-to-date team figures, not reconstructed as of an "
+        "earlier fixture. Defense versus position and P2 adjustments "
+        "are not connected yet."
     )
 
 
