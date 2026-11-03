@@ -933,10 +933,7 @@ def render_team_scoring(card):
             "or defense versus position."
         )
 
-    st.caption(
-        "Pace, offensive/defensive efficiency, and league "
-        "rankings are not connected yet."
-    )
+    
 
 
 # ---------------- STATIC HISTORY GRAPH ----------------
