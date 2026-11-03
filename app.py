@@ -2024,7 +2024,7 @@ def render_calculated_pick(history, card, season):
             )
 
         team, athlete, roster_time = matches[0]
-            position, position_evidence = engine_position(
+        position, position_evidence = engine_position(
             team, athlete, season
         )
         st.caption(
