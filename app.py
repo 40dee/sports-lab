@@ -4294,7 +4294,7 @@ ENGINE_VERSION = "minutes-rates-matchup-v1"
 
 def engine_team_key(name):
     return normalize_player(name).replace("losangeles", "la")
- def engine_game_context(card):
+def engine_game_context(card):
     try:
         start = pd.to_datetime(
             card["Start (UTC)"], utc=True, errors="raise"
