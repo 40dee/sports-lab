@@ -1633,7 +1633,7 @@ def engine_game_context(card):
                 "Home and away teams are not identified."
             )
 
-               quote_url = url
+        quote_url = url
         quote_params = params
         quote_feed = "ESPN scoreboard"
 
