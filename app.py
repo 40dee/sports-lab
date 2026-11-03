@@ -2172,7 +2172,7 @@ render_calculated_pick(history, card, season)
 cutoff = pd.to_datetime(
         card["Start (UTC)"], utc=True, errors="coerce"
     )
-    if pd.isna(cutoff):
+if pd.isna(cutoff):
         st.info(
             "Missing fixture start time: historical comparison unavailable."
         )
