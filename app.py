@@ -1633,17 +1633,60 @@ def engine_game_context(card):
                 "Home and away teams are not identified."
             )
 
-        books = [
-            quote
-            for quote in competition.get("odds", [])
-            if str(
-                quote.get("provider", {}).get("name", "")
-            ).lower() == "draftkings"
-        ]
+               quote_url = url
+        quote_params = params
+        quote_feed = "ESPN scoreboard"
+
+        def draftkings_quotes(items):
+            unique = {}
+
+            for quote in items:
+                if not isinstance(quote, dict):
+                    continue
+
+                provider = quote.get("provider", {})
+                name = (
+                    provider.get("name")
+                    or provider.get("displayName", "")
+                )
+
+                if normalize_player(name) not in (
+                    "draftkings", "draftkingssportsbook"
+                ):
+                    continue
+
+                unique[json.dumps(quote, sort_keys=True)] = quote
+
+            return list(unique.values())
+
+        books = draftkings_quotes(
+            competition.get("odds") or []
+        )
+
+        if len(books) != 1:
+            quote_url = ESPN_BASE + "summary"
+            quote_params = {"event": str(event["id"])}
+            summary = saved_fetch(
+                quote_url, quote_params, ttl_seconds=300
+            )
+
+            if str(summary.get("header", {}).get("id")) != (
+                str(event["id"])
+            ):
+                raise ValueError(
+                    "ESPN summary returned a different game."
+                )
+
+            books = draftkings_quotes(
+                summary.get("pickcenter") or []
+            )
+            quote_feed = "ESPN game summary"
+
         if len(books) != 1:
             raise ValueError(
-                "A unique DraftKings game-market quote "
-                "is unavailable."
+                "Neither ESPN feed returned one unique "
+                "DraftKings quote. No spread or blowout-risk "
+                "estimate was substituted."
             )
 
         odds = books[0]
@@ -1727,8 +1770,10 @@ def engine_game_context(card):
             "total": total,
             "risk": risk,
             "moneyline_no_vig": no_vig,
-            "source": "DraftKings via ESPN scoreboard",
-            "fetched_at": cached_response_time(url, params),
+            "source": "DraftKings via " + quote_feed,
+            "fetched_at": cached_response_time(
+                quote_url, quote_params
+            ),
             "feed_timestamp": board.get("timestamp"),
             "quote": odds,
         }
