@@ -1560,7 +1560,92 @@ ENGINE_VERSION = "minutes-rates-matchup-v1"
 def engine_team_key(name):
     return normalize_player(name).replace("losangeles", "la")
 
+def engine_position(team, athlete, season):
+    roster_position = athlete.get("position", {}).get(
+        "abbreviation", "Unavailable"
+    )
+    evidence = {
+        "source": "ESPN roster",
+        "position": roster_position,
+        "candidates": [],
+        "note": "Roster position; not a confirmed game assignment.",
+    }
 
+    url = ESPN_BASE + f"teams/{team['id']}/depthcharts"
+
+    try:
+        data = saved_fetch(url, {}, ttl_seconds=300)
+
+        if str(data.get("team", {}).get("id")) != str(team["id"]):
+            raise ValueError("Depth-chart team did not match.")
+
+        expected_year = int(season.split("-")[0]) + 1
+
+        if str(data.get("season", {}).get("year")) != str(expected_year):
+            raise ValueError("Depth-chart season did not match.")
+
+        ranks = {}
+
+        for chart in data.get("depthchart", []):
+            for entry in chart.get("positions", {}).values():
+                position = entry.get("position", {}).get(
+                    "abbreviation"
+                )
+
+                if position not in ("PG", "SG", "SF", "PF", "C"):
+                    continue
+
+                for rank, player in enumerate(
+                    entry.get("athletes", []), 1
+                ):
+                    if str(player.get("id")) == str(athlete["id"]):
+                        ranks[position] = min(
+                            rank, ranks.get(position, rank)
+                        )
+
+        evidence.update({
+            "url": url,
+            "source_timestamp": data.get("timestamp"),
+            "fetched_at": cached_response_time(url, {}),
+            "candidates": [
+                {"position": position, "depth_order": rank}
+                for position, rank in sorted(ranks.items())
+            ],
+        })
+
+        if ranks:
+            best_rank = min(ranks.values())
+            best = [
+                position
+                for position, rank in ranks.items()
+                if rank == best_rank
+            ]
+
+            if len(best) == 1:
+                position = best[0]
+                evidence.update({
+                    "source": "ESPN depth chart",
+                    "position": position,
+                    "note": (
+                        "Unique highest depth-chart placement. "
+                        "Not confirmed starting status or "
+                        "position minutes."
+                    ),
+                })
+                return position, evidence
+
+        evidence["note"] = (
+            "No unique depth-chart role. Using roster position; "
+            "broad G/F labels receive no position adjustment."
+        )
+
+    except Exception as error:
+        evidence["note"] = (
+            "Depth-chart lookup unavailable: "
+            f"{type(error).__name__}. Using roster position."
+        )
+
+    return roster_position, evidence
 def engine_no_vig(card):
     import math
 
@@ -1939,8 +2024,12 @@ def render_calculated_pick(history, card, season):
             )
 
         team, athlete, roster_time = matches[0]
-        position = athlete.get("position", {}).get(
-            "abbreviation", "Unavailable"
+                position, position_evidence = engine_position(
+            team, athlete, season
+        )
+        st.caption(
+            f"Position source: {position_evidence['source']} · "
+            f"{position_evidence['note']}"
         )
 
         advanced = None
@@ -1973,6 +2062,7 @@ def render_calculated_pick(history, card, season):
         )
 
         market = engine_no_vig(card)
+        result["position_evidence"] = position_evidence
         result["market"] = market
         result["roster"] = {
             "fetched_at": roster_time,
@@ -2052,7 +2142,7 @@ def render_calculated_pick(history, card, season):
     )
     st.write(
         f"Estimated minutes: **{result['minutes']:.1f}** · "
-        f"Roster position: **{position}**"
+        f"Matchup position: **{position}**"
     )
 
     if result["tie"]:
