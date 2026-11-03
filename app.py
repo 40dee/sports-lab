@@ -1315,11 +1315,249 @@ def render_team_advanced(card):
         "are not connected yet."
     )
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_position_defense():
+    from html.parser import HTMLParser
+    import math
 
+    class PositionTableParser(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.rows = []
+            self.row = None
+            self.cell = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "tr":
+                self.row = []
+            elif tag in ("td", "th"):
+                self.cell = []
+
+        def handle_data(self, data):
+            if self.cell is not None:
+                self.cell.append(data)
+
+        def handle_endtag(self, tag):
+            if tag in ("td", "th") and self.cell is not None:
+                if self.row is not None:
+                    self.row.append(
+                        " ".join(" ".join(self.cell).split())
+                    )
+                self.cell = None
+            elif tag == "tr" and self.row is not None:
+                self.rows.append(self.row)
+                self.row = None
+
+    url = "https://hashtagbasketball.com/nba-defense-vs-position"
+    response = requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"},
+        timeout=(5, 20),
+    )
+    response.raise_for_status()
+
+    parser = PositionTableParser()
+    parser.feed(response.text)
+
+    team_names = {
+        "ATL": "Atlanta Hawks",
+        "BOS": "Boston Celtics",
+        "BKN": "Brooklyn Nets",
+        "CHA": "Charlotte Hornets",
+        "CHI": "Chicago Bulls",
+        "CLE": "Cleveland Cavaliers",
+        "DAL": "Dallas Mavericks",
+        "DEN": "Denver Nuggets",
+        "DET": "Detroit Pistons",
+        "GS": "Golden State Warriors",
+        "HOU": "Houston Rockets",
+        "IND": "Indiana Pacers",
+        "LAC": "Los Angeles Clippers",
+        "LAL": "Los Angeles Lakers",
+        "MEM": "Memphis Grizzlies",
+        "MIA": "Miami Heat",
+        "MIL": "Milwaukee Bucks",
+        "MIN": "Minnesota Timberwolves",
+        "NO": "New Orleans Pelicans",
+        "NY": "New York Knicks",
+        "OKC": "Oklahoma City Thunder",
+        "ORL": "Orlando Magic",
+        "PHI": "Philadelphia 76ers",
+        "PHO": "Phoenix Suns",
+        "POR": "Portland Trail Blazers",
+        "SAC": "Sacramento Kings",
+        "SA": "San Antonio Spurs",
+        "TOR": "Toronto Raptors",
+        "UTA": "Utah Jazz",
+        "WAS": "Washington Wizards",
+    }
+
+    stat_indexes = {
+        "Points": 2,
+        "Threes made": 5,
+        "Rebounds": 6,
+        "Assists": 7,
+        "Steals": 8,
+        "Blocks": 9,
+        "Turnovers": 10,
+    }
+    records = {}
+
+    for cells in parser.rows:
+        if len(cells) != 11:
+            continue
+        position = cells[0]
+        if position not in ("PG", "SG", "SF", "PF", "C"):
+            continue
+
+        abbreviation = cells[1].split()[0]
+        if abbreviation not in team_names:
+            raise ValueError(
+                f"Unrecognized source team: {abbreviation}"
+            )
+
+        record = {
+            "Team": team_names[abbreviation],
+            "Position": position,
+        }
+        for stat, index in stat_indexes.items():
+            # Each source cell contains the value followed by a rank.
+            value = float(cells[index].split()[0])
+            if not math.isfinite(value) or value < 0:
+                raise ValueError("Invalid position-defense value.")
+            record[stat] = value
+
+        identity = (abbreviation, position)
+        previous = records.get(identity)
+        if previous is not None and previous != record:
+            raise ValueError("Conflicting position-defense rows.")
+        records[identity] = record
+
+    expected = {
+        (team, position)
+        for team in team_names
+        for position in ("PG", "SG", "SF", "PF", "C")
+    }
+    if set(records) != expected:
+        raise ValueError(
+            "The source did not return all 30 teams and 5 positions."
+        )
+
+    frame = pd.DataFrame(records.values())
+    for stat in stat_indexes:
+        frame[stat + " rank"] = (
+            frame.groupby("Position")[stat]
+            .rank(
+                method="min",
+                ascending=(stat != "Turnovers"),
+            )
+            .astype(int)
+        )
+
+    return {
+        "data": frame,
+        "url": url,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def render_position_defense(card):
+    st.markdown("#### Defense versus position")
+
+    try:
+        with st.spinner("Loading defense versus position..."):
+            result = load_position_defense()
+
+        def team_key(name):
+            return normalize_player(name).replace(
+                "losangeles", "la"
+            )
+
+        names = {
+            team_key(name)
+            for name in str(card["Game"]).split(" vs ")
+        }
+        frame = result["data"]
+        matched = frame[
+            frame["Team"].map(team_key).isin(names)
+        ].copy()
+
+        if len(names) != 2 or len(matched) != 10:
+            raise ValueError(
+                "Both matchup teams could not be matched."
+            )
+
+    except Exception as error:
+        st.warning(
+            "Defense versus position unavailable. "
+            "Other research remains available."
+        )
+        st.code(
+            f"{type(error).__name__}: {error}",
+            language="text",
+        )
+        return
+
+    stat = st.selectbox(
+        "Position-defense statistic",
+        [
+            "Points", "Rebounds", "Assists", "Threes made",
+            "Steals", "Blocks", "Turnovers",
+        ],
+        key=f"dvp_stat_{card['Fixture ID']}",
+    )
+
+    display = matched[
+        ["Team", "Position", stat, stat + " rank"]
+    ].rename(columns={
+        stat: "Allowed per 48 minutes",
+        stat + " rank": "Rank within position",
+    })
+
+    position_order = {
+        "PG": 0, "SG": 1, "SF": 2, "PF": 3, "C": 4,
+    }
+    display["_order"] = display["Position"].map(position_order)
+    display = display.sort_values(
+        ["_order", "Team"]
+    ).drop(columns="_order")
+
+    st.dataframe(
+        display,
+        hide_index=True,
+        use_container_width=True,
+    )
+    st.caption(
+        "PG: point guard · SG: shooting guard · "
+        "SF: small forward · PF: power forward · C: center."
+    )
+    st.caption(
+        "Rank compares all 30 defenses against the same position. "
+        "Rank 1 means fewest allowed; for turnovers, it means "
+        "most opponent turnovers. Ties share a rank."
+    )
+    st.caption(
+        "These are position-group statistics per 48 minutes, "
+        "not an individual player's expected game total or "
+        "a specific defender assignment."
+    )
+    st.caption(
+        "Source: Hashtag Basketball live table. "
+        "Not filtered by your historical-season selector or "
+        "reconstructed for an earlier fixture. "
+        "Publisher update time is not verified by this app."
+    )
+    st.caption(
+        f"App fetched (UTC): {result['fetched_at']} · "
+        "Shared cache: up to one hour · No OddsPAPI calls."
+    )
+    st.markdown(f"[View source table]({result['url']})")
 def render_card_history(card):
     render_player_availability(card)
     render_team_scoring(card)
     render_team_advanced(card)
+    render_position_defense(card)
+    
 
     columns = market_columns(card)
     if columns is None:
