@@ -240,7 +240,12 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -f data/nba_team_advanced.json ]; then
           git add data/nba_team_advanced.json
+          else
+            echo "::error::NBA statistics file was not created."
+            exit 1
+          fi
           if ! git diff --cached --quiet; then
             git commit -m "Update NBA team efficiency statistics"
             git push
