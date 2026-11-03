@@ -1559,7 +1559,246 @@ ENGINE_VERSION = "minutes-rates-matchup-v1"
 
 def engine_team_key(name):
     return normalize_player(name).replace("losangeles", "la")
+def engine_game_context(card):
+    import math
 
+    try:
+        start = pd.to_datetime(
+            card["Start (UTC)"], utc=True, errors="raise"
+        )
+        if start <= pd.Timestamp.now(tz="UTC"):
+            raise ValueError(
+                "Game has reached its listed start time."
+            )
+
+        names = {
+            engine_team_key(name)
+            for name in str(card["Game"]).split(" vs ")
+        }
+        if len(names) != 2:
+            raise ValueError(
+                "Two distinct matchup teams are required."
+            )
+
+        date = start.tz_convert(
+            "America/New_York"
+        ).strftime("%Y%m%d")
+
+        url = ESPN_BASE + "scoreboard"
+        params = {"dates": date}
+        board = saved_fetch(url, params, ttl_seconds=300)
+        matches = []
+
+        for event in board.get("events", []):
+            event_start = pd.to_datetime(
+                event.get("date"), utc=True, errors="coerce"
+            )
+            if pd.isna(event_start):
+                continue
+            if abs((event_start - start).total_seconds()) > 900:
+                continue
+
+            for competition in event.get("competitions", []):
+                competitors = competition.get("competitors", [])
+                returned_names = {
+                    engine_team_key(
+                        item.get("team", {}).get("displayName", "")
+                    )
+                    for item in competitors
+                }
+                if returned_names == names and len(competitors) == 2:
+                    matches.append((event, competition))
+
+        if len(matches) != 1:
+            raise ValueError(
+                "No unique ESPN game matched both teams "
+                "and the fixture start time."
+            )
+
+        event, competition = matches[0]
+        status = competition.get(
+            "status", event.get("status", {})
+        )
+        if status.get("type", {}).get("state") != "pre":
+            raise ValueError(
+                "ESPN does not identify this game as pregame."
+            )
+
+        teams = {
+            item["homeAway"]: item["team"]
+            for item in competition["competitors"]
+        }
+        if set(teams) != {"home", "away"}:
+            raise ValueError(
+                "Home and away teams are not identified."
+            )
+
+        books = [
+            quote
+            for quote in competition.get("odds", [])
+            if str(
+                quote.get("provider", {}).get("name", "")
+            ).lower() == "draftkings"
+        ]
+        if len(books) != 1:
+            raise ValueError(
+                "A unique DraftKings game-market quote "
+                "is unavailable."
+            )
+
+        odds = books[0]
+        spreads = odds.get("pointSpread", {})
+
+        home_spread = float(
+            spreads.get("home", {}).get("close", {}).get("line")
+        )
+        away_spread = float(
+            spreads.get("away", {}).get("close", {}).get("line")
+        )
+
+        if not all(
+            math.isfinite(value) and abs(value) <= 100
+            for value in (home_spread, away_spread)
+        ):
+            raise ValueError("Invalid spread values.")
+
+        if abs(home_spread + away_spread) > 0.001:
+            raise ValueError(
+                "Home and away spreads do not match."
+            )
+
+        total = None
+        if odds.get("overUnder") is not None:
+            total = float(odds["overUnder"])
+            if not math.isfinite(total) or not 0 < total < 500:
+                raise ValueError("Invalid game total.")
+
+        if home_spread < 0:
+            favorite = teams["home"]["displayName"]
+        elif home_spread > 0:
+            favorite = teams["away"]["displayName"]
+        else:
+            favorite = "Pick'em"
+
+        spread_size = abs(home_spread)
+        if spread_size >= 10:
+            risk = "Higher"
+        elif spread_size >= 5:
+            risk = "Moderate"
+        else:
+            risk = "Lower"
+
+        moneyline = odds.get("moneyline", {})
+        implied = {}
+
+        for side in ("home", "away"):
+            try:
+                price = float(
+                    moneyline.get(side, {})
+                    .get("close", {})
+                    .get("odds")
+                )
+                if math.isfinite(price) and abs(price) >= 100:
+                    implied[side] = (
+                        100 / (price + 100)
+                        if price > 0
+                        else -price / (-price + 100)
+                    )
+            except (TypeError, ValueError):
+                pass
+
+        no_vig = None
+        if len(implied) == 2:
+            denominator = sum(implied.values())
+            no_vig = {
+                side: probability / denominator
+                for side, probability in implied.items()
+            }
+
+        return {
+            "available": True,
+            "event_id": str(event["id"]),
+            "start": start.isoformat(),
+            "home": teams["home"]["displayName"],
+            "away": teams["away"]["displayName"],
+            "home_spread": home_spread,
+            "away_spread": away_spread,
+            "favorite": favorite,
+            "total": total,
+            "risk": risk,
+            "moneyline_no_vig": no_vig,
+            "source": "DraftKings via ESPN scoreboard",
+            "fetched_at": cached_response_time(url, params),
+            "feed_timestamp": board.get("timestamp"),
+            "quote": odds,
+        }
+
+    except Exception as error:
+        return {
+            "available": False,
+            "reason": f"{type(error).__name__}: {error}",
+        }
+
+
+def render_game_context(context):
+    st.markdown("#### Game market & blowout risk")
+
+    if not context["available"]:
+        st.write("**Blowout risk: Unavailable**")
+        st.caption(context["reason"])
+        return
+
+    color = {
+        "Lower": "🟢",
+        "Moderate": "🟡",
+        "Higher": "🔴",
+    }[context["risk"]]
+
+    st.write(
+        f"**Blowout risk: {color} {context['risk']}**"
+    )
+    st.write(f"**Favorite:** {context['favorite']}")
+    st.write(
+        f"**Spread:** "
+        f"{context['home']} {context['home_spread']:+g} · "
+        f"{context['away']} {context['away_spread']:+g}"
+    )
+
+    if context["total"] is not None:
+        st.write(f"**Game total:** {context['total']:g}")
+    else:
+        st.caption("Game total unavailable.")
+
+    no_vig = context["moneyline_no_vig"]
+    if no_vig:
+        st.write(
+            "**No-vig game-win market:** "
+            f"{context['home']} {no_vig['home']:.1%} · "
+            f"{context['away']} {no_vig['away']:.1%}"
+        )
+        st.caption(
+            "Game-win market estimates only. "
+            "These are not player-prop probabilities."
+        )
+
+    st.caption(
+        "Spread-based indicator: Lower below 5 points; "
+        "Moderate from 5 to below 10; Higher at 10 or more. "
+        "These are initial display thresholds, not calibrated "
+        "blowout probabilities. Lower does not mean no risk."
+    )
+    st.caption(
+        "Displayed and saved as game context. "
+        "No blowout minutes deduction or automatic UNDER "
+        "rule is applied yet."
+    )
+    st.caption(
+        f"Source: {context['source']} · "
+        f"App fetched (UTC): "
+        f"{context['fetched_at'] or 'Unavailable'} · "
+        "Cache: up to 5 minutes. Fetch time is not the "
+        "sportsbook quote-update time. No OddsPAPI calls."
+    )
 def engine_position(team, athlete, season):
     roster_position = athlete.get("position", {}).get(
         "abbreviation", "Unavailable"
@@ -2064,6 +2303,8 @@ def render_calculated_pick(history, card, season):
         market = engine_no_vig(card)
         result["position_evidence"] = position_evidence
         result["market"] = market
+        result["game_context"] = engine_game_context(card)
+        render_game_context(result["game_context"])
         result["roster"] = {
             "fetched_at": roster_time,
             "athlete": athlete,
