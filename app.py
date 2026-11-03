@@ -1552,6 +1552,565 @@ def render_position_defense(card):
         "Shared cache: up to one hour · No OddsPAPI calls."
     )
     st.markdown(f"[View source table]({result['url']})")
+# ---------------- CONNECTED PROJECTION ENGINE ----------------
+
+ENGINE_VERSION = "minutes-rates-matchup-v1"
+
+
+def engine_team_key(name):
+    return normalize_player(name).replace("losangeles", "la")
+
+
+def engine_no_vig(card):
+    import math
+
+    fields = (
+        "Fixture ID", "Market ID", "Period", "Line", "Line Type",
+    )
+    pairs = {}
+
+    for row in st.session_state.get("v4_rows", []):
+        if row.get("Platform") != "draftkings":
+            continue
+
+        if any(
+            str(row.get(field)) != str(card.get(field))
+            for field in fields
+        ):
+            continue
+
+        if normalize_player(row.get("Player", "")) != (
+            normalize_player(card["Player"])
+        ):
+            continue
+
+        try:
+            price = float(row["Odds"])
+        except (TypeError, ValueError, KeyError):
+            continue
+
+        if not math.isfinite(price) or abs(price) < 100:
+            continue
+
+        probability = (
+            100 / (price + 100)
+            if price > 0
+            else -price / (-price + 100)
+        )
+
+        identity = (
+            str(row["Player ID"]),
+            str(row["Market ID"]),
+        )
+        sides = pairs.setdefault(identity, {})
+        direction = row.get("Direction")
+
+        if direction in ("MORE", "LESS"):
+            sides.setdefault(direction, set()).add(
+                (price, probability)
+            )
+
+    valid = []
+
+    for sides in pairs.values():
+        if set(sides) != {"MORE", "LESS"}:
+            continue
+        if any(len(sides[side]) != 1 for side in sides):
+            continue
+
+        over = next(iter(sides["MORE"]))
+        under = next(iter(sides["LESS"]))
+        total = over[1] + under[1]
+
+        valid.append({
+            "book": "draftkings",
+            "over_price": over[0],
+            "under_price": under[0],
+            "more": over[1] / total,
+            "less": under[1] / total,
+        })
+
+    return valid[0] if len(valid) == 1 else None
+
+
+def calculate_player_projection(
+    history, card, season, team_name, position,
+    advanced=None, position_data=None,
+):
+    import math
+
+    now = pd.Timestamp.now(tz="UTC")
+    start = pd.to_datetime(
+        card["Start (UTC)"], utc=True, errors="coerce"
+    )
+
+    if pd.isna(start) or start <= now:
+        raise ValueError(
+            "New projections require a future fixture start time."
+        )
+
+    current_year = (
+        now.year if now.month >= 10 else now.year - 1
+    )
+    current_season = (
+        f"{current_year}-{str(current_year + 1)[-2:]}"
+    )
+
+    if season != current_season:
+        raise ValueError(
+            "Choose the current season for a pregame projection."
+        )
+
+    columns = market_columns(card)
+    if not columns:
+        raise ValueError(
+            "This market's scoring is not mapped yet."
+        )
+
+    line = float(card["Line"])
+    if not math.isfinite(line) or line <= 0:
+        raise ValueError(
+            "A verified positive prop line is required."
+        )
+
+    sample = history.copy()
+    sample["GAME_DATE"] = pd.to_datetime(
+        sample["GAME_DATE"], utc=True
+    )
+    sample = sample[
+        (sample["GAME_DATE"] < now)
+        & (sample["SEASON"] == season)
+    ]
+    sample["MIN"] = pd.to_numeric(
+        sample["MIN"], errors="coerce"
+    )
+    sample = sample[
+        sample["MIN"].between(0.01, 70)
+    ]
+    sample = (
+        sample.drop_duplicates("GAME_ID")
+        .sort_values("GAME_DATE", ascending=False)
+    )
+
+    if len(sample) < 3:
+        raise ValueError(
+            "At least 3 current-season appearances are needed."
+        )
+
+    minutes = min(
+        float(sample.head(5)["MIN"].mean()), 48.0
+    )
+    estimates = {}
+    components = []
+    warnings = []
+
+    if len(sample) < 10:
+        warnings.append(
+            "Small sample: fewer than 10 current-season appearances."
+        )
+
+    pace_factor = 1.0
+    opponent = None
+    advanced_frame = None
+
+    if advanced is not None:
+        advanced_frame = advanced["data"].copy()
+        advanced_frame["_key"] = (
+            advanced_frame["TEAM_NAME"].map(engine_team_key)
+        )
+        lookup = advanced_frame.set_index("_key")
+
+        names = [
+            engine_team_key(name)
+            for name in str(card["Game"]).split(" vs ")
+        ]
+        own = engine_team_key(team_name)
+        opponents = [
+            name for name in names if name != own
+        ]
+
+        if (
+            len(names) == 2
+            and own in names
+            and len(opponents) == 1
+        ):
+            candidate = opponents[0]
+
+            if own in lookup.index and candidate in lookup.index:
+                opponent = candidate
+                own_pace = float(lookup.loc[own, "PACE"])
+                opponent_pace = float(
+                    lookup.loc[opponent, "PACE"]
+                )
+                game_pace = (own_pace + opponent_pace) / 2
+                pace_factor = max(
+                    0.90,
+                    min(1.10, game_pace / own_pace),
+                )
+
+    if opponent is None:
+        warnings.append(
+            "Pace adjustment unavailable; pace factor is 1.0."
+        )
+
+    stat_labels = {
+        "PTS": "Points",
+        "REB": "Rebounds",
+        "AST": "Assists",
+        "FG3M": "Threes made",
+        "STL": "Steals",
+        "BLK": "Blocks",
+        "TOV": "Turnovers",
+    }
+
+    position_rows = None
+
+    if (
+        position_data is not None
+        and position in ("PG", "SG", "SF", "PF", "C")
+    ):
+        position_rows = position_data["data"]
+        position_rows = position_rows[
+            position_rows["Position"] == position
+        ].copy()
+        position_rows["_key"] = (
+            position_rows["Team"].map(engine_team_key)
+        )
+    else:
+        warnings.append(
+            "Exact position or position-defense data unavailable; "
+            "no position adjustment applied."
+        )
+
+    for stat in columns:
+        values = pd.to_numeric(
+            sample[stat], errors="coerce"
+        )
+        games = sample[
+            values.notna() & values.ge(0)
+        ].head(15).copy()
+
+        if len(games) < 3:
+            raise ValueError(
+                f"Fewer than 3 usable {stat} appearances."
+            )
+
+        games[stat] = pd.to_numeric(games[stat])
+        rate = float(
+            games[stat].sum() / games["MIN"].sum()
+        )
+        matchup = 1.0
+
+        if position_rows is not None and opponent is not None:
+            label = stat_labels[stat]
+            allowed = position_rows[
+                position_rows["_key"] == opponent
+            ]
+
+            if len(allowed) == 1 and advanced_frame is not None:
+                mean_allowed = float(
+                    position_rows[label].mean()
+                )
+                pace_lookup = advanced_frame.set_index(
+                    "_key"
+                )["PACE"]
+                opponent_pace = float(
+                    pace_lookup.loc[opponent]
+                )
+                league_pace = float(
+                    advanced_frame["PACE"].mean()
+                )
+
+                if mean_allowed > 0:
+                    residual = (
+                        float(allowed.iloc[0][label])
+                        / mean_allowed
+                        / (opponent_pace / league_pace)
+                    )
+
+                    # Initial settings, not learned weights.
+                    matchup = max(
+                        0.90,
+                        min(
+                            1.10,
+                            1 + 0.25 * (residual - 1),
+                        ),
+                    )
+
+        estimate = minutes * rate * pace_factor * matchup
+
+        if not math.isfinite(estimate):
+            raise ValueError(
+                "Calculation produced an invalid value."
+            )
+
+        estimates[stat] = estimate
+        components.append({
+            "Stat": stat,
+            "Games": len(games),
+            "Per minute": rate,
+            "Expected minutes": minutes,
+            "Pace factor": pace_factor,
+            "Position factor": matchup,
+            "Projection": estimate,
+        })
+
+    projection = sum(estimates.values())
+
+    return {
+        "version": ENGINE_VERSION,
+        "projection": projection,
+        "direction": "MORE" if projection > line else "LESS",
+        "line": line,
+        "gap": projection - line,
+        "tie": abs(projection - line) < 1e-9,
+        "minutes": minutes,
+        "team": team_name,
+        "position": position,
+        "components": components,
+        "warnings": warnings,
+        "games": sample.head(15).to_json(
+            orient="records", date_format="iso"
+        ),
+        "advanced": (
+            None if advanced is None else {
+                "fetched_at": advanced["fetched_at"],
+                "rows": advanced["data"].to_dict(
+                    orient="records"
+                ),
+            }
+        ),
+        "position_data": (
+            None if position_data is None else {
+                "fetched_at": position_data["fetched_at"],
+                "rows": position_data["data"].to_dict(
+                    orient="records"
+                ),
+            }
+        ),
+    }
+
+
+def render_calculated_pick(history, card, season):
+    import hashlib
+
+    st.markdown("#### Calculated projection")
+
+    try:
+        identity = resolve_player(card["Player"])
+        if identity is None:
+            raise ValueError(
+                "A unique ESPN player identity is required."
+            )
+
+        names = {
+            engine_team_key(name)
+            for name in str(card["Game"]).split(" vs ")
+        }
+        teams = [
+            team for team in espn_teams()
+            if engine_team_key(team["displayName"]) in names
+        ]
+
+        if len(teams) != 2:
+            raise ValueError(
+                "Both fixture teams must be identified."
+            )
+
+        matches = []
+
+        for team in teams:
+            url = ESPN_BASE + f"teams/{team['id']}/roster"
+            roster = saved_fetch(
+                url, {}, ttl_seconds=300
+            )
+
+            for athlete in roster.get("athletes", []):
+                if str(athlete.get("id")) == str(identity[0]):
+                    matches.append((
+                        team,
+                        athlete,
+                        cached_response_time(url, {}),
+                    ))
+
+        if len(matches) != 1:
+            raise ValueError(
+                "Player must match exactly one fixture roster."
+            )
+
+        team, athlete, roster_time = matches[0]
+        position = athlete.get("position", {}).get(
+            "abbreviation", "Unavailable"
+        )
+
+        advanced = None
+        position_data = None
+        missing = []
+
+        try:
+            advanced = load_team_advanced(season)
+        except Exception:
+            missing.append(
+                "Team pace feed unavailable; no pace adjustment."
+            )
+
+        try:
+            position_data = load_position_defense()
+        except Exception:
+            missing.append(
+                "Position-defense feed unavailable; "
+                "no position adjustment."
+            )
+
+        result = calculate_player_projection(
+            history,
+            card,
+            season,
+            team["displayName"],
+            position,
+            advanced,
+            position_data,
+        )
+
+        market = engine_no_vig(card)
+        result["market"] = market
+        result["roster"] = {
+            "fetched_at": roster_time,
+            "athlete": athlete,
+        }
+        result["availability_check"] = st.session_state.get(
+            f"availability_v3_{card['Fixture ID']}_{identity[0]}"
+        )
+        result["warnings"].extend(missing)
+        result["warnings"].append(
+            "Conditional on playing the estimated minutes. "
+            "Injury-driven role changes, confirmed lineups, "
+            "and blowout risk are not modeled in this version."
+        )
+
+        frozen = {
+            "card": dict(card),
+            "season": season,
+            "result": result,
+            "odds_scan_at": st.session_state.get("v4_scan_at"),
+        }
+        payload = json.dumps(
+            frozen,
+            sort_keys=True,
+            default=str,
+            allow_nan=False,
+        )
+        snapshot_id = hashlib.sha256(
+            payload.encode()
+        ).hexdigest()
+
+        saved = False
+        start = pd.to_datetime(
+            card["Start (UTC)"], utc=True
+        )
+
+        if pd.Timestamp.now(tz="UTC") < start:
+            con = history_connection()
+            try:
+                with con:
+                    con.execute(
+                        "CREATE TABLE IF NOT EXISTS "
+                        "prediction_snapshots "
+                        "(id TEXT PRIMARY KEY, "
+                        "created TEXT, payload TEXT)"
+                    )
+                    con.execute(
+                        "INSERT OR IGNORE INTO "
+                        "prediction_snapshots VALUES (?,?,?)",
+                        (
+                            snapshot_id,
+                            datetime.now(timezone.utc).isoformat(),
+                            payload,
+                        ),
+                    )
+                saved = True
+            finally:
+                con.close()
+
+    except Exception as error:
+        st.error(
+            "Projection unavailable: "
+            f"{type(error).__name__}: {error}"
+        )
+        return
+
+    icon = (
+        "🟢 ↑" if result["direction"] == "MORE" else "🔴 ↓"
+    )
+    st.subheader(
+        f"{icon} {result['direction']} · "
+        f"Projection {result['projection']:.2f}"
+    )
+    st.write(
+        f"Line: **{result['line']:g}** · "
+        f"Projected difference: **{result['gap']:+.2f}**"
+    )
+    st.write(
+        f"Estimated minutes: **{result['minutes']:.1f}** · "
+        f"Roster position: **{position}**"
+    )
+
+    if result["tie"]:
+        st.caption(
+            "Projection equals line. LESS is only a fixed "
+            "tie-break, with no projected edge."
+        )
+
+    st.dataframe(
+        pd.DataFrame(result["components"]).round(4),
+        hide_index=True,
+        use_container_width=True,
+    )
+
+    if market:
+        st.write(
+            f"DraftKings no-vig MORE: **{market['more']:.1%}** · "
+            f"LESS: **{market['less']:.1%}**"
+        )
+        st.caption(
+            "Matching same-market prices only. "
+            "These are market estimates, not the model's "
+            "win probabilities. They are not blended into "
+            "the projection in this version."
+        )
+    else:
+        st.caption(
+            "No-vig unavailable: no unique matching "
+            "DraftKings over/under price pair."
+        )
+
+    st.caption(
+        "Initial formula: last-5 mean minutes × pooled last-15 "
+        "stat/minute, using available current-season appearances. "
+        "Pace adjustment capped at ±10%. Position adjustment "
+        "uses 25% of the tempo-adjusted difference from the "
+        "position average, capped at ±10%. These settings "
+        "have not been learned or validated."
+    )
+
+    for warning in dict.fromkeys(result["warnings"]):
+        st.caption(warning)
+
+    st.caption(
+        "No OddsPAPI requests are made by this section. "
+        "Automatic learning is not active."
+    )
+    st.caption(
+        "Pregame calculation saved locally."
+        if saved else
+        "Fixture started before saving; no pregame record saved."
+    )
+    st.caption(
+        "The historical response-cache backup also includes "
+        "these prediction snapshots. Local SQLite storage "
+        "can be lost on redeployment; permanent external "
+        "storage is not configured yet."
+    )
 def render_card_history(card):
     render_player_availability(card)
     render_team_scoring(card)
@@ -1608,8 +2167,9 @@ def render_card_history(card):
                 f"{type(error).__name__}: {error}"
             )
             return
-
-    cutoff = pd.to_datetime(
+render_calculated_pick(history, card, season)
+    
+cutoff = pd.to_datetime(
         card["Start (UTC)"], utc=True, errors="coerce"
     )
     if pd.isna(cutoff):
