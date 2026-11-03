@@ -5201,7 +5201,7 @@ def render_calculated_pick(history, card, season):
         "paper records and models. Configure DATABASE_URL "
         "for permanent storage."
     )
- def render_card_history(card):
+def render_card_history(card):
     render_player_availability(card)
     render_team_scoring(card)
     render_team_advanced(card)
