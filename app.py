@@ -6068,21 +6068,21 @@ def ui_card(card, frozen, saved=False):
     proj_text = f'{projection:.2f}' if projection is not None else '—'
     prob_text = f'{probability:.0%}' if probability is not None else '—'
     stat = ui_stat(card)
-    st.markdown(f'''<div class="sl-card">
+    st.markdown(f'''<div class="sl-card sl-compact">
       <div class="sl-person">{portrait}<div class="sl-player-info">
       <h3>{ui_text(name)}</h3><div class="sl-team">{ui_text(card.get('Game', ''))}</div>
       <div class="sl-prop">{ui_text(stat)} <span class="sl-dot">·</span> Line {line_text}</div>
       <div class="sl-muted">{ui_text(platform)}{(' · ' + ui_text(tier)) if tier else ''}</div>
       </div></div>
       <div class="sl-pickline"><div class="sl-side {direction_class}">{ui_text(direction_text)}</div>
-      <div class="sl-proj"><small>Model projection</small><b>{proj_text}</b></div>
+      <div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
       <div class="sl-proj"><small>Est. hit</small><b>{prob_text}</b></div></div>
       </div>''', unsafe_allow_html=True)
     if result and not result.get('selection_allowed', True):
         st.caption('This direction is not offered for the selected platform/tier.')
     key = identity(card)
     left, right = st.columns([3, 1])
-    if left.button('View research  ›', key='detail_' + key, use_container_width=True):
+    if left.button('Research  ›', key='detail_' + key, use_container_width=True):
         st.session_state['selected_prop_card'] = dict(card)
         st.rerun()
     if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, use_container_width=True):
@@ -6407,21 +6407,27 @@ def ui_board(page):
     if not records:
         st.info("No matching upcoming picks for today (Pacific time). Try All props or clear filters. The app will not substitute tomorrow's games. Imports and calculation are under Settings.")
         return
-    pages = max(1, (len(records) + 11) // 12)
+    per_page = 24
+    pages = max(1, (len(records) + per_page - 1) // per_page)
     page_number = int(st.number_input('Page', min_value=1, max_value=pages, value=1, step=1, key='mobile_page_' + page + '_' + kind + '_' + platform + '_' + str(len(records))))
-    for card in records[(page_number - 1) * 12:page_number * 12]:
-        key = identity(card)
-        frozen = forecasts.get(key)
-        ui_card(card, frozen, key in saved)
-        if page == 'Saved':
-            saved_value = saved[key]
-            st.caption('Saved at (UTC): ' + saved_value['saved_at'])
-            candidates = [row for row in rows if ui_matches_family(card, row)]
-            lines = sorted({float(row['Line']) for row in candidates if ui_number(row.get('Line')) is not None})
-            if lines:
-                st.caption('Latest imported thresholds: ' + ', '.join(f'{n:g}' for n in lines) + '. Alternate lines are not proof of line movement. A uniquely matched quote history is needed for a movement claim.')
-            else:
-                st.caption('No matching quote in the current imported board. Original saved line preserved.')
+    visible = records[(page_number - 1) * per_page:page_number * per_page]
+    for offset in range(0, len(visible), 2):
+        card_columns = st.columns(2, gap='small')
+        for column, card in zip(card_columns, visible[offset:offset + 2]):
+            with column:
+                key = identity(card)
+                frozen = forecasts.get(key)
+                ui_card(card, frozen, key in saved)
+                if page == 'Saved':
+                    saved_value = saved[key]
+                    st.caption('Saved at (UTC): ' + saved_value['saved_at'])
+                    candidates = [row for row in rows if ui_matches_family(card, row)]
+                    lines = sorted({float(row['Line']) for row in candidates if ui_number(row.get('Line')) is not None})
+                    if lines:
+                        st.caption('Latest imported thresholds: ' + ', '.join(f'{n:g}' for n in lines) + '. Alternate lines are not proof of line movement. A uniquely matched quote history is needed for a movement claim.')
+                    else:
+                        st.caption('No matching quote in the current imported board. Original saved line preserved.')
+
 
 
 # ---------------- APP HEADER ----------------
@@ -6458,6 +6464,28 @@ st.markdown("""<style>
 .stApp [data-testid="stRadio"] label {border-radius:12px;}
 .stApp [data-testid="stMetric"] {background:#15283a;border:1px solid #395168;border-radius:12px;padding:10px;}
 @media(max-width:600px){.block-container{padding:1rem .65rem 6rem;}.sl-card{padding:12px;}.sl-photo{width:65px;height:75px;}.sl-detail-photo{width:82px;height:94px;}.sl-person h3{font-size:1.09rem;}.sl-detail-heading h2{font-size:1.25rem;}.sl-pickline,.sl-hero{padding:9px 6px;gap:5px;}.sl-side{font-size:.83rem;min-width:90px;padding:9px 5px;}.sl-proj small{font-size:.57rem;}.sl-proj b{font-size:1.17rem;}.sl-hero .sl-proj b{font-size:1.45rem;}}
+
+/* Board cards: compact two-column desktop layout, stacked by Streamlit on phones. */
+.sl-card.sl-compact {border-radius:12px;padding:10px 11px 8px;margin:7px 0 2px;box-shadow:none;}
+.sl-compact .sl-person {gap:9px;}
+.sl-compact .sl-photo {width:46px;height:52px;border-radius:9px;}
+.sl-compact .sl-initial {font-size:18px;}
+.sl-compact .sl-player-info {min-width:0;flex:1;}
+.sl-compact .sl-person h3 {font-size:1rem;line-height:1.2;overflow-wrap:anywhere;}
+.sl-compact .sl-team {font-size:.7rem;line-height:1.2;margin-top:2px;font-weight:500;}
+.sl-compact .sl-prop {font-size:.82rem;margin-top:3px;font-weight:700;}
+.sl-compact .sl-muted {font-size:.65rem;margin-top:2px;line-height:1.2;}
+.sl-compact .sl-pickline {padding:6px 7px;margin-top:7px;border-radius:9px;gap:6px;}
+.sl-compact .sl-side {min-width:78px;padding:6px 7px;font-size:.82rem;border-radius:8px;box-shadow:none;border-width:1px;}
+.sl-compact .sl-side.pending {font-size:.67rem;white-space:normal;}
+.sl-compact .sl-proj small {font-size:.59rem;}
+.sl-compact .sl-proj b {font-size:1.08rem;line-height:1.15;}
+@media(max-width:600px){
+ .sl-card.sl-compact {padding:8px 10px 7px;margin:5px 0 1px;}
+ .sl-compact .sl-photo {width:42px;height:47px;}
+ .sl-compact .sl-person h3 {font-size:.96rem;}
+ .sl-compact .sl-pickline {padding:5px 7px;margin-top:6px;}
+}
 </style>""", unsafe_allow_html=True)
 st.markdown("## ▥ SPORTS :green[LAB]")
 st.caption("Model picks · Research · Results")
