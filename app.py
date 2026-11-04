@@ -6497,7 +6497,7 @@ def pp_card_key(card):
     return normalize_player(card["Player"]), columns, start.isoformat()
 
 
-def pp_merge_tiers(rows, projections, fetched):
+def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
     templates = {}
     player_games = {}
     for row in rows:
@@ -6565,6 +6565,7 @@ def pp_merge_tiers(rows, projections, fetched):
                 matched.add((key, line))
     kept = [r for r in rows if not (
         r.get("Platform") == "prizepicks"
+        and (not fantasy_only or bool(fantasy_weights(r)))
         and (r.get("Tier Source") == "prizepicksapi.com" or
              (pp_card_key(r), numeric_line(r.get("Line"))) in matched)
     )]
@@ -6611,89 +6612,136 @@ def pp_fantasy_check(rows, payload):
             'Imported fantasy lines today':len({identity(r) for r in rows if fantasy_weights(r)})}, details
 
 
+def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, reference=None):
+    """Persist each successful page; explicit calls only, with a hard request cap."""
+    current = pd.Timestamp.now(tz='UTC') if reference is None else pd.to_datetime(reference, utc=True)
+    saved = store.get('source', cache_key) or {}
+    stamp = pd.to_datetime(saved.get('updated_at'), utc=True, errors='coerce')
+    reusable = (saved.get('version') == 3 and saved.get('filters') == filters
+                and saved.get('slate_day') == slate_day(current)
+                and pd.notna(stamp) and 0 <= (current-stamp).total_seconds() < 1800)
+    if reusable and not saved.get('partial') and (current-stamp).total_seconds() < 300:
+        return saved, 0
+    continuing = reusable and saved.get('partial') and saved.get('next_cursor')
+    state = dict(saved) if continuing else {
+        'version':3, 'filters':dict(filters), 'slate_day':slate_day(current),
+        'items':[], 'fetched_at':current.isoformat(), 'updated_at':current.isoformat(),
+        'next_cursor':None, 'partial':True, 'seen_cursors':[], 'pages_downloaded':0,
+    }
+    items = {str(item['id']):item for item in state['items'] if isinstance(item,dict) and item.get('id')}
+    cursor = state.get('next_cursor') if continuing else None
+    seen = set(state.get('seen_cursors', []))
+    requests_made = 0
+    for _ in range(min(2, max(1, int(max_pages)))):
+        params = dict(filters)
+        if cursor:
+            params['cursor'] = cursor
+        body = fetch_page(params)
+        requests_made += 1
+        meta = body.get('meta') or {}
+        if meta.get('mode') != 'live' or not isinstance(body.get('data'), list):
+            raise ValueError('Expected live projection data. Previous saved pages preserved.')
+        next_cursor = meta.get('next_cursor')
+        if next_cursor is not None and not isinstance(next_cursor,str):
+            raise ValueError('Invalid continuation cursor. Previous saved pages preserved.')
+        if next_cursor and (next_cursor == cursor or next_cursor in seen):
+            raise ValueError('Repeated pagination cursor. Previous saved pages preserved.')
+        for item in body['data']:
+            if not isinstance(item,dict) or not item.get('id'):
+                raise ValueError('Projection record missing ID. Previous saved pages preserved.')
+            items[str(item['id'])] = item
+        if cursor:
+            seen.add(cursor)
+        state.update({'items':list(items.values()), 'next_cursor':next_cursor,
+                      'partial':bool(next_cursor), 'seen_cursors':sorted(seen),
+                      'updated_at':current.isoformat(),
+                      'pages_downloaded':state.get('pages_downloaded',0)+1})
+        store.put('source',cache_key,state)
+        cursor = next_cursor
+        if not cursor:
+            break
+    return state, requests_made
+
+
+def pp_cached_combined():
+    full = workflow_store.get('source','pp_tiers_v1') or {}
+    fantasy = workflow_store.get('source','pp_fantasy_v3') or {}
+    items = {}
+    for payload in (full,fantasy):
+        for item in payload.get('items',[]):
+            if isinstance(item,dict) and item.get('id'):
+                items[str(item['id'])] = item
+    if not full and not fantasy:
+        return None
+    return {'items':list(items.values()), 'fetched_at':fantasy.get('updated_at') or full.get('fetched_at'),
+            'partial':bool(full.get('partial') or fantasy.get('partial'))}
+
+
 def render_pp_tier_refresh():
-    rows = [row for row in st.session_state.get("v4_rows", [])
-            if today_pregame(row.get("Start (UTC)"))]
-    with st.expander("PrizePicks Regular / Goblin / Demon feed"):
-        st.caption("Separate provider. Refresh uses its credits, never OddsPAPI. Up to 5 pages per refresh. Free feed may be delayed.")
-        if st.button("Check Fantasy feed — no API calls"):
-            summary, details = pp_fantasy_check(rows, workflow_store.get("source", "pp_tiers_v1"))
+    rows = [row for row in st.session_state.get('v4_rows',[]) if today_pregame(row.get('Start (UTC)'))]
+    with st.expander('PrizePicks Regular / Goblin / Demon feed'):
+        st.caption('Separate provider, never OddsPAPI. Each refresh below makes at most 2 provider requests. Successful pages and continuation cursors are saved. Cached quotes may be delayed.')
+        if st.button('Check Fantasy feed — no API calls'):
+            summary, details = pp_fantasy_check(rows,pp_cached_combined())
             st.write(summary)
             if details:
-                st.dataframe(pd.DataFrame(details), hide_index=True, use_container_width=True)
+                st.dataframe(pd.DataFrame(details),hide_index=True,use_container_width=True)
             else:
-                st.info("No fantasy-labelled records in the saved feed. This does not mean the PrizePicks website has none. Check the saved feed timestamp and whether its download was incomplete.")
-        if st.button("Rebuild from saved PrizePicks feed — no API calls"):
-            try:
-                payload = workflow_store.get("source", "pp_tiers_v1")
-                if not payload or not isinstance(payload.get("items"), list):
-                    raise ValueError("No saved PrizePicks feed is available. No API request was made.")
-                merged, count = pp_merge_tiers(rows, payload["items"], payload["fetched_at"])
-                st.session_state["v4_rows"] = merged
-                st.session_state.pop("calculated_board", None)
-                st.session_state.pop("selected_prop_card", None)
-                workspace_store("board", {field: st.session_state.get(field) for field in BOARD_FIELDS})
-                fantasy_count = len({identity(row) for row in merged if fantasy_weights(row)})
-                st.session_state["pp_tier_notice"] = (
-                    f"Rebuilt {count} outcomes from the saved feed; {fantasy_count} unique Fantasy Score lines. "
-                    f"Feed fetched (UTC): {payload['fetched_at']}. These are saved quotes, not a fresh refresh. "
-                    "No API calls made. Calculate the board for new forecasts; use Fantasy → All props to inspect imported lines."
-                )
-                st.rerun()
-            except Exception as error:
-                st.error(str(error))
-            return
-        st.caption("Rebuilding retries the last downloaded feed. It cannot add fantasy markets that the provider did not supply. Refresh below uses provider credits.")
-        if not st.button("Refresh PrizePicks lines and tiers"):
+                st.info('No fantasy-labelled records in the saved feed. Use the targeted Fantasy Score refresh for today; website availability and feed availability can differ.')
+        fantasy_refresh = st.button('Refresh Fantasy Score only (max 2 requests)',type='primary')
+        full_refresh = st.button('Refresh PrizePicks lines and tiers')
+        rebuild = st.button('Rebuild from saved PrizePicks feed — no API calls')
+        if not (fantasy_refresh or full_refresh or rebuild):
             return
         try:
-            key = st.secrets.get("PRIZEPICKS_API_KEY", "")
-            if not key:
-                raise ValueError("PRIZEPICKS_API_KEY is missing.")
-            saved = workflow_store.get("source", "pp_tiers_v1")
-            fresh = saved and (pd.Timestamp.now(tz="UTC") - pd.to_datetime(saved["fetched_at"], utc=True)).total_seconds() < 300
-            if fresh:
-                payload = saved
+            if not rows:
+                raise ValueError('No saved upcoming games for today to match against. Your old forecasts are preserved.')
+            calls = 0
+            if rebuild:
+                payload = pp_cached_combined()
+                if not payload:
+                    raise ValueError('No saved feed available. No API request made.')
             else:
-                items, cursor, cursors = [], None, set()
-                for _ in range(5):
-                    params = {"league": "NBA", "status": "active", "limit": 200}
-                    if cursor:
-                        params["cursor"] = cursor
+                key = setting('PRIZEPICKS_API_KEY','')
+                if not key:
+                    raise ValueError('PRIZEPICKS_API_KEY is missing.')
+                filters = {'league':'NBA','status':'active','limit':200}
+                if fantasy_refresh:
+                    filters['stat'] = 'Fantasy Score'
+                def fetch_page(params):
                     try:
-                        response = requests.get(
-                            "https://prizepicksapi.com/api/v1/projections",
-                            headers={"Authorization": "Bearer " + key, "X-User-Request": "Refresh my NBA tier-labelled board"},
-                            params=params, timeout=25,
-                        )
+                        response = requests.get('https://prizepicksapi.com/api/v1/projections',
+                            headers={'Authorization':'Bearer '+key,'X-User-Request':'Refresh my NBA Fantasy Score lines' if fantasy_refresh else 'Refresh my NBA tier-labelled board'},
+                            params=params,timeout=25)
                     except requests.RequestException:
-                        raise ValueError("Tier provider connection failed. Existing board preserved.") from None
+                        raise ValueError('Provider connection failed. Successful saved pages retained.') from None
                     if response.status_code != 200:
-                        raise ValueError(f"Tier provider HTTP {response.status_code}. Existing board preserved.")
-                    body = response.json()
-                    meta = body.get("meta") or {}
-                    if meta.get("mode") != "live" or not isinstance(body.get("data"), list):
-                        raise ValueError("Expected live data; demo/unknown responses rejected.")
-                    items.extend(body["data"])
-                    cursor = meta.get("next_cursor")
-                    if not cursor:
-                        break
-                    if cursor in cursors:
-                        raise ValueError("Repeated pagination cursor; board preserved.")
-                    cursors.add(cursor)
-                payload = {"items": items, "fetched_at": datetime.now(timezone.utc).isoformat(), "partial": bool(cursor)}
-                workflow_store.put("source", "pp_tiers_v1", payload)
-            merged, count = pp_merge_tiers(rows, payload["items"], payload["fetched_at"])
-            st.session_state["v4_rows"] = merged
-            st.session_state.pop("calculated_board", None)
-            st.session_state.pop("selected_prop_card", None)
-            workspace_store("board", {field: st.session_state.get(field) for field in BOARD_FIELDS})
-            st.session_state["pp_tier_notice"] = f"Imported {count} tier-labelled outcomes for matched future games. Calculate the board to save new forecasts. Previous frozen forecasts remain unchanged."
-            if payload["partial"]:
-                st.session_state["pp_tier_notice"] += " Provider page limit reached; coverage is partial."
+                        raise ValueError(f'Provider HTTP {response.status_code}. Successful saved pages retained.')
+                    return response.json()
+                payload,calls = pp_download_pages(workflow_store,
+                    'pp_fantasy_v3' if fantasy_refresh else 'pp_tiers_v1',fetch_page,filters)
+            items = payload['items']
+            if fantasy_refresh:
+                items = [item for item in items if pp_stat_key((item.get('market') or {}).get('stat')) == ('FANTASY',)]
+            if not items:
+                raise ValueError(f'The provider returned no {"Fantasy Score " if fantasy_refresh else ""}records for this request. Downloaded data saved; existing board preserved. Requests made: {calls}.')
+            merged,count = pp_merge_tiers(rows,items,payload['fetched_at'],fantasy_only=fantasy_refresh)
+            st.session_state['v4_rows'] = merged
+            st.session_state.pop('calculated_board',None)
+            st.session_state.pop('selected_prop_card',None)
+            workspace_store('board',{field:st.session_state.get(field) for field in BOARD_FIELDS})
+            fantasy_count = len({identity(row) for row in merged if fantasy_weights(row)})
+            st.session_state['pp_tier_notice'] = (
+                f'Imported {count} outcomes; {fantasy_count} unique Fantasy Score lines. Requests made: {calls}. '
+                'Calculate the board for new projections, then choose PrizePicks → Fantasy → All props. Existing frozen forecasts preserved. '
+                + ('Download incomplete; cursor saved. Click the same refresh to continue, at most 2 more requests. ' if payload.get('partial') else 'This filtered download is complete. ')
+                + 'Feed downloaded from (UTC): '+str(payload.get('fetched_at')))
             st.rerun()
         except Exception as error:
             st.error(str(error))
+            st.caption('No automatic retry or additional refresh is performed. Check Fantasy feed can inspect saved pages without API calls.')
+
+
 
 
 # Import native Kalshi contracts for the games already on the saved board.
