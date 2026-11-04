@@ -1166,164 +1166,107 @@ class Workflow:
 
         return outcomes
 
-    def grade(self, limit=100, time_budget=120):
-        counts = {
-            "graded": 0,
-            "pending": 0,
-            "errors": 0,
-            "DNP": 0,
-        }
+    def grade(self, limit=100, time_budget=120, force_retry=False):
+        """Grade pregame forecasts fairly; keep failures inspectable and retryable."""
+        counts = {"graded": 0, "pending": 0, "errors": 0, "DNP": 0,
+                  "ties": 0, "attempted": 0, "deferred": 0, "remaining": 0}
+        settled = {key for key, _ in self.store.items("grade")}
+        records = [(key, frozen) for key, frozen in self.store.items("forecast")
+                   if key not in settled]
+        current = pd.Timestamp.now(tz="UTC")
+        due = []
+        for key, frozen in records:
+            try:
+                start = pd.to_datetime(frozen["card"]["Start (UTC)"], utc=True)
+                if start > current:
+                    counts["pending"] += 1
+                    continue
+            except (KeyError, ValueError, TypeError):
+                # A malformed forecast is a genuine error, not an upcoming game.
+                pass
+            previous = self.store.get("audit_error", key)
+            if previous and not force_retry:
+                next_retry = pd.to_datetime(previous.get("retry_after"), utc=True, errors="coerce")
+                if pd.notna(next_retry) and next_retry > current:
+                    counts["deferred"] += 1
+                    continue
+            due.append((key, frozen))
 
-        settled = {
-            key
-            for key, _ in self.store.items("grade")
-        }
-
-        pending = [
-            (key, frozen)
-            for key, frozen in self.store.items("forecast")
-            if key not in settled
-        ]
-
-        future = [
-            (key, frozen)
-            for key, frozen in pending
-            if pd.to_datetime(
-                frozen["card"]["Start (UTC)"],
-                utc=True,
-            ) > pd.Timestamp.now(tz="UTC")
-        ]
-
-        counts["pending"] = len(future)
-
-        future_ids = {
-            key
-            for key, _ in future
-        }
-
-        pending = [
-            (key, frozen)
-            for key, frozen in pending
-            if key not in future_ids
-        ]
-
+        # Older failures are not allowed to monopolize the first 20 slots.
+        due.sort(key=lambda item: (
+            bool(self.store.get("audit_error", item[0])),
+            str(item[1].get("card", {}).get("Start (UTC)", "")), item[0]))
         began = time.monotonic()
-
-        for key, frozen in pending[:limit]:
-            if time.monotonic() - began > time_budget:
+        for index, (key, frozen) in enumerate(due):
+            if counts["attempted"] >= limit or time.monotonic() - began > time_budget:
+                counts["remaining"] = len(due) - index
                 break
-
+            counts["attempted"] += 1
             try:
                 card = frozen["card"]
                 result = frozen["result"]
-
-                start = pd.to_datetime(
-                    card["Start (UTC)"],
-                    utc=True,
-                )
-
-                created = pd.to_datetime(
-                    frozen["created_at"],
-                    utc=True,
-                )
-
+                start = pd.to_datetime(card["Start (UTC)"], utc=True)
+                created = pd.to_datetime(frozen["created_at"], utc=True)
                 if created >= start:
-                    raise ValueError(
-                        "Not a pregame forecast."
-                    )
-
+                    raise ValueError("Forecast was not saved before kickoff")
                 if start > pd.Timestamp.now(tz="UTC"):
                     counts["pending"] += 1
                     continue
-
                 event_id = str(frozen["event_id"])
-
                 summary = self.e["saved_fetch"](
-                    self.e["ESPN_BASE"] + "summary",
-                    {"event": event_id},
-                    ttl_seconds=300,
-                )
-
-                returned_event = summary.get(
-                    "header",
-                    {},
-                ).get("id")
-
-                if str(returned_event) != event_id:
-                    raise ValueError(
-                        "Wrong game response."
-                    )
-
+                    self.e["ESPN_BASE"] + "summary", {"event": event_id},
+                    ttl_seconds=300)
+                if str(summary.get("header", {}).get("id")) != event_id:
+                    raise ValueError("ESPN event ID does not match frozen event")
                 actual = completed_actual(
-                    summary,
-                    result["player_id"],
-                    self.e["market_columns"](card),
-                )
-
+                    summary, result["player_id"], self.e["market_columns"](card))
                 if actual is None:
+                    # A final boxscore may still omit a player or unsupported market.
+                    # Do not silently mark missing data as DNP or a loss.
+                    completed = any(c.get("status", {}).get("type", {}).get("completed")
+                                    for c in summary.get("header", {}).get("competitions", []))
+                    if completed:
+                        raise ValueError("Final boxscore missing supported player statistics")
                     counts["pending"] += 1
                     continue
-
-                weights = self.e.get(
-                    "fantasy_weights",
-                    lambda record: None,
-                )(card)
-
-                if (
-                    weights
-                    and actual.get("status") == "FINAL"
-                ):
-                    actual["actual"] = sum(
-                        actual["stats"][column] * weight
-                        for column, weight in weights.items()
-                    )
-
+                weights = self.e.get("fantasy_weights", lambda record: None)(card)
+                if weights and actual.get("status") == "FINAL":
+                    actual["actual"] = sum(actual["stats"][column] * weight
+                                           for column, weight in weights.items())
                 outcome = "DNP"
-
                 if actual["status"] == "FINAL":
-                    difference = (
-                        actual["actual"]
-                        - float(card["Line"])
-                    )
-
+                    difference = actual["actual"] - float(card["Line"])
                     if abs(difference) < 1e-9:
                         outcome = "TIE"
                     else:
-                        correct = (
-                            (difference > 0)
-                            == (result["direction"] == "MORE")
-                        )
+                        if result["direction"] not in ("MORE", "LESS"):
+                            raise ValueError("Forecast has no valid MORE/LESS direction")
+                        correct = (difference > 0) == (result["direction"] == "MORE")
                         outcome = "WIN" if correct else "LOSS"
-
-                grade = dict(
-                    actual,
-                    outcome=outcome,
-                    graded_at=now(),
-                    event_id=event_id,
-                    note=(
-                        "Directional research grade; "
-                        "platform settlement and priced "
-                        "paper ROI are separate."
-                    ),
-                )
-
-                self.store.put(
-                    "grade",
-                    key,
-                    grade,
-                    immutable=True,
-                )
-
-                counter = (
-                    "DNP"
-                    if outcome == "DNP"
-                    else "graded"
-                )
-                counts[counter] += 1
-
-            except Exception:
+                grade = dict(actual, outcome=outcome, graded_at=now(),
+                             event_id=event_id,
+                             note="Directional research grade; platform settlement and priced paper ROI are separate.")
+                self.store.put("grade", key, grade, immutable=True)
+                self.store.put("audit_error", key, {"resolved": True, "resolved_at": now()})
+                counts["DNP" if outcome == "DNP" else "ties" if outcome == "TIE" else "graded"] += 1
+            except Exception as error:
                 counts["errors"] += 1
-
+                prior = self.store.get("audit_error", key, {}) or {}
+                attempts = int(prior.get("attempts", 0)) + 1
+                # No raw exception strings: they can contain API URLs or secrets.
+                reason = str(error) if isinstance(error, (ValueError, KeyError, TypeError)) else type(error).__name__
+                if not isinstance(error, (ValueError, KeyError, TypeError)):
+                    reason = "Unexpected " + type(error).__name__
+                self.store.put("audit_error", key, {
+                    "resolved": False, "type": type(error).__name__,
+                    "reason": reason[:180], "attempts": attempts,
+                    "last_attempt": now(),
+                    "retry_after": (pd.Timestamp.now(tz="UTC") +
+                                    pd.Timedelta(minutes=min(360, 15 * 2 ** min(attempts - 1, 5)))).isoformat(),
+                    "event_id": str(frozen.get("event_id", ""))[:32],
+                    "player": str(frozen.get("card", {}).get("Player", ""))[:90],
+                    "market": str(frozen.get("card", {}).get("Stat", ""))[:90],
+                })
         return counts
 
     def record_paper_forecast(self, frozen):
@@ -2362,6 +2305,23 @@ def render_workflow(wf, st, rows, mode="settings"):
             "workspace backup before redeploying; "
             "set DATABASE_URL once for permanent storage."
         )
+
+    with st.expander("Audit health and unresolved forecasts", expanded=(mode == "results")):
+        status = wf.store.get("maintenance", "last") or {}
+        st.caption("Last maintenance: " + str(status.get("run_at", "Never")))
+        if status.get("grading"):
+            st.json(status["grading"])
+        errors = [{"Forecast ID": key, **value}
+                  for key, value in wf.store.items("audit_error")
+                  if not value.get("resolved")]
+        if errors:
+            st.warning(f"{len(errors)} forecast(s) need another grading attempt")
+            st.dataframe(pd.DataFrame(errors), hide_index=True, use_container_width=True)
+        else:
+            st.caption("No unresolved grading errors recorded.")
+        if st.button("Retry audit now", key="audit_retry_now"):
+            result = wf.grade(limit=100, time_budget=45, force_retry=True)
+            st.json(result)
 
     if mode == "settings":
         with st.expander("Full workspace backup / restore"):
