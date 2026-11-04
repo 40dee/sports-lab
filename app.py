@@ -2825,6 +2825,37 @@ def _today_nba_fixtures(day):
     return sorted(games, key=lambda game: str(game.get("startTime", "")))
 
 
+def scan_schedule_preview(day, fetch, reference=None):
+    """Estimate coverage from public ESPN schedules, without an odds request."""
+    begin = pd.Timestamp(day, tz=SLATE_TIMEZONE)
+    end = begin + pd.DateOffset(days=1)
+    # Include the next UTC date, then enforce the Pacific calendar boundary.
+    dates = begin.strftime('%Y%m%d') + '-' + end.strftime('%Y%m%d')
+    payload = fetch(ESPN_BASE + 'scoreboard', {'dates': dates, 'limit': 1000}, ttl_seconds=300)
+    if not isinstance(payload, dict) or not isinstance(payload.get('events'), list):
+        raise ValueError('Schedule preview unavailable')
+    games = {}
+    for event in payload['events']:
+        start = pd.to_datetime(event.get('date'), utc=True, errors='coerce')
+        status = (event.get('status') or {}).get('type') or {}
+        if (event.get('id') and today_pregame(start, reference)
+                and status.get('state') == 'pre' and not status.get('completed')):
+            games[str(event['id'])] = {'Game': event.get('name', 'NBA game'),
+                'Tipoff (Pacific)': start.tz_convert(SLATE_TIMEZONE).strftime('%b %d · %I:%M %p')}
+    return list(games.values())
+
+
+def merge_scan_rows(previous, decoded, successful_fixtures):
+    """Replace only successful scans; retain native imports and failed-game data."""
+    successful = {str(value) for value in successful_fixtures}
+    retained = [row for row in previous
+        if today_pregame(row.get('Start (UTC)')) and (
+            str(row.get('Fixture ID')) not in successful
+            or row.get('Tier Source') == 'prizepicksapi.com'
+            or row.get('Kalshi Source') == 'public API')]
+    return retained + decoded
+
+
 def upcoming_nba():
     return [game for game in _today_nba_fixtures(slate_day())
             if today_pregame(game.get("startTime"))]
@@ -6939,13 +6970,33 @@ if app_page == "Settings":
     if st.session_state.get("pp_tier_notice"):
         st.info(st.session_state["pp_tier_notice"])
 
-    max_games = st.slider("Today’s games to scan (Pacific time)", 1, 5, 3)
-
-    st.caption(
-        f"Fresh scan uses up to {max_games + 2} API calls. "
-        "Odds are cached for 30 minutes. "
-        "Breakdown, grading and availability do not run this scan."
-    )
+    scan_scope = st.radio('Today’s games to scan (Pacific time)',
+        ['All today’s games', 'Limit game count'], horizontal=True, key='nba_scan_scope')
+    max_games = None
+    if scan_scope == 'Limit game count':
+        max_games = int(st.number_input('Maximum games this scan', min_value=1,
+            value=3, step=1, key='nba_scan_limit'))
+    try:
+        preview = scan_schedule_preview(slate_day(), saved_fetch)
+        estimated_games = len(preview) if max_games is None else min(len(preview), max_games)
+        st.info(f'Estimated scan: {estimated_games} upcoming games today · '
+            f'up to {estimated_games + 2} OddsPAPI HTTP requests if all data is uncached '
+            '(fixtures + market catalog + one odds request per game).')
+        st.caption('Estimate uses the public ESPN schedule, with no OddsPAPI call. '
+            'Provider coverage may differ. HTTP requests are not a guaranteed credit count; '
+            'your provider determines credit charges. Started games are excluded.')
+        with st.expander('Preview today’s upcoming games'):
+            if preview:
+                st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
+            else:
+                st.info('No upcoming games found for today in Pacific time.')
+    except Exception:
+        st.warning('Public schedule preview unavailable. Request estimate unavailable. '
+            'A scan still uses only today’s upcoming provider games: one fixtures request, '
+            'one catalog request, and one odds request per game when uncached.')
+    st.caption('Odds, fixtures and market catalog are cached for 30 minutes. '
+        'Only the scan button below requests OddsPAPI data. '
+        'Breakdown, grading and availability do not run this scan.')
 
     if st.button(
         "🔍 SCAN AND DECODE NBA LINES",
@@ -6953,8 +7004,11 @@ if app_page == "Settings":
     ):
         try:
             with st.spinner("Loading NBA fixtures and market lines..."):
-                games = upcoming_nba()[:max_games]
+                games = upcoming_nba()
+                if max_games is not None:
+                    games = games[:max_games]
                 all_rows, summaries, errors = [], [], []
+                successful_fixtures = set()
 
                 if not games:
                     st.warning(
@@ -6973,8 +7027,11 @@ if app_page == "Settings":
                                 catalog,
                             )
 
+                            if not decoded_rows:
+                                raise ValueError('No decoded lines returned; saved lines retained.')
                             all_rows.extend(decoded_rows)
                             summaries.extend(summary)
+                            successful_fixtures.add(str(game['fixtureId']))
 
                         except ValueError as error:
                             errors.append(
@@ -6983,7 +7040,10 @@ if app_page == "Settings":
                                 f"{error}"
                             )
 
-                st.session_state["v4_rows"] = all_rows
+                st.session_state["v4_rows"] = merge_scan_rows(
+                    st.session_state.get('v4_rows', []), all_rows, successful_fixtures)
+                st.session_state.pop('calculated_board', None)
+                st.session_state.pop('selected_prop_card', None)
                 st.session_state["v4_summary"] = summaries
                 st.session_state["v4_errors"] = errors
                 st.session_state["v4_scan_at"] = (
@@ -6997,6 +7057,11 @@ if app_page == "Settings":
                         for key in BOARD_FIELDS
                     },
                 )
+
+                st.success(f'Scanned {len(successful_fixtures)} of {len(games)} upcoming games. '
+                    'Saved Fantasy lines and frozen forecasts preserved. '
+                    'Rebuild from the saved PrizePicks feed to match Fantasy lines to newly scanned games, '
+                    'then calculate and freeze the board. Neither step runs an OddsPAPI scan.')
 
         except ValueError as error:
             st.error(str(error))
