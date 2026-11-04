@@ -2782,50 +2782,54 @@ def api_get(path, params):
         ) from None
 
 
+SLATE_TIMEZONE = "America/Los_Angeles"
+
+
+def slate_day(reference=None):
+    stamp = pd.Timestamp.now(tz="UTC") if reference is None else pd.to_datetime(reference, utc=True)
+    return stamp.tz_convert(SLATE_TIMEZONE).date().isoformat()
+
+
+def today_pregame(start_value, reference=None):
+    """A future tipoff on the user's Pacific calendar date, never a UTC-date guess."""
+    current = pd.Timestamp.now(tz="UTC") if reference is None else pd.to_datetime(reference, utc=True)
+    start = pd.to_datetime(start_value, utc=True, errors="coerce")
+    return bool(pd.notna(start) and start > current
+                and start.tz_convert(SLATE_TIMEZONE).date() == current.tz_convert(SLATE_TIMEZONE).date())
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
-def upcoming_nba():
-    start = datetime.now(timezone.utc)
-    end = start + timedelta(days=3)
-
-    data = api_get(
-        "/fixtures",
-        {
-            "sportId": 11,
-            "from": start.strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            ),
-            "to": end.strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            ),
-            "statusId": 0,
-        },
-    )
-
+def _today_nba_fixtures(day):
+    # The Pacific day is part of the cache key, so yesterday's slate cannot leak
+    # across local midnight. The final filter also removes games that have begun.
+    begin = pd.Timestamp(day, tz=SLATE_TIMEZONE)
+    end = begin + pd.DateOffset(days=1)
+    data = api_get("/fixtures", {
+        "sportId": 11,
+        "from": begin.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "to": end.tz_convert("UTC").strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "statusId": 0,
+    })
     if not isinstance(data, list):
-        raise ValueError(
-            "Unexpected fixtures response structure."
-        )
+        raise ValueError("Unexpected fixtures response structure.")
+    games = []
+    for game in data:
+        if not isinstance(game, dict) or not game.get("fixtureId"):
+            continue
+        if not ("nba" in str(game.get("tournamentName", "")).lower()
+                or str(game.get("tournamentSlug", "")).lower() == "nba"):
+            continue
+        start = pd.to_datetime(game.get("startTime"), utc=True, errors="coerce")
+        if pd.notna(start) and begin <= start < end:
+            games.append(game)
+    return sorted(games, key=lambda game: str(game.get("startTime", "")))
 
-    return sorted(
-        [
-            game
-            for game in data
-            if isinstance(game, dict)
-            and game.get("fixtureId")
-            and (
-                "nba"
-                in str(
-                    game.get("tournamentName", "")
-                ).lower()
-                or str(
-                    game.get("tournamentSlug", "")
-                ).lower() == "nba"
-            )
-        ],
-        key=lambda game: str(
-            game.get("startTime", "")
-        ),
-    )
+
+def upcoming_nba():
+    return [game for game in _today_nba_fixtures(slate_day())
+            if today_pregame(game.get("startTime"))]
+
+
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -6357,6 +6361,9 @@ def ui_board(page):
     forecasts = dict(workflow_store.items('forecast'))
     saved = {key: value for key, value in workflow_store.items('watchlist') if value.get('active', True)}
     selected = st.session_state.get('selected_prop_card')
+    if selected is not None and page != 'Saved' and not today_pregame(selected.get('Start (UTC)')):
+        st.session_state.pop('selected_prop_card', None)
+        selected = None
     if selected is not None:
         ui_detail(selected, forecasts)
         return
@@ -6377,7 +6384,7 @@ def ui_board(page):
             continue
         if page != 'Saved':
             start = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
-            if pd.isna(start) or start <= pd.Timestamp.now(tz='UTC'):
+            if not today_pregame(card.get('Start (UTC)')):
                 continue
         if platform != 'All' and str(card.get('Platform')).lower() != platform.lower():
             continue
@@ -6407,7 +6414,7 @@ def ui_board(page):
         st.caption('Base board scan (UTC): ' + str(stamp) + ' · Native feeds may have separate timestamps. Browsing uses saved data.')
     st.caption(f'{len(records)} matching picks · Estimated hit percentages are experimental.')
     if not records:
-        st.info('No matching picks. Try All props or clear filters. Data imports and board calculation are under Settings.')
+        st.info("No matching upcoming picks for today (Pacific time). Try All props or clear filters. The app will not substitute tomorrow's games. Imports and calculation are under Settings.")
         return
     pages = max(1, (len(records) + 11) // 12)
     page_number = int(st.number_input('Page', min_value=1, max_value=pages, value=1, step=1, key='mobile_page_' + page + '_' + kind + '_' + platform + '_' + str(len(records))))
@@ -6498,7 +6505,8 @@ except Exception:
 
 if app_page in ("Results", "Settings"):
     render_workflow(workflow, st,
-                    st.session_state.get("v4_rows", []) if app_page == "Settings" else [],
+                    [row for row in st.session_state.get("v4_rows", [])
+                     if today_pregame(row.get("Start (UTC)"))] if app_page == "Settings" else [],
                     mode="results" if app_page == "Results" else "settings")
 
 # PrizePicks tier feed: explicit refresh only.
@@ -6595,7 +6603,8 @@ def pp_merge_tiers(rows, projections, fetched):
 
 
 def render_pp_tier_refresh():
-    rows = st.session_state.get("v4_rows", [])
+    rows = [row for row in st.session_state.get("v4_rows", [])
+            if today_pregame(row.get("Start (UTC)"))]
     if not rows:
         return
     with st.expander("PrizePicks Regular / Goblin / Demon feed"):
@@ -6743,7 +6752,8 @@ def import_native_kalshi_rows(rows, fetch, teams, stamp):
 
 
 def render_native_kalshi_refresh():
-    rows = st.session_state.get("v4_rows", [])
+    rows = [row for row in st.session_state.get("v4_rows", [])
+            if today_pregame(row.get("Start (UTC)"))]
     if not rows:
         return
     with st.expander("Kalshi native player contracts"):
@@ -6783,7 +6793,7 @@ if app_page == "Settings":
     if st.session_state.get("pp_tier_notice"):
         st.info(st.session_state["pp_tier_notice"])
 
-    max_games = st.slider("Games to scan", 1, 5, 3)
+    max_games = st.slider("Today’s games to scan (Pacific time)", 1, 5, 3)
 
     st.caption(
         f"Fresh scan uses up to {max_games + 2} API calls. "
@@ -6803,7 +6813,7 @@ if app_page == "Settings":
                 if not games:
                     st.warning(
                         "No upcoming NBA games returned "
-                        "for the next three days."
+                        "for today in Pacific time. Tomorrow's games are not included."
                     )
 
                 else:
