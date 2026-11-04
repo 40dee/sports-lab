@@ -6260,6 +6260,132 @@ def render_pp_tier_refresh():
             st.error(str(error))
 
 
+# Import native Kalshi contracts for the games already on the saved board.
+def import_native_kalshi_rows(rows, fetch, teams, stamp):
+    series_map = {
+        "KXNBAPTS": {"PTS"}, "KXNBAREB": {"REB"},
+        "KXNBAAST": {"AST"}, "KXNBA3PT": {"FG3M"},
+        "KXNBASTL": {"STL"}, "KXNBABLK": {"BLK"},
+        "KXNBAPA": {"PTS", "AST"}, "KXNBAPR": {"PTS", "REB"},
+        "KXNBARA": {"REB", "AST"}, "KXNBAPRA": {"PTS", "REB", "AST"},
+    }
+    aliases = {"GS": "GSW", "NY": "NYK", "NO": "NOP", "SA": "SAS", "WSH": "WAS", "PHO": "PHX", "UTAH": "UTA"}
+    fixtures = {}
+    for row in rows:
+        if row.get("Decoded") and str(row.get("Period", "")).lower() == "result":
+            if pd.to_datetime(row["Start (UTC)"], utc=True) > stamp:
+                fixtures.setdefault(str(row["Fixture ID"]), []).append(row)
+    imported, seen, warnings, available = [], set(), [], 0
+    for fixture_rows in fixtures.values():
+        game = fixture_rows[0]
+        names = {engine_team_key(x) for x in str(game["Game"]).split(" vs ")}
+        matched = [t for t in teams if engine_team_key(t["displayName"]) in names]
+        if len(names) != 2 or len(matched) != 2:
+            warnings.append(str(game["Game"]) + ": team mapping unavailable.")
+            continue
+        codes = [aliases.get(t["abbreviation"], t["abbreviation"]) for t in matched]
+        day = pd.to_datetime(game["Start (UTC)"], utc=True).tz_convert("America/New_York").strftime("%y%b%d").upper()
+        for series, columns in series_map.items():
+            templates = {}
+            for row in fixture_rows:
+                if not fantasy_weights(row) and set(market_columns(row) or []) == columns:
+                    templates.setdefault(normalize_player(row["Player"]), []).append(row)
+            if not templates:
+                continue
+            for first, second in (codes, codes[::-1]):
+                ticker = f"{series}-{day}{first}{second}"
+                try:
+                    data = fetch("events/" + ticker)
+                except Exception:
+                    warnings.append(ticker + ": public request failed.")
+                    continue
+                event = data.get("event") or {}
+                if event.get("event_ticker") != ticker or event.get("series_ticker") != series:
+                    continue
+                available += 1
+                for market in data.get("markets", event.get("markets", [])):
+                    if market.get("event_ticker") != ticker or market.get("status") not in ("active", "open"):
+                        continue
+                    if market.get("strike_type") != "greater" or market.get("market_type") != "binary":
+                        continue
+                    if float(market.get("notional_value_dollars", "1")) != 1:
+                        continue
+                    close = pd.to_datetime(market.get("close_time"), utc=True, errors="coerce")
+                    if pd.isna(close) or close <= stamp:
+                        continue
+                    title = str(market.get("title") or market.get("yes_sub_title", ""))
+                    candidates = templates.get(normalize_player(title.split(":", 1)[0]), [])
+                    if not candidates or len({str(r["Player ID"]) for r in candidates}) != 1:
+                        continue
+                    line = numeric_line(market.get("floor_strike"))
+                    if line is None or abs(line + 0.5 - round(line + 0.5)) > 1e-6:
+                        continue
+                    contract = market.get("ticker")
+                    if not contract:
+                        continue
+                    for side, direction in (("yes", "MORE"), ("no", "LESS")):
+                        try:
+                            ask = float(market.get(side + "_ask_dollars") or "nan")
+                        except (ValueError, TypeError):
+                            continue
+                        if not math.isfinite(ask) or not 0 < ask < 1:
+                            continue
+                        key = (contract, side)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        row = dict(candidates[0])
+                        for field in ("Available Sides", "Tier Source", "Tier Observed At", "Tier Fetched At", "Tier Projection ID"):
+                            row.pop(field, None)
+                        row.update({
+                            "Platform": "kalshi", "Line": line, "Raw Handicap": line,
+                            "Line Type": "Unverified", "Direction": direction,
+                            "Market ID": "native:" + contract, "Outcome ID": side,
+                            "Odds": None, "Decoded": True, "mainLine Flag": None,
+                            "Line Status": "Native Kalshi greater-than threshold",
+                            "Kalshi Ticker": contract, "Kalshi Source": "public API",
+                            "Kalshi Ask Dollars": ask, "Kalshi Fetched At": stamp.isoformat(),
+                        })
+                        imported.append(row)
+    return imported, warnings, available
+
+
+def render_native_kalshi_refresh():
+    rows = st.session_state.get("v4_rows", [])
+    if not rows:
+        return
+    with st.expander("Kalshi native player contracts"):
+        st.caption("Loads available contracts for matched players and stats in your saved future games. Uses public Kalshi data, not OddsPAPI. Quotes need order-book and fee checks; an ask alone does not guarantee a fill.")
+        if not st.button("Load Kalshi contracts for saved games"):
+            return
+        try:
+            with st.spinner("Checking native Kalshi contracts..."):
+                imported, warnings, events = import_native_kalshi_rows(
+                    rows, kalshi_public, espn_teams(), pd.Timestamp.now(tz="UTC")
+                )
+            if not imported:
+                st.warning(f"No uniquely matched open player contracts found ({events} matching events). Existing board preserved.")
+                for warning in warnings[:5]:
+                    st.caption(warning)
+                return
+            # Replace native imports only. Keep other providers and frozen forecasts.
+            merged = [r for r in rows if r.get("Kalshi Source") != "public API"] + imported
+            st.session_state["v4_rows"] = merged
+            st.session_state.pop("calculated_board", None)
+            st.session_state.pop("selected_prop_card", None)
+            workspace_store("board", {field: st.session_state.get(field) for field in BOARD_FIELDS})
+            st.session_state["native_kalshi_notice"] = f"Imported {len(imported)} Kalshi priced outcomes. Select Platform: kalshi and Line type: All. Calculate the board to save new forecasts."
+            if warnings:
+                st.session_state["native_kalshi_notice"] += f" {len(warnings)} event requests/mappings were unavailable; coverage is partial."
+            st.rerun()
+        except Exception as error:
+            st.error(str(error))
+
+
+render_native_kalshi_refresh()
+if st.session_state.get("native_kalshi_notice"):
+    st.info(st.session_state["native_kalshi_notice"])
+
 render_pp_tier_refresh()
 if st.session_state.get("pp_tier_notice"):
     st.info(st.session_state["pp_tier_notice"])
