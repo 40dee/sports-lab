@@ -22,9 +22,43 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+def json_safe(value):
+    """Represent missing optional data as JSON null, never as NaN or zero."""
+    if value is None or value is pd.NA or value is pd.NaT:
+        return None
+    if isinstance(value, dict):
+        return {key: json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return json_safe(value.tolist())
+    if isinstance(value, np.generic):
+        return json_safe(value.item())
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, Decimal) and not value.is_finite():
+        return None
+    return value
+
+
+def validate_forecast_numbers(card, result):
+    """Never freeze an invalid calculation as a real prediction."""
+    fields = {"prop line": card.get("Line")}
+    fields.update({name: result.get(name) for name in (
+        "projection", "line", "gap", "minutes"
+    )})
+    for name, value in fields.items():
+        try:
+            valid = value is not None and math.isfinite(float(value))
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if not valid:
+            raise ValueError(f"Missing or invalid {name}; forecast not saved.")
+
+
 def encode(value):
     return json.dumps(
-        value,
+        json_safe(value),
         default=str,
         sort_keys=True,
         allow_nan=False,
@@ -913,6 +947,7 @@ class Workflow:
         season,
         snapshot=None,
     ):
+        validate_forecast_numbers(card, result)
         event, competition = self.event_for(card)
 
         start = pd.to_datetime(
@@ -5415,9 +5450,7 @@ def workspace_store(key, value):
             )
             con.execute(
                 "INSERT OR REPLACE INTO workspace VALUES (?,?)",
-                (key, json.dumps(
-                    value, default=str, allow_nan=False
-                )),
+                (key, encode(value)),
             )
     finally:
         con.close()
@@ -5526,7 +5559,7 @@ def render_saved_workspace():
             }
             st.download_button(
                 "Download board backup",
-                json.dumps(board, default=str),
+                encode(board),
                 "sports_lab_board.json",
                 "application/json",
             )
