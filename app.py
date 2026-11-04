@@ -3718,125 +3718,6 @@ def render_team_scoring(card):
 
 # ---------------- STATIC HISTORY GRAPH ----------------
 
-def render_history_graph(sample, h2h_games, card):
-    chart_window = st.radio(
-        "Games to display",
-        ["Last 5", "Last 10", "Last 15", "Last 20", "H2H"],
-        index=3,
-        horizontal=True,
-        key="player_history_chart_window_v2",
-    )
-
-    if chart_window == "H2H":
-        if h2h_games is None or h2h_games.empty:
-            st.info("No confirmed H2H games are available for this chart.")
-            return
-        chart_data = h2h_games.sort_values(
-            "GAME_DATE"
-        ).reset_index(drop=True)
-    else:
-        window_size = int(chart_window.split()[-1])
-        chart_data = (
-            sample.sort_values("GAME_DATE", ascending=False)
-            .head(window_size)
-            .sort_values("GAME_DATE")
-            .reset_index(drop=True)
-        )
-
-    if chart_data.empty:
-        st.info("No games available for this chart.")
-        return
-
-    prop_line = float(card["Line"])
-    _frozen_chart = workflow_store.get("forecast", identity(card), {})
-    _chart_direction = _frozen_chart.get("result", {}).get("direction", "MORE")
-    st.caption("Bars show outcomes for " + _chart_direction + " at this line; ties are neutral. Historical results are not predicted probabilities.")
-    chart_width, chart_height = 1000, 360
-    left, right, top, bottom = 55, 20, 35, 65
-    plot_width = chart_width - left - right
-    plot_height = chart_height - top - bottom
-    maximum = max(
-        float(chart_data["VALUE"].max()), prop_line, 1.0
-    ) * 1.2
-
-    def chart_y(value):
-        return top + plot_height * (1 - value / maximum)
-
-    svg = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" '
-        f'viewBox="0 0 {chart_width} {chart_height}" '
-        'style="width:100%;height:100%;font-family:Arial">'
-    ]
-
-    for tick in range(5):
-        value = maximum * tick / 4
-        y = chart_y(value)
-        svg.append(
-            f'<line x1="{left}" y1="{y}" '
-            f'x2="{chart_width-right}" y2="{y}" '
-            'stroke="#d1d5db" stroke-width="1"/>'
-            f'<text x="{left-10}" y="{y+4}" '
-            'text-anchor="end" fill="#64748b" '
-            f'font-size="12">{value:g}</text>'
-        )
-
-    slot_width = plot_width / len(chart_data)
-    bar_width = min(slot_width * 0.62, 55)
-
-    for index, row in chart_data.iterrows():
-        value = float(row["VALUE"])
-        center = left + slot_width * (index + 0.5)
-        y = chart_y(value)
-        height = max(chart_y(0) - y, 0)
-        hit = value > prop_line if _chart_direction == "MORE" else value < prop_line
-        color = "#94a3b8" if value == prop_line else "#16a34a" if hit else "#dc2626"
-        opponent = html.escape(str(row["MATCHUP"]).split()[-1])
-        date_label = row["GAME_DATE"].strftime("%m/%d")
-        svg.append(
-            f'<rect x="{center-bar_width/2}" y="{y}" '
-            f'width="{bar_width}" height="{height}" '
-            f'fill="{color}" rx="3"/>'
-            f'<text x="{center}" y="{y-7}" '
-            'text-anchor="middle" fill="#475569" '
-            f'font-size="13">{value:g}</text>'
-            f'<text x="{center}" y="{chart_y(0)+22}" '
-            'text-anchor="middle" fill="#475569" '
-            f'font-size="12">{opponent}</text>'
-            f'<text x="{center}" y="{chart_y(0)+40}" '
-            'text-anchor="middle" fill="#64748b" '
-            f'font-size="10">{date_label}</text>'
-        )
-
-    line_y = chart_y(prop_line)
-    svg.append(
-        f'<line x1="{left}" y1="{line_y}" '
-        f'x2="{chart_width-right}" y2="{line_y}" '
-        'stroke="#2563eb" stroke-width="2" '
-        'stroke-dasharray="7,5"/>'
-        f'<text x="{chart_width-right}" y="{line_y-7}" '
-        'text-anchor="end" fill="#2563eb" '
-        f'font-size="13">Prop: {prop_line:g}</text>'
-    )
-    svg.append("</svg>")
-
-    components.html(
-        '<div style="height:360px;overflow:hidden">'
-        + "".join(svg) + "</div>",
-        height=370,
-        scrolling=False,
-    )
-    st.caption(
-        f"Showing {len(chart_data)} games, oldest to newest. "
-        "Green: above line · Red: below line · Gray: tie."
-    )
-    st.caption(f"Comparison line: {prop_line:g}")
-    st.dataframe(
-        chart_data[
-            ["GAME_DATE", "SEASON", "MATCHUP", "MIN", "VALUE"]
-        ].sort_values("GAME_DATE", ascending=False),
-        hide_index=True,
-        use_container_width=True,
-    )
 
 
 # ---------------- TEAM EFFICIENCY ----------------
@@ -5354,7 +5235,9 @@ def render_card_history(card):
     except Exception:
         st.caption("H2H unavailable: ESPN team mapping did not load.")
 
-    render_history_graph(sample, h2h_games, card)
+    st.markdown("#### Detailed game log")
+    st.dataframe(sample[["GAME_DATE", "MATCHUP", "MIN", "VALUE"]].rename(
+        columns={"VALUE": ui_stat(card)}), hide_index=True, use_container_width=True)
     st.markdown("#### History and splits for this prop")
     st.dataframe(
         pd.DataFrame(summaries),
@@ -6228,44 +6111,116 @@ def ui_fantasy_rates(card, history, result):
     st.caption('Historical FP/min uses total fantasy points ÷ total played minutes in each window. Projected FP/min is the frozen final projection ÷ projected minutes.')
 
 
+def pick_history_sample(history, card, window='L15', location='All', reference=None, opponent_id=None):
+    """Select pregame appearances once for every chart control."""
+    games = history.copy()
+    current = pd.Timestamp.now(tz='UTC') if reference is None else pd.to_datetime(reference, utc=True)
+    start = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
+    if pd.isna(start):
+        raise ValueError('A verified fixture start is required for historical comparisons.')
+    games['GAME_DATE'] = pd.to_datetime(games['GAME_DATE'], utc=True, errors='coerce')
+    games = games[games['GAME_DATE'] < min(start, current)].drop_duplicates('GAME_ID')
+    games['VALUE'] = score_frame(games, card)
+    games['VALUE'] = pd.to_numeric(games['VALUE'], errors='coerce')
+    games = games[games['VALUE'].notna() & np.isfinite(games['VALUE'])]
+    if location != 'All':
+        games = games[games['HOME_AWAY'] == location]
+    if window == 'Season':
+        year = current.tz_convert('America/Los_Angeles').year
+        if current.tz_convert('America/Los_Angeles').month < 10:
+            year -= 1
+        games = games[games['SEASON'] == f'{year}-{str(year+1)[-2:]}']
+    elif window == 'H2H':
+        if opponent_id is None:
+            raise ValueError('Opponent identity could not be verified for H2H.')
+        games = games[games['OPPONENT_ID'].astype(str) == str(opponent_id)]
+    games = games.sort_values('GAME_DATE', ascending=False)
+    if window.startswith('L'):
+        games = games.head(int(window[1:]))
+    return games
+
+
+def pick_chart_spec(games, line, direction):
+    """One interactive chart: same line, direction, scale and labels for all windows."""
+    rows = []
+    for _, row in games.sort_values('GAME_DATE').iterrows():
+        value = float(row['VALUE'])
+        tie = value == line
+        hit = value > line if direction == 'MORE' else value < line
+        stamp = row['GAME_DATE'].tz_convert('America/Los_Angeles')
+        matchup = str(row.get('MATCHUP', 'Opponent unavailable'))
+        rows.append({'Game': stamp.strftime('%m/%d') + ' · ' + matchup,
+                     'Date': stamp.strftime('%Y-%m-%d'), 'Matchup': matchup,
+                     'Value': value, 'Outcome': 'Tie' if tie else 'Hit' if hit else 'Miss'})
+    values = [r['Value'] for r in rows] + [float(line), 0.0]
+    low, high = min(values), max(values)
+    padding = max((high-low)*.12, 1.0)
+    domain = [low-padding if low < 0 else 0, high+padding]
+    return {'height': 270, 'data': {'values': rows}, 'layer': [
+        {'mark': {'type': 'bar', 'cornerRadiusTopLeft': 4, 'cornerRadiusTopRight': 4},
+         'encoding': {
+             'x': {'field': 'Game', 'type': 'ordinal', 'sort': None,
+                   'axis': {'title': None, 'labelAngle': -45, 'labelLimit': 110}},
+             'y': {'field': 'Value', 'type': 'quantitative', 'scale': {'domain': domain}, 'axis': {'title': None}},
+             'color': {'field': 'Outcome', 'type': 'nominal', 'scale': {'domain': ['Hit','Miss','Tie'], 'range': ['#22e6a5','#fa7079','#94a3b8']}, 'legend': None},
+             'tooltip': [{'field':'Date'}, {'field':'Matchup'}, {'field':'Value','title':'Stat result'}, {'field':'Outcome'}]}},
+        {'data': {'values': [{'Line': float(line)}]},
+         'mark': {'type':'rule','strokeDash':[7,4],'color':'#ffffff','strokeWidth':2},
+         'encoding': {'y': {'field':'Line','type':'quantitative'}, 'tooltip':[{'field':'Line','title':'Prop line'}]}},
+        {'data': {'values': [{'Line':float(line), 'Label':f'Line {line:g}'}]},
+         'mark': {'type':'text','align':'left','baseline':'bottom','dy':-5,'color':'#ffffff','fontSize':12},
+         'encoding': {'x': {'value':5}, 'y':{'field':'Line','type':'quantitative'},'text':{'field':'Label'}}}
+    ], 'config': {'background':'transparent','view':{'stroke':None}, 'axis':{'labelColor':'#b5c5d8','gridColor':'#28384a','domainColor':'#43566d'}}}
+
+
 def ui_recent_chart(card, history):
-    """Actual pregame logs; never substitute illustrative results."""
     if history is None or history.empty:
         st.info('No verified pregame game log is available for this player.')
         return
-    games = history.copy()
-    games['GAME_DATE'] = pd.to_datetime(games['GAME_DATE'], utc=True, errors='coerce')
-    cutoff = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
-    if pd.notna(cutoff):
-        games = games[games['GAME_DATE'] < cutoff]
-    games = games.drop_duplicates('GAME_ID').sort_values('GAME_DATE', ascending=False)
-    if fantasy_weights(card):
-        games['SL_VALUE'] = score_frame(games, card)
-    else:
-        cols = market_columns(card)
-        if not cols or any(c not in games.columns for c in cols):
-            st.info('Game-log values are unavailable for this market.')
-            return
-        games['SL_VALUE'] = sum(pd.to_numeric(games[c], errors='coerce') for c in cols)
-    games = games[pd.to_numeric(games['SL_VALUE'], errors='coerce').notna()].head(15)
-    if games.empty:
-        st.info('No verified games are available before this fixture.')
+    frozen = workflow_store.get('forecast', identity(card), {})
+    result = frozen.get('result') or {}
+    direction = result.get('direction')
+    if direction not in ('MORE','LESS'):
+        st.info('Calculate this pick first so the chart can show results for its actual MORE or LESS selection.')
         return
     line = ui_number(card.get('Line'))
-    st.markdown('#### Recent ' + ui_stat(card).lower())
-    window = st.radio('Games', ['L5', 'L10', 'L15'], horizontal=True, key='recent_window_' + identity(card))
-    count = {'L5': 5, 'L10': 10, 'L15': 15}[window]
-    display = games.head(count).iloc[::-1].copy()
-    display['Game'] = [str(i) for i in range(1, len(display) + 1)]
-    st.bar_chart(display.set_index('Game')['SL_VALUE'], color='#22e6a5', use_container_width=True)
-    if line is not None:
-        values = pd.to_numeric(games['SL_VALUE'], errors='coerce')
-        cols = st.columns(3)
-        for col, n in zip(cols, (5, 10, 15)):
-            sample = values.head(n)
-            hits = int((sample > line).sum())
-            col.metric(f'L{n} above {line:g}', f'{hits}/{len(sample)}')
-        st.caption('Historical results above the offered line; not predicted odds. Ties are not counted as above.')
+    if line is None:
+        st.info('The comparison line is unavailable.')
+        return
+    st.markdown('#### ' + ui_stat(card) + ' · ' + direction + f' {line:g}')
+    window = st.radio('Window', ['L5','L10','L15','L20','Season','H2H'], index=2,
+                      horizontal=True, key='single_chart_window_' + identity(card))
+    location = st.radio('Location', ['All','Home','Away'], horizontal=True,
+                       key='single_chart_location_' + identity(card))
+    opponent_id = None
+    if window == 'H2H':
+        teams = espn_teams()
+        lookup = {engine_team_key(t['displayName']): str(t['id']) for t in teams}
+        team_key = engine_team_key(result.get('team', ''))
+        participants = [engine_team_key(p) for p in str(card.get('Game','')).split(' vs ')]
+        opponents = [lookup[p] for p in participants if p != team_key and p in lookup]
+        if team_key in participants and len(opponents) == 1:
+            opponent_id = opponents[0]
+    try:
+        sample = pick_history_sample(history, card, window, location, opponent_id=opponent_id)
+    except (ValueError, KeyError) as error:
+        st.info(str(error))
+        return
+    if sample.empty:
+        st.info('No verified appearances match these filters.')
+        return
+    st.vega_lite_chart(pick_chart_spec(sample, line, direction), use_container_width=True)
+    values = sample['VALUE']
+    hits = int((values > line).sum() if direction == 'MORE' else (values < line).sum())
+    ties = int((values == line).sum())
+    misses = len(values) - hits - ties
+    decided = hits + misses
+    rate = f'{hits/decided:.0%}' if decided else '—'
+    st.markdown(f'''<div style="display:flex;gap:14px;flex-wrap:wrap;padding:12px 14px;border:1px solid #33465a;border-radius:12px;margin-top:8px">
+<span><b>{direction} hits</b> {hits}/{len(values)}</span><span><b>Misses</b> {misses}</span><span><b>Ties</b> {ties}</span><span><b>Hit rate</b> {rate}</span></div>''', unsafe_allow_html=True)
+    st.caption('Green: selected side hit · Red: missed · Gray: tie. Historical hit rate excludes ties; it is not a predicted probability or platform settlement.')
+
+
 
 
 def ui_detail(card, forecasts):
@@ -6323,8 +6278,7 @@ def ui_detail(card, forecasts):
                     render_kalshi(card)
                 else:
                     st.caption('Only verified available quotes are displayed in Market.')
-            with st.expander('Full game log & H2H'):
-                render_card_history(card)
+            st.caption('Full game log, home/away splits and H2H tables are in History.')
             with st.expander('Calculation & data sources'):
                 if history is not None:
                     render_calculated_pick(history, card, current_season())
@@ -6347,7 +6301,6 @@ def ui_detail(card, forecasts):
             render_game_context(engine_game_context(card))
         else:
             history = ui_history(card)
-            ui_recent_chart(card, history)
             render_card_history(card)
             with st.expander('Full projection calculation & sources'):
                 if history is not None:
@@ -6394,6 +6347,13 @@ def ui_board(page):
             continue
         unique[identity(card)] = card
     records = list(unique.values())
+    if kind == 'Fantasy':
+        if platform not in ('All', 'PrizePicks'):
+            st.info('Fantasy Score is currently supported for PrizePicks NBA. Choose PrizePicks or All platforms.')
+        elif not records:
+            st.info('No PrizePicks Fantasy Score lines are imported for today. In Settings, rebuild the saved PrizePicks feed without API calls. The feed must contain an actual fantasy line.')
+        elif view == 'Top plays' and not any(identity(c) in forecasts for c in records):
+            st.info('Fantasy lines are imported but not calculated yet. Choose All props to inspect them; calculate the board in Settings to create forecasts.')
     a, b = st.columns(2)
     stats = ['All'] + sorted({ui_stat(card) for card in records})
     stat = a.selectbox('Stat', stats, key='mobile_stat')
@@ -6538,9 +6498,13 @@ def pp_card_key(card):
 
 def pp_merge_tiers(rows, projections, fetched):
     templates = {}
+    player_games = {}
     for row in rows:
         if row.get("Platform") == "prizepicks":
-            templates.setdefault(pp_card_key(row), []).append(row)
+            row_key = pp_card_key(row)
+            templates.setdefault(row_key, []).append(row)
+            if str(row.get("Period", "")).lower() == "result":
+                player_games.setdefault((row_key[0], row_key[2]), []).append(row)
     imported, matched = [], set()
     labels = {"standard": "Standard", "goblin": "Goblin", "demon": "Demon"}
     for item in projections:
@@ -6559,6 +6523,9 @@ def pp_merge_tiers(rows, projections, fetched):
             pp_stat_key(market.get("stat")), start.isoformat(),
         )
         candidates = templates.get(key, [])
+        if not candidates and key[1] == ("FANTASY",):
+            # Borrow only a uniquely matched player/game identity; never its stat or line.
+            candidates = player_games.get((key[0], key[2]), [])
         if not key[1] or not candidates:
             continue
         if len({str(c["Player ID"]) for c in candidates}) != 1:
@@ -6577,6 +6544,8 @@ def pp_merge_tiers(rows, projections, fetched):
         for tier, sides in groups.items():
             for side in sorted(sides):
                 row = dict(candidates[0])
+                if key[1] == ("FANTASY",):
+                    row.update({"Stat": "Fantasy Score", "Stat Key": "fantasy_score", "Period": "result"})
                 row.update({
                     "Line": line, "Raw Handicap": line,
                     "Line Type": tier, "Direction": side,
@@ -6609,6 +6578,27 @@ def render_pp_tier_refresh():
         return
     with st.expander("PrizePicks Regular / Goblin / Demon feed"):
         st.caption("Separate provider. Refresh uses its credits, never OddsPAPI. Up to 5 pages per refresh. Free feed may be delayed.")
+        if st.button("Rebuild from saved PrizePicks feed — no API calls"):
+            try:
+                payload = workflow_store.get("source", "pp_tiers_v1")
+                if not payload or not isinstance(payload.get("items"), list):
+                    raise ValueError("No saved PrizePicks feed is available. No API request was made.")
+                merged, count = pp_merge_tiers(rows, payload["items"], payload["fetched_at"])
+                st.session_state["v4_rows"] = merged
+                st.session_state.pop("calculated_board", None)
+                st.session_state.pop("selected_prop_card", None)
+                workspace_store("board", {field: st.session_state.get(field) for field in BOARD_FIELDS})
+                fantasy_count = len({identity(row) for row in merged if fantasy_weights(row)})
+                st.session_state["pp_tier_notice"] = (
+                    f"Rebuilt {count} outcomes from the saved feed; {fantasy_count} unique Fantasy Score lines. "
+                    f"Feed fetched (UTC): {payload['fetched_at']}. These are saved quotes, not a fresh refresh. "
+                    "No API calls made. Calculate the board for new forecasts; use Fantasy → All props to inspect imported lines."
+                )
+                st.rerun()
+            except Exception as error:
+                st.error(str(error))
+            return
+        st.caption("Rebuilding retries the last downloaded feed. It cannot add fantasy markets that the provider did not supply. Refresh below uses provider credits.")
         if not st.button("Refresh PrizePicks lines and tiers"):
             return
         try:
