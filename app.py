@@ -6497,6 +6497,62 @@ def pp_card_key(card):
     return normalize_player(card["Player"]), columns, start.isoformat()
 
 
+def pp_nba_team_code(value):
+    if isinstance(value, dict):
+        value = value.get('abbreviation') or value.get('displayName') or value.get('name')
+    key = normalize_player(value or '')
+    teams = {
+        'ATL':'Atlanta Hawks', 'BOS':'Boston Celtics', 'BKN':'Brooklyn Nets',
+        'CHA':'Charlotte Hornets', 'CHI':'Chicago Bulls', 'CLE':'Cleveland Cavaliers',
+        'DAL':'Dallas Mavericks', 'DEN':'Denver Nuggets', 'DET':'Detroit Pistons',
+        'GSW':'Golden State Warriors', 'HOU':'Houston Rockets', 'IND':'Indiana Pacers',
+        'LAC':'Los Angeles Clippers', 'LAL':'Los Angeles Lakers', 'MEM':'Memphis Grizzlies',
+        'MIA':'Miami Heat', 'MIL':'Milwaukee Bucks', 'MIN':'Minnesota Timberwolves',
+        'NOP':'New Orleans Pelicans', 'NYK':'New York Knicks', 'OKC':'Oklahoma City Thunder',
+        'ORL':'Orlando Magic', 'PHI':'Philadelphia 76ers', 'PHX':'Phoenix Suns',
+        'POR':'Portland Trail Blazers', 'SAC':'Sacramento Kings', 'SAS':'San Antonio Spurs',
+        'TOR':'Toronto Raptors', 'UTA':'Utah Jazz', 'WAS':'Washington Wizards',
+    }
+    aliases = {'gs':'GSW','ny':'NYK','no':'NOP','sa':'SAS','wsh':'WAS','pho':'PHX','utah':'UTA','laclippers':'LAC'}
+    if key in aliases:
+        return aliases[key]
+    for code,name in teams.items():
+        if key in (normalize_player(code),normalize_player(name)):
+            return code
+    return None
+
+
+def pp_nearby_fantasy_candidates(rows, item, source_start):
+    """Allow a small feed-time offset only with independent two-team agreement."""
+    player = item.get('player') or {}
+    event = item.get('event') or {}
+    team = pp_nba_team_code(player.get('team'))
+    opponent = pp_nba_team_code(event.get('opponent'))
+    if not team or not opponent or team == opponent:
+        return []
+    name = normalize_player(player.get('name',''))
+    candidates = []
+    for row in rows:
+        if not row.get('Decoded') or str(row.get('Period','')).lower() != 'result':
+            continue
+        if normalize_player(row.get('Player','')) != name:
+            continue
+        if str(row.get('Player ID','')).lower() in ('','none','nan'):
+            continue
+        scheduled = pd.to_datetime(row.get('Start (UTC)'),utc=True,errors='coerce')
+        if pd.isna(scheduled) or not today_pregame(scheduled):
+            continue
+        if scheduled.tz_convert(SLATE_TIMEZONE).date() != source_start.tz_convert(SLATE_TIMEZONE).date():
+            continue
+        if abs((scheduled-source_start).total_seconds()) > 15*60:
+            continue
+        teams = [pp_nba_team_code(t) for t in str(row.get('Game','')).split(' vs ')]
+        if len(teams) != 2 or None in teams or set(teams) != {team,opponent}:
+            continue
+        candidates.append(row)
+    return candidates
+
+
 def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
     templates = {}
     player_games = {}
@@ -6528,6 +6584,8 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
         if not candidates and key[1] == ("FANTASY",):
             # Borrow only a uniquely matched player/game identity; never its stat or line.
             candidates = player_games.get((key[0], key[2]), [])
+        if not candidates and key[1] == ("FANTASY",):
+            candidates = pp_nearby_fantasy_candidates(rows, item, start)
         if not key[1] or not candidates:
             continue
         if len({str(c["Player ID"]) for c in candidates}) != 1:
@@ -6560,6 +6618,8 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
                     "Tier Observed At": item.get("observed_at"),
                     "Tier Fetched At": fetched,
                     "Tier Projection ID": str(item["id"]),
+                    "Tier Source Start (UTC)": start.isoformat(),
+                    "Tier Time Match": ("Exact" if pd.to_datetime(row["Start (UTC)"],utc=True) == start else "Two-team verified; within 15 minutes"),
                 })
                 imported.append(row)
                 matched.add((key, line))
@@ -6602,9 +6662,12 @@ def pp_fantasy_check(rows, payload):
                 reason = 'Ready to import'
             except (ValueError, KeyError, TypeError):
                 reason = 'No unique player/game/time match or no verified offered side/tier'
+        local_start = pd.to_datetime(start, utc=True, errors='coerce')
+        local_text = (local_start.tz_convert(SLATE_TIMEZONE).strftime('%b %d, %Y · %I:%M %p PT')
+                      if pd.notna(local_start) else 'Unavailable')
         details.append({'Player':(item.get('player') or {}).get('name'),
                         'Source stat':market.get('stat'), 'Line':item.get('line'),
-                        'Start (UTC)': start, 'Import check':reason})
+                        'Start (Pacific)': local_text, 'Start (UTC)': start, 'Import check':reason})
     return {'Feed fetched (UTC)':payload.get('fetched_at'),
             'Total feed records':len(items), 'Fantasy records returned':len(fantasy),
             'Ready fantasy records':sum(d['Import check']=='Ready to import' for d in details),
