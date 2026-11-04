@@ -6143,29 +6143,40 @@ def ui_save_pick(card, frozen):
 
 
 def ui_card(card, frozen, saved=False):
+    """Mobile-first pick card. Only frozen model values are displayed."""
     result = (frozen or {}).get('result') or {}
-    direction = result.get('direction', '')
+    direction = str(result.get('direction') or '').upper()
     projection = ui_number(result.get('projection'))
     probability = ui_number(result.get('estimated_hit_probability'))
-    color = '#22e6a5' if direction == 'MORE' else '#ff757b' if direction == 'LESS' else '#a3afc0'
     photo = ui_photo(frozen)
+    name = ui_name(card.get('Player', 'Unknown player'))
     portrait = (f'<img class="sl-photo" src="{ui_text(photo)}" alt="Player portrait">'
-                if photo else '<div class="sl-photo sl-initial">' + ui_text(''.join(p[0] for p in ui_name(card['Player']).split()[:2])) + '</div>')
-    tier = (' · ' + str(card.get('Line Type', 'Unverified'))) if card.get('Platform') == 'prizepicks' else ''
+                if photo else '<div class="sl-photo sl-initial">' + ui_text(''.join(w[0] for w in name.split()[:2])) + '</div>')
     line = ui_number(card.get('Line'))
     line_text = f'{line:g}' if line is not None else '—'
-    side = ('↑ ' if direction == 'MORE' else '↓ ') + direction if direction else 'Not calculated'
-    value = f'{projection:.2f}' if projection is not None else '—'
-    estimate = f'{probability:.1%}' if probability is not None else '—'
+    is_more = direction == 'MORE'
+    direction_class = 'more' if is_more else 'less' if direction == 'LESS' else 'pending'
+    direction_text = ('↑ MORE' if is_more else '↓ LESS' if direction == 'LESS' else 'Not calculated')
+    platform = str(card.get('Platform', '')).upper()
+    tier = str(card.get('Line Type', '')) if platform == 'PRIZEPICKS' else ''
+    proj_text = f'{projection:.2f}' if projection is not None else '—'
+    prob_text = f'{probability:.0%}' if probability is not None else '—'
+    stat = ui_stat(card)
     st.markdown(f'''<div class="sl-card">
-<div class="sl-person">{portrait}<div><h3>{ui_text(ui_name(card['Player']))}</h3><div class="sl-muted">{ui_text(card.get('Game', ''))}</div><div class="sl-prop">{ui_text(ui_stat(card))} · Line {line_text}</div></div></div>
-<div class="sl-values"><strong style="color:{color}">{ui_text(side)}</strong><span>Projection <b>{value}</b></span><span>Est. hit <b>{estimate}</b></span></div>
-<div class="sl-muted">{ui_text(str(card.get('Platform', '')).upper() + tier)}</div></div>''', unsafe_allow_html=True)
+      <div class="sl-person">{portrait}<div class="sl-player-info">
+      <h3>{ui_text(name)}</h3><div class="sl-team">{ui_text(card.get('Game', ''))}</div>
+      <div class="sl-prop">{ui_text(stat)} <span class="sl-dot">·</span> Line {line_text}</div>
+      <div class="sl-muted">{ui_text(platform)}{(' · ' + ui_text(tier)) if tier else ''}</div>
+      </div></div>
+      <div class="sl-pickline"><div class="sl-side {direction_class}">{ui_text(direction_text)}</div>
+      <div class="sl-proj"><small>Model projection</small><b>{proj_text}</b></div>
+      <div class="sl-proj"><small>Est. hit</small><b>{prob_text}</b></div></div>
+      </div>''', unsafe_allow_html=True)
     if result and not result.get('selection_allowed', True):
-        st.caption('Model direction is unavailable on this offered side.')
+        st.caption('This direction is not offered for the selected platform/tier.')
     key = identity(card)
     left, right = st.columns([3, 1])
-    if left.button('View pick breakdown →', key='detail_' + key, use_container_width=True):
+    if left.button('View research  ›', key='detail_' + key, use_container_width=True):
         st.session_state['selected_prop_card'] = dict(card)
         st.rerun()
     if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, use_container_width=True):
@@ -6225,40 +6236,114 @@ def ui_fantasy_rates(card, history, result):
     st.caption('Historical FP/min uses total fantasy points ÷ total played minutes in each window. Projected FP/min is the frozen final projection ÷ projected minutes.')
 
 
+def ui_recent_chart(card, history):
+    """Actual pregame logs; never substitute illustrative results."""
+    if history is None or history.empty:
+        st.info('No verified pregame game log is available for this player.')
+        return
+    games = history.copy()
+    games['GAME_DATE'] = pd.to_datetime(games['GAME_DATE'], utc=True, errors='coerce')
+    cutoff = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
+    if pd.notna(cutoff):
+        games = games[games['GAME_DATE'] < cutoff]
+    games = games.drop_duplicates('GAME_ID').sort_values('GAME_DATE', ascending=False)
+    if fantasy_weights(card):
+        games['SL_VALUE'] = score_frame(games, card)
+    else:
+        cols = market_columns(card)
+        if not cols or any(c not in games.columns for c in cols):
+            st.info('Game-log values are unavailable for this market.')
+            return
+        games['SL_VALUE'] = sum(pd.to_numeric(games[c], errors='coerce') for c in cols)
+    games = games[pd.to_numeric(games['SL_VALUE'], errors='coerce').notna()].head(15)
+    if games.empty:
+        st.info('No verified games are available before this fixture.')
+        return
+    line = ui_number(card.get('Line'))
+    st.markdown('#### Recent ' + ui_stat(card).lower())
+    window = st.radio('Games', ['L5', 'L10', 'L15'], horizontal=True, key='recent_window_' + identity(card))
+    count = {'L5': 5, 'L10': 10, 'L15': 15}[window]
+    display = games.head(count).iloc[::-1].copy()
+    display['Game'] = [str(i) for i in range(1, len(display) + 1)]
+    st.bar_chart(display.set_index('Game')['SL_VALUE'], color='#22e6a5', use_container_width=True)
+    if line is not None:
+        values = pd.to_numeric(games['SL_VALUE'], errors='coerce')
+        cols = st.columns(3)
+        for col, n in zip(cols, (5, 10, 15)):
+            sample = values.head(n)
+            hits = int((sample > line).sum())
+            col.metric(f'L{n} above {line:g}', f'{hits}/{len(sample)}')
+        st.caption('Historical results above the offered line; not predicted odds. Ties are not counted as above.')
+
+
 def ui_detail(card, forecasts):
-    if st.button('← Back to board', key='back_to_plays'):
+    if st.button('‹  Plays', key='back_to_plays'):
         st.session_state.pop('selected_prop_card', None)
         st.rerun()
     frozen = forecasts.get(identity(card))
-    result = (frozen or {}).get('result', {})
-    st.subheader(ui_name(card['Player']))
-    st.caption(str(card.get('Game', '')) + ' · ' + str(card.get('Platform', '')).upper())
-    st.markdown('### ' + ui_stat(card) + ' · Line ' + str(card['Line']))
+    result = (frozen or {}).get('result') or {}
+    name = ui_name(card.get('Player', ''))
+    photo = ui_photo(frozen)
+    portrait = (f'<img class="sl-photo sl-detail-photo" src="{ui_text(photo)}" alt="Player portrait">'
+                if photo else '<div class="sl-photo sl-detail-photo sl-initial">' + ui_text(''.join(w[0] for w in name.split()[:2])) + '</div>')
+    line = ui_number(card.get('Line'))
+    line_text = f'{line:g}' if line is not None else '—'
+    st.markdown(f'''<div class="sl-detail-heading"><div class="sl-person">{portrait}<div>
+    <div class="sl-eyebrow">PLAYER BREAKDOWN</div><h2>{ui_text(name)}</h2>
+    <div class="sl-team">{ui_text(card.get('Game', ''))}</div>
+    <div class="sl-prop">{ui_text(ui_stat(card))} · {ui_text(str(card.get('Platform', '')).upper())} · {ui_text(card.get('Line Type', ''))}</div>
+    </div></div></div>''', unsafe_allow_html=True)
     if result:
-        a, b, c = st.columns(3)
-        a.metric('Model side', result.get('direction', '—'))
-        b.metric('Projection', f"{result['projection']:.2f}")
+        direction = str(result.get('direction', '')).upper()
+        side = ('↑ MORE' if direction == 'MORE' else '↓ LESS' if direction == 'LESS' else 'Not calculated')
+        side_class = 'more' if direction == 'MORE' else 'less' if direction == 'LESS' else 'pending'
+        projection = ui_number(result.get('projection'))
         probability = ui_number(result.get('estimated_hit_probability'))
-        c.metric('Est. hit', f'{probability:.1%}' if probability is not None else '—')
-        st.caption('Frozen pregame forecast · Experimental probability estimate · Saved ' + str(frozen.get('created_at', '')))
+        st.markdown(f'''<div class="sl-hero"><div class="sl-side {side_class}">{ui_text(side)} {line_text}</div>
+        <div class="sl-proj"><small>Model projection</small><b>{f'{projection:.2f}' if projection is not None else '—'}</b></div>
+        <div class="sl-proj"><small>Estimated hit</small><b>{f'{probability:.0%}' if probability is not None else '—'}</b></div></div>''', unsafe_allow_html=True)
+        st.caption('Frozen pregame forecast · Experimental probability estimate')
         if not result.get('selection_allowed', True):
-            st.warning('This model direction is not offered for this platform/tier.')
+            st.warning('This direction is not offered on the selected platform/tier.')
     else:
-        st.info('No frozen forecast for this line yet. Use Calculate board in Settings, or open Calculation below for this player.')
-    tab = st.radio('Pick research', ['History', 'Matchup', 'Market', 'Calculation'], horizontal=True, key='pick_research_' + identity(card))
+        st.info('No frozen forecast yet. Use Calculate board in Settings; no sample projection is substituted.')
+    tab = st.radio('Pick research', ['Overview', 'Matchup', 'Market', 'History'], horizontal=True,
+                   key='pick_research_' + identity(card))
     try:
-        if tab == 'History':
-            if fantasy_weights(card):
-                history = ui_history(card)
+        if tab == 'Overview':
+            history = ui_history(card)
+            ui_recent_chart(card, history)
+            if fantasy_weights(card) and history is not None:
+                ui_fantasy_rates(card, history, result)
+            st.markdown('#### What drives this pick')
+            minutes = ui_number(result.get('minutes'))
+            if minutes is not None:
+                st.metric('Minutes outlook', f'{minutes:.1f}')
+            else:
+                st.caption('Minutes outlook: not available in frozen forecast.')
+            with st.expander('Blowout indicator · spread & minutes'):
+                render_game_context(engine_game_context(card))
+                st.caption('A numerical blowout probability is not displayed unless a validated estimate exists.')
+            with st.expander('Starting status and availability'):
+                render_player_availability(card)
+            with st.expander('Market prices & fees'):
+                if card.get('Platform') == 'kalshi':
+                    render_kalshi(card)
+                else:
+                    st.caption('Only verified available quotes are displayed in Market.')
+            with st.expander('Full game log & H2H'):
+                render_card_history(card)
+            with st.expander('Calculation & data sources'):
                 if history is not None:
-                    ui_fantasy_rates(card, history, result)
-            render_card_history(card)
+                    render_calculated_pick(history, card, current_season())
         elif tab == 'Matchup':
             render_player_availability(card)
             render_team_advanced(card)
             render_position_defense(card)
             with st.expander('Team scoring context'):
                 render_team_scoring(card)
+            with st.expander('Spread, total & blowout context'):
+                render_game_context(engine_game_context(card))
         elif tab == 'Market':
             if card.get('Platform') == 'kalshi':
                 render_kalshi(card)
@@ -6266,15 +6351,17 @@ def ui_detail(card, forecasts):
             if market:
                 st.write(f"Matching sportsbook no-vig MORE: **{market['more']:.1%}** · LESS: **{market['less']:.1%}**")
             else:
-                st.caption('No unique matching sportsbook over/under price pair is available.')
+                st.caption('No unique matching sportsbook over/under pair available.')
             render_game_context(engine_game_context(card))
         else:
             history = ui_history(card)
-            if history is not None:
-                render_calculated_pick(history, card, current_season())
-            st.caption('The official audit retains the first frozen pregame forecast even if a fresh calculation differs.')
+            ui_recent_chart(card, history)
+            render_card_history(card)
+            with st.expander('Full projection calculation & sources'):
+                if history is not None:
+                    render_calculated_pick(history, card, current_season())
     except Exception:
-        st.warning('This research section could not load. Your saved forecast is unchanged; try another section or retry later.')
+        st.warning('This research section could not load. Your frozen forecast remains unchanged.')
 
 
 def ui_board(page):
@@ -6353,22 +6440,40 @@ def ui_board(page):
 
 # ---------------- APP HEADER ----------------
 st.markdown("""<style>
-.stApp {background:#0d1420;color:#edf3fa;}
-.stApp h1,.stApp h2,.stApp h3,.stApp h4,.stApp p,.stApp label {color:#edf3fa;}
-.stApp [data-testid="stCaptionContainer"] p {color:#aab8c9;}
-.block-container {max-width:1050px;padding-top:1.5rem;padding-bottom:3rem;}
-.sl-card {background:linear-gradient(135deg,#182433,#111b28);border:1px solid #334456;border-radius:18px;padding:18px;margin-top:12px;}
-.sl-person {display:flex;align-items:center;gap:15px;}
-.sl-person h3 {margin:0;padding:0;color:#f3f7fc;font-size:1.2rem;}
-.sl-photo {width:72px;height:80px;object-fit:cover;border-radius:12px;background:#25374b;flex-shrink:0;}
-.sl-initial {display:flex;align-items:center;justify-content:center;font-size:24px;color:#22e6a5;}
-.sl-muted {color:#aab8c9;font-size:.82rem;margin:5px 0;}
-.sl-prop {color:#edf3fa;font-weight:600;margin-top:6px;}
-.sl-values {display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;margin:15px 0 10px;align-items:center;}
-.sl-values strong {font-size:1.2rem;} .sl-values span {font-size:.9rem;color:#bfccdc;} .sl-values b {color:#fff;}
-@media(max-width:600px){.block-container{padding:1rem .8rem 3rem;}.sl-card{padding:13px;}.sl-photo{width:56px;height:65px;}.sl-person h3{font-size:1.05rem;}.sl-values{gap:8px;}.sl-values span{font-size:.8rem;}}
+:root { color-scheme:dark; }
+.stApp {background:radial-gradient(ellipse at 50% 0%,#102438 0%,#07121f 44%,#050e19 100%);color:#f3f8ff;}
+.stApp h1,.stApp h2,.stApp h3,.stApp h4,.stApp p,.stApp label {color:#f3f8ff;}
+.stApp [data-testid="stCaptionContainer"] p {color:#a9b9cb;}
+.block-container {max-width:1040px;padding-top:1.2rem;padding-bottom:6rem;}
+.sl-card {background:linear-gradient(125deg,#122638,#0b1a2a);border:1px solid #395268;border-radius:19px;padding:17px 17px 12px;margin:18px 0 6px;box-shadow:0 12px 28px #0003;}
+.sl-person {display:flex;align-items:center;gap:16px;min-width:0;}
+.sl-person h3 {margin:0;color:white;font-size:1.3rem;line-height:1.25;}
+.sl-photo {width:78px;height:86px;object-fit:cover;border-radius:14px;background:#263d50;flex-shrink:0;}
+.sl-initial {display:flex;align-items:center;justify-content:center;font-size:24px;color:#24ed9c;}
+.sl-team {color:#37d6f7;font-weight:700;font-size:.93rem;margin-top:3px;}
+.sl-muted {color:#9fb2c5;font-size:.77rem;margin-top:5px;}
+.sl-prop {color:#f1f7fd;font-size:.92rem;margin-top:4px;}
+.sl-dot {color:#23e6a2;}
+.sl-pickline,.sl-hero {display:flex;align-items:center;justify-content:space-between;gap:9px;background:linear-gradient(120deg,#0c2b2b,#0d1d2b);border:1px solid #426075;border-radius:14px;padding:12px;margin-top:14px;}
+.sl-side {font-size:1.08rem;font-weight:850;white-space:nowrap;text-align:center;border-radius:13px;padding:10px 14px;min-width:115px;}
+.sl-side.more {background:linear-gradient(135deg,#008d46,#00d36b);border:2px solid #36ff99;color:white;box-shadow:0 0 17px #00d46c44;}
+.sl-side.less {background:linear-gradient(135deg,#a71927,#d43a43);border:2px solid #ff6876;color:white;}
+.sl-side.pending {background:#2c3b4c;color:#d9e2eb;font-size:.85rem;}
+.sl-proj {display:flex;flex-direction:column;align-items:center;min-width:0;text-align:center;}
+.sl-proj small {font-size:.69rem;color:#c1cedb;white-space:nowrap;}
+.sl-proj b {font-size:1.45rem;color:#28ed99;line-height:1.3;}
+.sl-detail-heading {margin:8px 0 12px;}.sl-detail-heading h2 {margin:3px 0;font-size:1.7rem;}
+.sl-detail-photo {width:100px;height:110px;}.sl-eyebrow {font-size:.7rem;font-weight:800;letter-spacing:.12em;color:#9eb0c3;}
+.sl-hero {border:2px solid #22e6a5;padding:18px 14px;margin:16px 0 8px;}
+.sl-hero .sl-proj b {font-size:2rem;}
+.stApp [data-testid="stButton"] button {border-radius:13px;border:1px solid #456073;background:#142536;color:#f0f6fc;}
+.stApp [data-testid="stButton"] button:hover {border-color:#22e6a5;color:#22e6a5;}
+.stApp [data-testid="stRadio"] [role="radiogroup"] {gap:.35rem;}
+.stApp [data-testid="stRadio"] label {border-radius:12px;}
+.stApp [data-testid="stMetric"] {background:#15283a;border:1px solid #395168;border-radius:12px;padding:10px;}
+@media(max-width:600px){.block-container{padding:1rem .65rem 6rem;}.sl-card{padding:12px;}.sl-photo{width:65px;height:75px;}.sl-detail-photo{width:82px;height:94px;}.sl-person h3{font-size:1.09rem;}.sl-detail-heading h2{font-size:1.25rem;}.sl-pickline,.sl-hero{padding:9px 6px;gap:5px;}.sl-side{font-size:.83rem;min-width:90px;padding:9px 5px;}.sl-proj small{font-size:.57rem;}.sl-proj b{font-size:1.17rem;}.sl-hero .sl-proj b{font-size:1.45rem;}}
 </style>""", unsafe_allow_html=True)
-st.markdown("## 🟢 SPORTS LAB")
+st.markdown("## ▥ SPORTS :green[LAB]")
 st.caption("Model picks · Research · Results")
 app_page = st.radio("Navigation", ["Plays", "Saved", "Results", "Settings"], horizontal=True, key="sports_lab_page")
 if st.session_state.get("last_ui_page") != app_page:
