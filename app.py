@@ -205,6 +205,7 @@ class Store:
             raise ValueError("Unsupported workspace backup.")
 
         allowed = {
+            "watchlist",
             "board",
             "forecast",
             "grade",
@@ -2342,7 +2343,7 @@ def save_ticket(store, ticket, settle=False):
     return ticket
 
 
-def render_workflow(wf, st, rows):
+def render_workflow(wf, st, rows, mode="settings"):
     st.subheader("NBA workflow")
 
     st.caption(
@@ -2362,42 +2363,43 @@ def render_workflow(wf, st, rows):
             "set DATABASE_URL once for permanent storage."
         )
 
-    with st.expander("Full workspace backup / restore"):
-        st.download_button(
-            "Download forecasts, grades, model and board",
-            wf.store.export(),
-            "sports_lab_workspace.json",
-            "application/json",
-        )
+    if mode == "settings":
+        with st.expander("Full workspace backup / restore"):
+            st.download_button(
+                "Download forecasts, grades, model and board",
+                wf.store.export(),
+                "sports_lab_workspace.json",
+                "application/json",
+            )
 
-        uploaded = st.file_uploader(
-            "Restore full workspace",
-            type=["json"],
-            key="full_restore",
-        )
+            uploaded = st.file_uploader(
+                "Restore full workspace",
+                type=["json"],
+                key="full_restore",
+            )
 
-        if st.button(
-            "Restore missing workspace records",
-            disabled=uploaded is None,
-        ):
-            try:
-                if uploaded.size > 50 * 1024 * 1024:
-                    raise ValueError(
-                        "Maximum backup size is 50 MB."
+            if st.button(
+                "Restore missing workspace records",
+                disabled=uploaded is None,
+            ):
+                try:
+                    if uploaded.size > 50 * 1024 * 1024:
+                        raise ValueError(
+                            "Maximum backup size is 50 MB."
+                        )
+
+                    count = wf.store.restore(
+                        json.loads(uploaded.getvalue())
                     )
 
-                count = wf.store.restore(
-                    json.loads(uploaded.getvalue())
-                )
+                    st.success(
+                        f"Checked {count} records. "
+                        "Existing records preserved. "
+                        "Reload the app to restore the board."
+                    )
 
-                st.success(
-                    f"Checked {count} records. "
-                    "Existing records preserved. "
-                    "Reload the app to restore the board."
-                )
-
-            except Exception as error:
-                st.error(str(error))
+                except Exception as error:
+                    st.error(str(error))
 
     if rows:
         platforms = st.multiselect(
@@ -2470,6 +2472,9 @@ def render_workflow(wf, st, rows):
                 "stay visible with the reason; supported "
                 "calculations receive MORE or LESS."
             )
+
+    if mode == "settings":
+        return
 
     with st.expander(
         "Grades and learning",
@@ -3751,6 +3756,9 @@ def render_history_graph(sample, h2h_games, card):
         return
 
     prop_line = float(card["Line"])
+    _frozen_chart = workflow_store.get("forecast", identity(card), {})
+    _chart_direction = _frozen_chart.get("result", {}).get("direction", "MORE")
+    st.caption("Bars show outcomes for " + _chart_direction + " at this line; ties are neutral. Historical results are not predicted probabilities.")
     chart_width, chart_height = 1000, 360
     left, right, top, bottom = 55, 20, 35, 65
     plot_width = chart_width - left - right
@@ -3788,11 +3796,8 @@ def render_history_graph(sample, h2h_games, card):
         center = left + slot_width * (index + 0.5)
         y = chart_y(value)
         height = max(chart_y(0) - y, 0)
-        color = (
-            "#16a34a" if value > prop_line
-            else "#dc2626" if value < prop_line
-            else "#94a3b8"
-        )
+        hit = value > prop_line if _chart_direction == "MORE" else value < prop_line
+        color = "#94a3b8" if value == prop_line else "#16a34a" if hit else "#dc2626"
         opponent = html.escape(str(row["MATCHUP"]).split()[-1])
         date_label = row["GAME_DATE"].strftime("%m/%d")
         svg.append(
@@ -5241,11 +5246,6 @@ def render_calculated_pick(history, card, season):
         "for permanent storage."
     )
 def render_card_history(card):
-    render_player_availability(card)
-    render_team_scoring(card)
-    render_team_advanced(card)
-    render_position_defense(card)
-
     columns = market_columns(card)
     if columns is None:
         st.info(
@@ -5282,8 +5282,6 @@ def render_card_history(card):
                 f"{type(error).__name__}: {error}"
             )
             return
-
-    render_calculated_pick(history, card, season)
 
     cutoff = pd.to_datetime(
         card["Start (UTC)"], utc=True, errors="coerce"
@@ -5364,6 +5362,8 @@ def render_card_history(card):
     except Exception:
         st.caption("H2H unavailable: ESPN team mapping did not load.")
 
+    render_history_graph(sample, h2h_games, card)
+    st.markdown("#### History and splits for this prop")
     st.dataframe(
         pd.DataFrame(summaries),
         hide_index=True,
@@ -5407,7 +5407,7 @@ def render_card_history(card):
         }
         h2h_rows = []
         for column, label in labels.items():
-            if column in h2h_games.columns:
+            if column in (["MIN"] + columns) and column in h2h_games.columns:
                 values = pd.to_numeric(
                     h2h_games[column], errors="coerce"
                 ).dropna()
@@ -5435,7 +5435,6 @@ def render_card_history(card):
             "Historical results against the team, not a specific defender."
         )
 
-    render_history_graph(sample, h2h_games, card)
 
 
 # ---------------- SAVED WORKSPACE AND KALSHI ----------------
@@ -5536,7 +5535,7 @@ def validate_board(board):
     return {key: board[key] for key in BOARD_FIELDS}
 
 
-def render_saved_workspace():
+def render_saved_workspace(controls=True):
     if "v4_rows" not in st.session_state:
         try:
             board = workspace_load("board")
@@ -5544,6 +5543,9 @@ def render_saved_workspace():
                 st.session_state.update(validate_board(board))
         except Exception as error:
             st.warning(f"Saved board could not be restored: {error}")
+
+    if not controls:
+        return
 
     with st.expander("Save / restore scanned board — no odds calls"):
         st.caption(
@@ -6076,41 +6078,310 @@ if _password:
         st.stop()
 
 
+# ---------------- MOBILE PLAYER BOARD ----------------
+import html as _html
+
+
+def ui_text(value):
+    return _html.escape(str(value if value is not None else ''))
+
+
+def ui_number(value, default=None):
+    try:
+        number = float(value)
+        return number if math.isfinite(number) else default
+    except (TypeError, ValueError):
+        return default
+
+
+def ui_name(value):
+    text = str(value)
+    if ',' in text:
+        last, first = text.split(',', 1)
+        return first.strip() + ' ' + last.strip()
+    return text
+
+
+def ui_stat(card):
+    if fantasy_weights(card):
+        return 'Fantasy Score'
+    labels = {'PTS': 'PTS', 'REB': 'REB', 'AST': 'AST', 'FG3M': '3PM',
+              'TOV': 'TO', 'STL': 'STL', 'BLK': 'BLK'}
+    columns = market_columns(card)
+    return ' + '.join(labels.get(c, c) for c in columns) if columns else str(card.get('Stat', ''))
+
+
+def ui_photo(frozen):
+    result = (frozen or {}).get('result', {})
+    athlete = result.get('roster', {}).get('athlete', {})
+    if not athlete:
+        athlete = (frozen or {}).get('snapshot', {}).get('roster', {})
+    photo = athlete.get('headshot', {})
+    href = photo.get('href', '') if isinstance(photo, dict) else str(photo or '')
+    # Only use source-provided HTTPS images; no name-based guesses or new requests.
+    return href if href.startswith('https://') else ''
+
+
+def ui_matches_family(a, b):
+    fields = ('Fixture ID', 'Platform', 'Player ID', 'Stat Key', 'Period')
+    return all(str(a.get(k)) == str(b.get(k)) for k in fields)
+
+
+def ui_save_pick(card, frozen):
+    key = identity(card)
+    old = workflow_store.get('watchlist', key)
+    if old and old.get('active', True):
+        old['active'] = False
+        workflow_store.put('watchlist', key, old)
+    else:
+        workflow_store.put('watchlist', key, {
+            'active': True, 'saved_at': now(), 'card': json_safe(dict(card)),
+            'forecast_id': key if frozen else None,
+            'result': (frozen or {}).get('result'),
+            'board_observed_at': st.session_state.get('v4_scan_at'),
+        })
+
+
+def ui_card(card, frozen, saved=False):
+    result = (frozen or {}).get('result') or {}
+    direction = result.get('direction', '')
+    projection = ui_number(result.get('projection'))
+    probability = ui_number(result.get('estimated_hit_probability'))
+    color = '#22e6a5' if direction == 'MORE' else '#ff757b' if direction == 'LESS' else '#a3afc0'
+    photo = ui_photo(frozen)
+    portrait = (f'<img class="sl-photo" src="{ui_text(photo)}" alt="Player portrait">'
+                if photo else '<div class="sl-photo sl-initial">' + ui_text(''.join(p[0] for p in ui_name(card['Player']).split()[:2])) + '</div>')
+    tier = (' · ' + str(card.get('Line Type', 'Unverified'))) if card.get('Platform') == 'prizepicks' else ''
+    line = ui_number(card.get('Line'))
+    line_text = f'{line:g}' if line is not None else '—'
+    side = ('↑ ' if direction == 'MORE' else '↓ ') + direction if direction else 'Not calculated'
+    value = f'{projection:.2f}' if projection is not None else '—'
+    estimate = f'{probability:.1%}' if probability is not None else '—'
+    st.markdown(f'''<div class="sl-card">
+<div class="sl-person">{portrait}<div><h3>{ui_text(ui_name(card['Player']))}</h3><div class="sl-muted">{ui_text(card.get('Game', ''))}</div><div class="sl-prop">{ui_text(ui_stat(card))} · Line {line_text}</div></div></div>
+<div class="sl-values"><strong style="color:{color}">{ui_text(side)}</strong><span>Projection <b>{value}</b></span><span>Est. hit <b>{estimate}</b></span></div>
+<div class="sl-muted">{ui_text(str(card.get('Platform', '')).upper() + tier)}</div></div>''', unsafe_allow_html=True)
+    if result and not result.get('selection_allowed', True):
+        st.caption('Model direction is unavailable on this offered side.')
+    key = identity(card)
+    left, right = st.columns([3, 1])
+    if left.button('View pick breakdown →', key='detail_' + key, use_container_width=True):
+        st.session_state['selected_prop_card'] = dict(card)
+        st.rerun()
+    if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, use_container_width=True):
+        ui_save_pick(card, frozen)
+        st.rerun()
+
+
+def ui_history(card):
+    matched = resolve_player(str(card['Player']))
+    if matched is None:
+        st.info('No unique player match is available for the research breakdown.')
+        return None
+    player_id, name = matched
+    season = current_season()
+    key = f'{player_id}:{season}'
+    history = st.session_state.get('deep_history', {}).get(key)
+    if history is None:
+        with st.spinner('Loading player research…'):
+            history = fetch_player_history(player_id, name, season)
+        st.session_state.setdefault('deep_history', {})[key] = history
+    return history
+
+
+def ui_fantasy_rates(card, history, result):
+    st.markdown('#### Fantasy points per minute')
+    cutoff = min(pd.to_datetime(card['Start (UTC)'], utc=True), pd.Timestamp.now(tz='UTC'))
+    games = history.copy()
+    games['GAME_DATE'] = pd.to_datetime(games['GAME_DATE'], utc=True)
+    games = games[games['GAME_DATE'] < cutoff].drop_duplicates('GAME_ID')
+    games['FP'] = score_frame(games, card)
+    games['MIN'] = pd.to_numeric(games['MIN'], errors='coerce')
+    games = games[games['FP'].notna() & games['MIN'].gt(0)].sort_values('GAME_DATE', ascending=False)
+    rows = []
+    for label, sample in [('Last 5', games.head(5)), ('Last 15', games.head(15)),
+                          ('Current season', games[games['SEASON'] == current_season()])]:
+        minutes = sample['MIN'].sum()
+        rows.append({'Window': label, 'Games': len(sample), 'Historical FP/min': round(float(sample['FP'].sum() / minutes), 3) if minutes > 0 else None})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    minutes = ui_number(result.get('minutes'))
+    projection = ui_number(result.get('projection'))
+    if minutes and projection is not None:
+        a, b = st.columns(2)
+        a.metric('Projected FP/min', f'{projection / minutes:.3f}')
+        b.metric('Projected minutes', f'{minutes:.1f}')
+    weights = fantasy_weights(card)
+    contributions = []
+    for component in result.get('components', []):
+        value = ui_number(component.get('Projection'))
+        stat = component.get('Stat')
+        if value is not None and stat in weights:
+            contributions.append({'Stat': stat, 'Projected stat': round(value, 2),
+                                  'Scoring weight': weights[stat], 'FP contribution': round(value * weights[stat], 2)})
+    if contributions:
+        with st.expander('Six-stat fantasy calculation'):
+            st.dataframe(pd.DataFrame(contributions), hide_index=True, use_container_width=True)
+            st.caption('Contributions show the matchup calculation before any learned blend. The displayed final projection may differ when a learned model is active.')
+    st.caption('Historical FP/min uses total fantasy points ÷ total played minutes in each window. Projected FP/min is the frozen final projection ÷ projected minutes.')
+
+
+def ui_detail(card, forecasts):
+    if st.button('← Back to board', key='back_to_plays'):
+        st.session_state.pop('selected_prop_card', None)
+        st.rerun()
+    frozen = forecasts.get(identity(card))
+    result = (frozen or {}).get('result', {})
+    st.subheader(ui_name(card['Player']))
+    st.caption(str(card.get('Game', '')) + ' · ' + str(card.get('Platform', '')).upper())
+    st.markdown('### ' + ui_stat(card) + ' · Line ' + str(card['Line']))
+    if result:
+        a, b, c = st.columns(3)
+        a.metric('Model side', result.get('direction', '—'))
+        b.metric('Projection', f"{result['projection']:.2f}")
+        probability = ui_number(result.get('estimated_hit_probability'))
+        c.metric('Est. hit', f'{probability:.1%}' if probability is not None else '—')
+        st.caption('Frozen pregame forecast · Experimental probability estimate · Saved ' + str(frozen.get('created_at', '')))
+        if not result.get('selection_allowed', True):
+            st.warning('This model direction is not offered for this platform/tier.')
+    else:
+        st.info('No frozen forecast for this line yet. Use Calculate board in Settings, or open Calculation below for this player.')
+    tab = st.radio('Pick research', ['History', 'Matchup', 'Market', 'Calculation'], horizontal=True, key='pick_research_' + identity(card))
+    try:
+        if tab == 'History':
+            if fantasy_weights(card):
+                history = ui_history(card)
+                if history is not None:
+                    ui_fantasy_rates(card, history, result)
+            render_card_history(card)
+        elif tab == 'Matchup':
+            render_player_availability(card)
+            render_team_advanced(card)
+            render_position_defense(card)
+            with st.expander('Team scoring context'):
+                render_team_scoring(card)
+        elif tab == 'Market':
+            if card.get('Platform') == 'kalshi':
+                render_kalshi(card)
+            market = engine_no_vig(card)
+            if market:
+                st.write(f"Matching sportsbook no-vig MORE: **{market['more']:.1%}** · LESS: **{market['less']:.1%}**")
+            else:
+                st.caption('No unique matching sportsbook over/under price pair is available.')
+            render_game_context(engine_game_context(card))
+        else:
+            history = ui_history(card)
+            if history is not None:
+                render_calculated_pick(history, card, current_season())
+            st.caption('The official audit retains the first frozen pregame forecast even if a fresh calculation differs.')
+    except Exception:
+        st.warning('This research section could not load. Your saved forecast is unchanged; try another section or retry later.')
+
+
+def ui_board(page):
+    rows = st.session_state.get('v4_rows', [])
+    forecasts = dict(workflow_store.items('forecast'))
+    saved = {key: value for key, value in workflow_store.items('watchlist') if value.get('active', True)}
+    selected = st.session_state.get('selected_prop_card')
+    if selected is not None:
+        ui_detail(selected, forecasts)
+        return
+    st.subheader('Saved plays' if page == 'Saved' else 'Your NBA plays')
+    st.caption('NBA is connected. Other sports will appear here when their engines and feeds are ready.')
+    platform = st.radio('Platform', ['All', 'PrizePicks', 'Kalshi', 'DraftKings'], horizontal=True, key='mobile_platform')
+    kind = st.radio('Pick type', ['Player Props', 'Fantasy'], horizontal=True, key='mobile_kind')
+    view = st.radio('Board view', ['Top plays', 'All props'], horizontal=True, key='mobile_view') if page != 'Saved' else 'All props'
+    search = st.text_input('Find player', placeholder='Search by name…', key='mobile_search')
+    if page == 'Saved':
+        records = [v['card'] for v in saved.values()]
+        st.caption('Saved lines stay fixed. Comparisons use the latest imported board; opening this page does not refresh prices.')
+    else:
+        records = rows
+    unique = {}
+    for card in records:
+        if not card.get('Decoded') or not market_columns(card):
+            continue
+        if page != 'Saved':
+            start = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
+            if pd.isna(start) or start <= pd.Timestamp.now(tz='UTC'):
+                continue
+        if platform != 'All' and str(card.get('Platform')).lower() != platform.lower():
+            continue
+        if bool(fantasy_weights(card)) != (kind == 'Fantasy'):
+            continue
+        if search.strip() and search.strip().lower() not in ui_name(card['Player']).lower():
+            continue
+        unique[identity(card)] = card
+    records = list(unique.values())
+    a, b = st.columns(2)
+    stats = ['All'] + sorted({ui_stat(card) for card in records})
+    stat = a.selectbox('Stat', stats, key='mobile_stat')
+    tiers = ['All', 'Standard', 'Goblin', 'Demon', 'Unverified']
+    tier = b.selectbox('PrizePicks line type', tiers, key='mobile_tier')
+    records = [c for c in records if (stat == 'All' or ui_stat(c) == stat)
+               and (tier == 'All' or (c.get('Platform') == 'prizepicks' and c.get('Line Type') == tier))]
+    if view == 'Top plays':
+        records = [c for c in records if identity(c) in forecasts
+                   and forecasts[identity(c)]['result'].get('selection_allowed', True)
+                   and not forecasts[identity(c)]['result'].get('tie', False)]
+        records.sort(key=lambda c: ui_number(forecasts[identity(c)]['result'].get('standardized_gap'), -1), reverse=True)
+        st.caption('Ranked by projected gap relative to recent variability. This is not a proven probability or profit ranking. All props remains available.')
+    else:
+        records.sort(key=lambda c: (str(c['Player']), ui_stat(c), float(c['Line'])))
+    stamp = st.session_state.get('v4_scan_at')
+    if stamp:
+        st.caption('Base board scan (UTC): ' + str(stamp) + ' · Native feeds may have separate timestamps. Browsing uses saved data.')
+    st.caption(f'{len(records)} matching picks · Estimated hit percentages are experimental.')
+    if not records:
+        st.info('No matching picks. Try All props or clear filters. Data imports and board calculation are under Settings.')
+        return
+    pages = max(1, (len(records) + 11) // 12)
+    page_number = int(st.number_input('Page', min_value=1, max_value=pages, value=1, step=1, key='mobile_page_' + page + '_' + kind + '_' + platform + '_' + str(len(records))))
+    for card in records[(page_number - 1) * 12:page_number * 12]:
+        key = identity(card)
+        frozen = forecasts.get(key)
+        ui_card(card, frozen, key in saved)
+        if page == 'Saved':
+            saved_value = saved[key]
+            st.caption('Saved at (UTC): ' + saved_value['saved_at'])
+            candidates = [row for row in rows if ui_matches_family(card, row)]
+            lines = sorted({float(row['Line']) for row in candidates if ui_number(row.get('Line')) is not None})
+            if lines:
+                st.caption('Latest imported thresholds: ' + ', '.join(f'{n:g}' for n in lines) + '. Alternate lines are not proof of line movement. A uniquely matched quote history is needed for a movement claim.')
+            else:
+                st.caption('No matching quote in the current imported board. Original saved line preserved.')
+
+
 # ---------------- APP HEADER ----------------
-
-st.title("🎯 Elite Individual Analytics Lab")
-st.caption("Real NBA market inventory · Historical research")
-st.sidebar.header("📡 Data connection")
-
-if setting("ODDS_API_KEY", ""):
-    st.sidebar.success("ODDS_API_KEY configured")
-else:
-    st.sidebar.warning("ODDS_API_KEY missing")
-
-if "nba_history" in st.session_state:
-    st.sidebar.success(
-        "Historical logs loaded: "
-        + st.session_state.get("nba_history_season", "")
-    )
-else:
-    st.sidebar.info("Historical box scores: not loaded")
-
-st.sidebar.info("Player history: select a player row")
-st.sidebar.info(
-    "Availability: automatic forecast checks and manual refresh"
-)
-st.sidebar.info(
-    "Projection: minutes, rates, pace and position defense"
-)
-st.sidebar.info(
-    "Grades, learning and paper ROI: NBA workflow panel"
-)
-
+st.markdown("""<style>
+.stApp {background:#0d1420;color:#edf3fa;}
+.stApp h1,.stApp h2,.stApp h3,.stApp h4,.stApp p,.stApp label {color:#edf3fa;}
+.stApp [data-testid="stCaptionContainer"] p {color:#aab8c9;}
+.block-container {max-width:1050px;padding-top:1.5rem;padding-bottom:3rem;}
+.sl-card {background:linear-gradient(135deg,#182433,#111b28);border:1px solid #334456;border-radius:18px;padding:18px;margin-top:12px;}
+.sl-person {display:flex;align-items:center;gap:15px;}
+.sl-person h3 {margin:0;padding:0;color:#f3f7fc;font-size:1.2rem;}
+.sl-photo {width:72px;height:80px;object-fit:cover;border-radius:12px;background:#25374b;flex-shrink:0;}
+.sl-initial {display:flex;align-items:center;justify-content:center;font-size:24px;color:#22e6a5;}
+.sl-muted {color:#aab8c9;font-size:.82rem;margin:5px 0;}
+.sl-prop {color:#edf3fa;font-weight:600;margin-top:6px;}
+.sl-values {display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;margin:15px 0 10px;align-items:center;}
+.sl-values strong {font-size:1.2rem;} .sl-values span {font-size:.9rem;color:#bfccdc;} .sl-values b {color:#fff;}
+@media(max-width:600px){.block-container{padding:1rem .8rem 3rem;}.sl-card{padding:13px;}.sl-photo{width:56px;height:65px;}.sl-person h3{font-size:1.05rem;}.sl-values{gap:8px;}.sl-values span{font-size:.8rem;}}
+</style>""", unsafe_allow_html=True)
+st.markdown("## 🟢 SPORTS LAB")
+st.caption("Model picks · Research · Results")
+app_page = st.radio("Navigation", ["Plays", "Saved", "Results", "Settings"], horizontal=True, key="sports_lab_page")
+if st.session_state.get("last_ui_page") != app_page:
+    st.session_state.pop("selected_prop_card", None)
+    st.session_state["last_ui_page"] = app_page
+render_saved_workspace(controls=(app_page == "Settings"))
+if app_page == "Settings":
+    st.subheader("NBA data and board setup")
+    st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
+    st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
 # ---------------- NBA SCANNER ----------------
 
-st.subheader("🏀 NBA Pregame Scanner + Line Inventory")
-render_saved_workspace()
 
 try:
     _maintenance = workflow_store.get("maintenance", "last")
@@ -6132,15 +6403,10 @@ except Exception:
         "remain available; retry in the workflow panel."
     )
 
-with st.expander(
-    "Calculate board · Grades · Learning · ROI",
-    expanded="v4_rows" not in st.session_state,
-):
-    render_workflow(
-        workflow,
-        st,
-        st.session_state.get("v4_rows", []),
-    )
+if app_page in ("Results", "Settings"):
+    render_workflow(workflow, st,
+                    st.session_state.get("v4_rows", []) if app_page == "Settings" else [],
+                    mode="results" if app_page == "Results" else "settings")
 
 # PrizePicks tier feed: explicit refresh only.
 def pp_stat_key(label):
@@ -6415,598 +6681,231 @@ def render_native_kalshi_refresh():
             st.error(str(error))
 
 
-render_native_kalshi_refresh()
-if st.session_state.get("native_kalshi_notice"):
-    st.info(st.session_state["native_kalshi_notice"])
+if app_page == "Settings":
+    render_native_kalshi_refresh()
+    if st.session_state.get("native_kalshi_notice"):
+        st.info(st.session_state["native_kalshi_notice"])
 
-render_pp_tier_refresh()
-if st.session_state.get("pp_tier_notice"):
-    st.info(st.session_state["pp_tier_notice"])
+    render_pp_tier_refresh()
+    if st.session_state.get("pp_tier_notice"):
+        st.info(st.session_state["pp_tier_notice"])
 
-max_games = st.slider("Games to scan", 1, 5, 3)
+    max_games = st.slider("Games to scan", 1, 5, 3)
 
-st.caption(
-    f"Fresh scan uses up to {max_games + 2} API calls. "
-    "Odds are cached for 30 minutes. "
-    "Breakdown, grading and availability do not run this scan."
-)
+    st.caption(
+        f"Fresh scan uses up to {max_games + 2} API calls. "
+        "Odds are cached for 30 minutes. "
+        "Breakdown, grading and availability do not run this scan."
+    )
 
-if st.button(
-    "🔍 SCAN AND DECODE NBA LINES",
-    use_container_width=True,
-):
-    try:
-        with st.spinner("Loading NBA fixtures and market lines..."):
-            games = upcoming_nba()[:max_games]
-            all_rows, summaries, errors = [], [], []
+    if st.button(
+        "🔍 SCAN AND DECODE NBA LINES",
+        use_container_width=True,
+    ):
+        try:
+            with st.spinner("Loading NBA fixtures and market lines..."):
+                games = upcoming_nba()[:max_games]
+                all_rows, summaries, errors = [], [], []
 
-            if not games:
-                st.warning(
-                    "No upcoming NBA games returned "
-                    "for the next three days."
+                if not games:
+                    st.warning(
+                        "No upcoming NBA games returned "
+                        "for the next three days."
+                    )
+
+                else:
+                    catalog = market_catalog()
+
+                    for game in games:
+                        try:
+                            decoded_rows, summary = decode_game(
+                                game,
+                                game_odds(str(game["fixtureId"])),
+                                catalog,
+                            )
+
+                            all_rows.extend(decoded_rows)
+                            summaries.extend(summary)
+
+                        except ValueError as error:
+                            errors.append(
+                                f"{game.get('participant1Name', '?')} vs "
+                                f"{game.get('participant2Name', '?')}: "
+                                f"{error}"
+                            )
+
+                st.session_state["v4_rows"] = all_rows
+                st.session_state["v4_summary"] = summaries
+                st.session_state["v4_errors"] = errors
+                st.session_state["v4_scan_at"] = (
+                    datetime.now(timezone.utc).isoformat()
                 )
 
-            else:
-                catalog = market_catalog()
+                workspace_store(
+                    "board",
+                    {
+                        key: st.session_state[key]
+                        for key in BOARD_FIELDS
+                    },
+                )
 
-                for game in games:
-                    try:
-                        decoded_rows, summary = decode_game(
-                            game,
-                            game_odds(str(game["fixtureId"])),
-                            catalog,
-                        )
-
-                        all_rows.extend(decoded_rows)
-                        summaries.extend(summary)
-
-                    except ValueError as error:
-                        errors.append(
-                            f"{game.get('participant1Name', '?')} vs "
-                            f"{game.get('participant2Name', '?')}: "
-                            f"{error}"
-                        )
-
-            st.session_state["v4_rows"] = all_rows
-            st.session_state["v4_summary"] = summaries
-            st.session_state["v4_errors"] = errors
-            st.session_state["v4_scan_at"] = (
-                datetime.now(timezone.utc).isoformat()
-            )
-
-            workspace_store(
-                "board",
-                {
-                    key: st.session_state[key]
-                    for key in BOARD_FIELDS
-                },
-            )
-
-    except ValueError as error:
-        st.error(str(error))
+        except ValueError as error:
+            st.error(str(error))
 
 
 # ---------------- RESULTS AND PLAYER LINES ----------------
+if app_page in ("Plays", "Saved"):
+    ui_board(app_page)
 
-if "v4_rows" in st.session_state:
-    for message in st.session_state.get("v4_errors", []):
-        st.warning(message)
+if app_page == "Settings":
+    # ---------------- OPTIONAL DISCOVERY PREVIEW ----------------
 
-    summary = st.session_state.get("v4_summary", [])
+    st.divider()
 
-    if summary:
-        with st.expander("Platform coverage"):
-            st.dataframe(
-                pd.DataFrame(summary),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    rows = st.session_state["v4_rows"]
-
-    if not rows:
+    with st.expander(
+        "Optional NBA historical discovery preview"
+    ):
         st.info(
-            "No active named NBA player-prop outcomes returned."
+            "Player breakdowns resolve current roster identities "
+            "automatically. This optional discovery batch provides "
+            "a league preview. Saved ESPN responses use a local cache. "
+            "The main board and forecasts use permanent storage "
+            "when DATABASE_URL is configured."
         )
 
-    else:
-        df = pd.DataFrame(rows)
-
-        group_keys = [
-            "Fixture ID",
-            "Platform",
-            "Player",
-            "Stat Key",
-            "Period",
-        ]
-
-        df["Distinct Thresholds"] = df.groupby(
-            group_keys,
-            dropna=False,
-        )["Line"].transform("nunique").astype(int)
-
-        df["Multiple Thresholds"] = (
-            df["Distinct Thresholds"] > 1
+        _season_year = int(
+            current_season().split("-")[0]
         )
 
-        a, b, c = st.columns(3)
-
-        a.metric("Active prop outcomes", len(df))
-
-        b.metric(
-            "Line + direction decoded",
-            int(df["Decoded"].sum()),
+        _previous_season = (
+            f"{_season_year - 1}-{str(_season_year)[-2:]}"
         )
 
-        c.metric(
-            "Tier explicitly verified",
-            int((df["Line Type"] != "Unverified").sum()),
-        )
-
-        st.caption(
-            "Last scan completed (UTC): "
-            + st.session_state.get("v4_scan_at", "Unavailable")
-            + " · Source responses may be cached "
-            "for up to 30 minutes."
-        )
-
-        platform = st.selectbox(
-            "Platform",
-            ["All"] + list(BOOKS),
-        )
-
-        show = st.radio(
-            "View",
+        history_season = st.selectbox(
+            "Historical season",
             [
-                "All active props",
-                "Decoded only",
-                "Multiple thresholds",
-                "Unverified line types",
+                current_season(),
+                _previous_season,
             ],
-            horizontal=True,
+            key="history_season",
         )
 
-        filtered = (
-            df.copy()
-            if platform == "All"
-            else df[df["Platform"] == platform].copy()
-        )
-
-        if show == "Decoded only":
-            filtered = filtered[filtered["Decoded"]]
-
-        elif show == "Multiple thresholds":
-            filtered = filtered[filtered["Multiple Thresholds"]]
-
-        elif show == "Unverified line types":
-            filtered = filtered[
-                filtered["Line Type"] == "Unverified"
-            ]
-
-        st.subheader("Player lines")
-
-        search = st.text_input(
-            "Find a player",
-            placeholder="Type a player's name...",
-        )
-
-        stat_filter = st.selectbox(
-            "Stat",
-            ["All"] + sorted(
-                filtered["Stat"].dropna().unique().tolist()
-            ),
-        )
-
-        tier_filter = st.selectbox(
-            "Line type",
-            [
-                "All",
-                "Standard",
-                "Goblin",
-                "Demon",
-                "Unverified",
-            ],
-        )
-
-        cards = filtered[filtered["Decoded"]].copy()
-
-        if search.strip():
-            cards = cards[
-                cards["Player"].str.contains(
-                    search.strip(),
-                    case=False,
-                    regex=False,
-                    na=False,
-                )
-            ]
-
-        if stat_filter != "All":
-            cards = cards[cards["Stat"] == stat_filter]
-
-        if tier_filter != "All":
-            cards = cards[cards["Line Type"] == tier_filter]
-
-        card_keys = [
-            "Fixture ID",
-            "Platform",
-            "Player ID",
-            "Stat Key",
-            "Period",
-            "Line",
-            "Line Type",
-        ]
-
-        cards = cards.drop_duplicates(
-            card_keys
-        ).sort_values(
-            ["Player", "Stat", "Line"]
-        )
-
-        st.caption(
-            "Select a row for its full breakdown. "
-            "The main list displays frozen pregame forecasts."
-        )
-
-        forecasts = dict(
-            workflow_store.items("forecast")
-        )
-
-        line_rows = []
-        records = []
-
-        stat_names = {
-            "PTS": "PTS",
-            "REB": "REB",
-            "AST": "AST",
-            "STL": "STL",
-            "BLK": "BLK",
-            "TOV": "TO",
-            "FG3M": "3PM",
-        }
-
-        for _, card in cards.iterrows():
-            record = card.to_dict()
-            frozen = forecasts.get(identity(record))
-            result = frozen["result"] if frozen else None
-            stat_columns = market_columns(record)
-
-            if fantasy_weights(record):
-                label = "Fantasy"
-
-            elif stat_columns:
-                label = "+".join(
-                    stat_names[column]
-                    for column in stat_columns
-                )
-
-            else:
-                label = str(record["Stat"])
-
-            if result:
-                model_side = (
-                    "🟢 MORE"
-                    if result["direction"] == "MORE"
-                    else "🔴 LESS"
-                )
-            else:
-                model_side = "Calculate board"
-
-            estimated_probability = (
-                result.get("estimated_hit_probability")
-                if result
-                else None
-            )
-
-            line_rows.append({
-                "Player": str(record["Player"]),
-                "Stat": label,
-                "Line": float(record["Line"]),
-                "Model side": model_side,
-                "Projection": (
-                    round(result["projection"], 2)
-                    if result
-                    else None
-                ),
-                "Est. hit %": (
-                    round(100 * estimated_probability, 1)
-                    if estimated_probability is not None
-                    else None
-                ),
-                "Platform": str(record["Platform"]).upper(),
-                "Tier": record["Line Type"],
-                "Eligible side": (
-                    result.get("selection_allowed", True)
-                    if result
-                    else None
-                ),
-            })
-
-            records.append(record)
-
-        if line_rows:
-            st.caption(
-                "Tap a row to open its full breakdown below. "
-                "Confirm current lines before entering a play."
-            )
-
-            selection = st.dataframe(
-                pd.DataFrame(line_rows),
-                hide_index=True,
-                use_container_width=True,
-                on_select="rerun",
-                selection_mode="single-row",
-                key="player_lines_table",
-                height=min(
-                    680,
-                    38 + 35 * len(line_rows),
-                ),
-                column_config={
-                    "Line": st.column_config.NumberColumn(
-                        format="%.1f"
-                    ),
-                    "Projection": st.column_config.NumberColumn(
-                        format="%.2f"
-                    ),
-                },
-            )
-
-            if selection.selection.rows:
-                chosen = selection.selection.rows[0]
-
-                if 0 <= chosen < len(records):
-                    st.session_state["selected_prop_card"] = (
-                        records[chosen]
+        if st.button("LOAD NBA DISCOVERY BATCH"):
+            try:
+                with st.spinner(
+                    "Requesting real NBA player game logs..."
+                ):
+                    history = load_nba_player_logs(
+                        history_season
                     )
 
-        else:
-            st.info(
-                "No decoded lines match these filters."
-            )
-
-        selected_card = st.session_state.get(
-            "selected_prop_card"
-        )
-
-        if selected_card is not None:
-            st.divider()
-
-            with st.container(border=True):
-                st.subheader(
-                    f"{selected_card['Player']} "
-                    "— Player breakdown"
-                )
-
-                st.caption(
-                    str(selected_card["Game"])
-                )
-
-                st.write(
-                    f"**{str(selected_card['Platform']).upper()} · "
-                    f"{selected_card['Stat']} · "
-                    f"{selected_card['Line']:g}**"
-                )
-
-                st.caption(
-                    "History, availability, matchup inputs, "
-                    "pricing and projection details."
-                )
-
-                render_card_history(selected_card)
-
-        with st.expander("View raw market data"):
-            st.dataframe(
-                filtered.drop(
-                    columns=["Stat Key", "Period"]
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        with st.expander("Grouped threshold inventory"):
-            grouped = (
-                df.groupby(
-                    group_keys + ["Game", "Stat"],
-                    dropna=False,
-                )
-                .agg(
-                    Thresholds=(
-                        "Line",
-                        lambda values: ", ".join(
-                            str(value)
-                            for value in sorted(
-                                set(values.dropna())
-                            )
-                        ),
-                    ),
-                    Threshold_Count=(
-                        "Line",
-                        "nunique",
-                    ),
-                    Active_Outcomes=(
-                        "Player",
-                        "size",
-                    ),
-                    Explicit_Tiers=(
-                        "Line Type",
-                        lambda values: ", ".join(
-                            sorted(set(values))
-                        ),
-                    ),
-                )
-                .reset_index()
-            )
-
-            st.dataframe(
-                grouped,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        st.download_button(
-            "Download decoded inventory CSV",
-            data=df.to_csv(
-                index=False
-            ).encode("utf-8"),
-            file_name="nba_prop_inventory_v4.csv",
-            mime="text/csv",
-        )
-
-        st.caption(
-            "Zero or missing handicaps remain flagged for review. "
-            "Multiple thresholds do not establish "
-            "Standard/Goblin/Demon classification. "
-            "Unverified tiers remain separate."
-        )
-
-
-# ---------------- OPTIONAL DISCOVERY PREVIEW ----------------
-
-st.divider()
-
-with st.expander(
-    "Optional NBA historical discovery preview"
-):
-    st.info(
-        "Player breakdowns resolve current roster identities "
-        "automatically. This optional discovery batch provides "
-        "a league preview. Saved ESPN responses use a local cache. "
-        "The main board and forecasts use permanent storage "
-        "when DATABASE_URL is configured."
-    )
-
-    _season_year = int(
-        current_season().split("-")[0]
-    )
-
-    _previous_season = (
-        f"{_season_year - 1}-{str(_season_year)[-2:]}"
-    )
-
-    history_season = st.selectbox(
-        "Historical season",
-        [
-            current_season(),
-            _previous_season,
-        ],
-        key="history_season",
-    )
-
-    if st.button("LOAD NBA DISCOVERY BATCH"):
-        try:
-            with st.spinner(
-                "Requesting real NBA player game logs..."
-            ):
-                history = load_nba_player_logs(
+                st.session_state["nba_history"] = history
+                st.session_state["nba_history_season"] = (
                     history_season
                 )
 
-            st.session_state["nba_history"] = history
-            st.session_state["nba_history_season"] = (
-                history_season
-            )
+            except Exception as error:
+                st.session_state.pop(
+                    "nba_history",
+                    None,
+                )
 
-        except Exception as error:
-            st.session_state.pop(
-                "nba_history",
-                None,
-            )
+                st.session_state.pop(
+                    "nba_history_season",
+                    None,
+                )
 
-            st.session_state.pop(
-                "nba_history_season",
-                None,
-            )
+                st.error(
+                    "NBA historical connection failed."
+                )
 
-            st.error(
-                "NBA historical connection failed."
-            )
+                st.code(
+                    f"{type(error).__name__}: {error}",
+                    language="text",
+                )
 
-            st.code(
-                f"{type(error).__name__}: {error}",
-                language="text",
+                st.caption(
+                    "No sample data was substituted."
+                )
+
+        if (
+            "nba_history" in st.session_state
+            and st.session_state.get(
+                "nba_history_season"
+            ) == history_season
+        ):
+            history = st.session_state["nba_history"]
+            logs = history["logs"]
+
+            st.success(
+                f"Loaded {len(logs):,} player-game records "
+                f"for {history_season}."
             )
 
             st.caption(
-                "No sample data was substituted."
+                "Source: ESPN · Seven-calendar-day discovery batch · "
+                f"Regular season · Latest game returned: "
+                f"{logs['GAME_DATE'].max():%Y-%m-%d} · "
+                f"Retrieved at (UTC): {history['retrieved_at']} · "
+                "Cache: 1 hour"
             )
 
-    if (
-        "nba_history" in st.session_state
-        and st.session_state.get(
-            "nba_history_season"
-        ) == history_season
+            st.dataframe(
+                logs[
+                    [
+                        "PLAYER_NAME",
+                        "GAME_DATE",
+                        "MATCHUP",
+                        "MIN",
+                        "PTS",
+                        "REB",
+                        "AST",
+                        "STL",
+                        "BLK",
+                        "TOV",
+                        "FG3M",
+                    ]
+                ].head(30),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+
+    with st.expander(
+        "What is connected and what remains"
     ):
-        history = st.session_state["nba_history"]
-        logs = history["logs"]
-
-        st.success(
-            f"Loaded {len(logs):,} player-game records "
-            f"for {history_season}."
+        st.write(
+            "Connected: NBA odds scanner, market decoding, compact "
+            "player lines, historical research, rolling windows, H2H, "
+            "static charts, team efficiency, position defense, "
+            "roster/depth-chart matching, injury checks, projections, "
+            "game-market context, matching prop pricing, frozen forecasts, "
+            "automatic research grading, guarded learning reviews, "
+            "model paper ROI and percentage tracking by PrizePicks tier."
         )
 
-        st.caption(
-            "Source: ESPN · Seven-calendar-day discovery batch · "
-            f"Regular season · Latest game returned: "
-            f"{logs['GAME_DATE'].max():%Y-%m-%d} · "
-            f"Retrieved at (UTC): {history['retrieved_at']} · "
-            "Cache: 1 hour"
+        st.write(
+            "Unmatched players and unsupported markets remain unavailable. "
+            "Depth charts and active roster status are not confirmed "
+            "starting lineups. Initial percentage estimates are "
+            "experimental and are audited against real outcomes."
         )
 
-        st.dataframe(
-            logs[
-                [
-                    "PLAYER_NAME",
-                    "GAME_DATE",
-                    "MATCHUP",
-                    "MIN",
-                    "PTS",
-                    "REB",
-                    "AST",
-                    "STL",
-                    "BLK",
-                    "TOV",
-                    "FG3M",
-                ]
-            ].head(30),
-            use_container_width=True,
-            hide_index=True,
+        st.write(
+            "Outside this NBA release: other sports, salary-cap lineup "
+            "builders, additional fantasy scoring systems and verified "
+            "starting-lineup feeds. Permanent storage and scheduled "
+            "maintenance require DATABASE_URL."
         )
 
 
-with st.expander(
-    "What is connected and what remains"
-):
-    st.write(
-        "Connected: NBA odds scanner, market decoding, compact "
-        "player lines, historical research, rolling windows, H2H, "
-        "static charts, team efficiency, position defense, "
-        "roster/depth-chart matching, injury checks, projections, "
-        "game-market context, matching prop pricing, frozen forecasts, "
-        "automatic research grading, guarded learning reviews, "
-        "model paper ROI and percentage tracking by PrizePicks tier."
-    )
-
-    st.write(
-        "Unmatched players and unsupported markets remain unavailable. "
-        "Depth charts and active roster status are not confirmed "
-        "starting lineups. Initial percentage estimates are "
-        "experimental and are audited against real outcomes."
-    )
-
-    st.write(
-        "Outside this NBA release: other sports, salary-cap lineup "
-        "builders, additional fantasy scoring systems and verified "
-        "starting-lineup feeds. Permanent storage and scheduled "
-        "maintenance require DATABASE_URL."
-    )
-
-
-if HISTORY_DB.exists():
-    st.download_button(
-        "Back up historical response cache",
-        data=HISTORY_DB.read_bytes(),
-        file_name="sports_lab_history.sqlite3",
-        mime="application/vnd.sqlite3",
-    )
+    if HISTORY_DB.exists():
+        st.download_button(
+            "Back up historical response cache",
+            data=HISTORY_DB.read_bytes(),
+            file_name="sports_lab_history.sqlite3",
+            mime="application/vnd.sqlite3",
+        )
 
 
 # ================= END OF APP.PY =================
