@@ -887,11 +887,15 @@ class Workflow:
             "minutes restrictions require verified inputs."
         )
 
-        result["selection_allowed"] = not (
-            card.get("Platform") == "prizepicks"
-            and card.get("Line Type") in ("Goblin", "Demon")
-            and result["direction"] == "LESS"
-        )
+        offered = card.get("Available Sides")
+        if card.get("Platform") == "prizepicks" and offered is not None:
+            result["selection_allowed"] = result["direction"] in offered
+        else:
+            result["selection_allowed"] = not (
+                card.get("Platform") == "prizepicks"
+                and card.get("Line Type") in ("Goblin", "Demon")
+                and result["direction"] == "LESS"
+            )
 
         if not result["selection_allowed"]:
             result["warnings"].append(
@@ -6104,6 +6108,161 @@ with st.expander(
         st,
         st.session_state.get("v4_rows", []),
     )
+
+# PrizePicks tier feed: explicit refresh only.
+def pp_stat_key(label):
+    label = re.sub(r"[^a-z0-9]", "", str(label).lower())
+    mapping = {
+        "points": ("PTS",), "rebounds": ("REB",),
+        "assists": ("AST",), "steals": ("STL",),
+        "blocks": ("BLK",), "turnovers": ("TOV",),
+        "3ptmade": ("FG3M",), "3pointersmade": ("FG3M",),
+        "ptsrebs": ("PTS", "REB"),
+        "ptsasts": ("PTS", "AST"),
+        "rebsasts": ("REB", "AST"),
+        "ptsrebsasts": ("PTS", "REB", "AST"),
+        "blksstls": ("BLK", "STL"),
+        "fantasyscore": ("FANTASY",),
+    }
+    return tuple(sorted(mapping.get(label, ())))
+
+
+def pp_card_key(card):
+    columns = (
+        ("FANTASY",) if fantasy_weights(card)
+        else tuple(sorted(market_columns(card) or ()))
+    )
+    start = pd.to_datetime(card.get("Start (UTC)"), utc=True)
+    return normalize_player(card["Player"]), columns, start.isoformat()
+
+
+def pp_merge_tiers(rows, projections, fetched):
+    templates = {}
+    for row in rows:
+        if row.get("Platform") == "prizepicks":
+            templates.setdefault(pp_card_key(row), []).append(row)
+    imported, matched = [], set()
+    labels = {"standard": "Standard", "goblin": "Goblin", "demon": "Demon"}
+    for item in projections:
+        if item.get("is_demo") is not False or item.get("status") != "active":
+            continue
+        if str(item.get("league", "")).upper() != "NBA":
+            continue
+        market = item.get("market") or {}
+        if str(market.get("period", "")).lower() != "full game":
+            continue
+        start = pd.to_datetime((item.get("event") or {}).get("starts_at"), utc=True, errors="coerce")
+        if pd.isna(start) or start <= pd.Timestamp.now(tz="UTC"):
+            continue
+        key = (
+            normalize_player((item.get("player") or {}).get("name", "")),
+            pp_stat_key(market.get("stat")), start.isoformat(),
+        )
+        candidates = templates.get(key, [])
+        if not key[1] or not candidates:
+            continue
+        if len({str(c["Player ID"]) for c in candidates}) != 1:
+            continue
+        if len({str(c["Fixture ID"]) for c in candidates}) != 1:
+            continue
+        line = numeric_line(item.get("line"))
+        if line is None or not item.get("id"):
+            continue
+        groups = {}
+        for selection in item.get("selections", []):
+            side = str(selection.get("side", "")).upper()
+            tier = labels.get(selection.get("tier"))
+            if selection.get("available") is True and side in ("MORE", "LESS") and tier:
+                groups.setdefault(tier, set()).add(side)
+        for tier, sides in groups.items():
+            for side in sorted(sides):
+                row = dict(candidates[0])
+                row.update({
+                    "Line": line, "Raw Handicap": line,
+                    "Line Type": tier, "Direction": side,
+                    "Market ID": "ppfeed:" + str(item["id"]),
+                    "Outcome ID": "ppfeed:" + str(item["id"]) + ":" + side,
+                    "Odds": None, "mainLine Flag": None,
+                    "Decoded": True, "Line Status": "Provider tier-labelled threshold",
+                    "Available Sides": sorted(sides),
+                    "Tier Source": "prizepicksapi.com",
+                    "Tier Observed At": item.get("observed_at"),
+                    "Tier Fetched At": fetched,
+                    "Tier Projection ID": str(item["id"]),
+                })
+                imported.append(row)
+                matched.add((key, line))
+    kept = [r for r in rows if not (
+        r.get("Platform") == "prizepicks"
+        and (r.get("Tier Source") == "prizepicksapi.com" or
+             (pp_card_key(r), numeric_line(r.get("Line"))) in matched)
+    )]
+    if not imported:
+        raise ValueError("No unique future player/game/stat matches. Existing board preserved.")
+    return kept + imported, len(imported)
+
+
+def render_pp_tier_refresh():
+    rows = st.session_state.get("v4_rows", [])
+    if not rows:
+        return
+    with st.expander("PrizePicks Regular / Goblin / Demon feed"):
+        st.caption("Separate provider. Refresh uses its credits, never OddsPAPI. Up to 5 pages per refresh. Free feed may be delayed.")
+        if not st.button("Refresh PrizePicks lines and tiers"):
+            return
+        try:
+            key = st.secrets.get("PRIZEPICKS_API_KEY", "")
+            if not key:
+                raise ValueError("PRIZEPICKS_API_KEY is missing.")
+            saved = workflow_store.get("source", "pp_tiers_v1")
+            fresh = saved and (pd.Timestamp.now(tz="UTC") - pd.to_datetime(saved["fetched_at"], utc=True)).total_seconds() < 300
+            if fresh:
+                payload = saved
+            else:
+                items, cursor, cursors = [], None, set()
+                for _ in range(5):
+                    params = {"league": "NBA", "status": "active", "limit": 200}
+                    if cursor:
+                        params["cursor"] = cursor
+                    try:
+                        response = requests.get(
+                            "https://prizepicksapi.com/api/v1/projections",
+                            headers={"Authorization": "Bearer " + key, "X-User-Request": "Refresh my NBA tier-labelled board"},
+                            params=params, timeout=25,
+                        )
+                    except requests.RequestException:
+                        raise ValueError("Tier provider connection failed. Existing board preserved.") from None
+                    if response.status_code != 200:
+                        raise ValueError(f"Tier provider HTTP {response.status_code}. Existing board preserved.")
+                    body = response.json()
+                    meta = body.get("meta") or {}
+                    if meta.get("mode") != "live" or not isinstance(body.get("data"), list):
+                        raise ValueError("Expected live data; demo/unknown responses rejected.")
+                    items.extend(body["data"])
+                    cursor = meta.get("next_cursor")
+                    if not cursor:
+                        break
+                    if cursor in cursors:
+                        raise ValueError("Repeated pagination cursor; board preserved.")
+                    cursors.add(cursor)
+                payload = {"items": items, "fetched_at": datetime.now(timezone.utc).isoformat(), "partial": bool(cursor)}
+                workflow_store.put("source", "pp_tiers_v1", payload)
+            merged, count = pp_merge_tiers(rows, payload["items"], payload["fetched_at"])
+            st.session_state["v4_rows"] = merged
+            st.session_state.pop("calculated_board", None)
+            st.session_state.pop("selected_prop_card", None)
+            workspace_store("board", {field: st.session_state.get(field) for field in BOARD_FIELDS})
+            st.session_state["pp_tier_notice"] = f"Imported {count} tier-labelled outcomes for matched future games. Calculate the board to save new forecasts. Previous frozen forecasts remain unchanged."
+            if payload["partial"]:
+                st.session_state["pp_tier_notice"] += " Provider page limit reached; coverage is partial."
+            st.rerun()
+        except Exception as error:
+            st.error(str(error))
+
+
+render_pp_tier_refresh()
+if st.session_state.get("pp_tier_notice"):
+    st.info(st.session_state["pp_tier_notice"])
 
 max_games = st.slider("Games to scan", 1, 5, 3)
 
