@@ -1169,7 +1169,10 @@ class Workflow:
     def grade(self, limit=100, time_budget=120, force_retry=False):
         """Grade pregame forecasts fairly; keep failures inspectable and retryable."""
         counts = {"graded": 0, "pending": 0, "errors": 0, "DNP": 0,
-                  "ties": 0, "attempted": 0, "deferred": 0, "remaining": 0}
+                  "ties": 0, "attempted": 0, "deferred": 0, "remaining": 0,
+                  "future_start": 0, "invalid_start": 0, "late_excluded": 0,
+                  "earliest_future_start": None, "latest_future_start": None,
+                  "due": 0}
         settled = {key for key, _ in self.store.items("grade")}
         records = [(key, frozen) for key, frozen in self.store.items("forecast")
                    if key not in settled]
@@ -1180,8 +1183,15 @@ class Workflow:
                 start = pd.to_datetime(frozen["card"]["Start (UTC)"], utc=True)
                 if start > current:
                     counts["pending"] += 1
+                    counts["future_start"] += 1
+                    iso = start.isoformat()
+                    if counts["earliest_future_start"] is None or iso < counts["earliest_future_start"]:
+                        counts["earliest_future_start"] = iso
+                    if counts["latest_future_start"] is None or iso > counts["latest_future_start"]:
+                        counts["latest_future_start"] = iso
                     continue
             except (KeyError, ValueError, TypeError):
+                counts["invalid_start"] += 1
                 # A malformed forecast is a genuine error, not an upcoming game.
                 pass
             previous = self.store.get("audit_error", key)
@@ -1192,6 +1202,7 @@ class Workflow:
                     continue
             due.append((key, frozen))
 
+        counts["due"] = len(due)
         # Older failures are not allowed to monopolize the first 20 slots.
         due.sort(key=lambda item: (
             bool(self.store.get("audit_error", item[0])),
@@ -1208,7 +1219,14 @@ class Workflow:
                 start = pd.to_datetime(card["Start (UTC)"], utc=True)
                 created = pd.to_datetime(frozen["created_at"], utc=True)
                 if created >= start:
-                    raise ValueError("Forecast was not saved before kickoff")
+                    self.store.put("grade", key, {
+                        "status": "EXCLUDED", "outcome": "LATE_EXCLUDED",
+                        "actual": None, "graded_at": now(),
+                        "event_id": str(frozen.get("event_id", "")),
+                        "note": "Saved at or after the recorded start; excluded from pregame accuracy and ROI."
+                    }, immutable=True)
+                    counts["late_excluded"] += 1
+                    continue
                 if start > pd.Timestamp.now(tz="UTC"):
                     counts["pending"] += 1
                     continue
@@ -2311,6 +2329,16 @@ def render_workflow(wf, st, rows, mode="settings"):
         st.caption("Last maintenance: " + str(status.get("run_at", "Never")))
         if status.get("grading"):
             st.json(status["grading"])
+            g = status["grading"]
+            if g.get("future_start", 0) and not g.get("due", 0):
+                st.info(
+                    f"All {g['future_start']} pending forecasts have recorded start times in the future "
+                    f"(earliest: {g.get('earliest_future_start')}). "
+                    "No ESPN boxscore requests are made until the recorded start passes. "
+                    "If the games already happened, the saved event/start mapping needs correction."
+                )
+            if g.get("late_excluded", 0):
+                st.warning(f"{g['late_excluded']} post-start forecasts excluded from pregame scoring.")
         errors = [{"Forecast ID": key, **value}
                   for key, value in wf.store.items("audit_error")
                   if not value.get("resolved")]
