@@ -6483,6 +6483,7 @@ def pp_stat_key(label):
         "ptsrebsasts": ("PTS", "REB", "AST"),
         "blksstls": ("BLK", "STL"),
         "fantasyscore": ("FANTASY",),
+        "nbafantasyscore": ("FANTASY",),
     }
     return tuple(sorted(mapping.get(label, ())))
 
@@ -6500,11 +6501,12 @@ def pp_merge_tiers(rows, projections, fetched):
     templates = {}
     player_games = {}
     for row in rows:
+        row_key = pp_card_key(row)
         if row.get("Platform") == "prizepicks":
-            row_key = pp_card_key(row)
             templates.setdefault(row_key, []).append(row)
-            if str(row.get("Period", "")).lower() == "result":
-                player_games.setdefault((row_key[0], row_key[2]), []).append(row)
+        if (row.get("Decoded") and str(row.get("Period", "")).lower() == "result"
+                and str(row.get("Player ID", "")).lower() not in ("", "none", "nan")):
+            player_games.setdefault((row_key[0], row_key[2]), []).append(row)
     imported, matched = [], set()
     labels = {"standard": "Standard", "goblin": "Goblin", "demon": "Demon"}
     for item in projections:
@@ -6545,7 +6547,7 @@ def pp_merge_tiers(rows, projections, fetched):
             for side in sorted(sides):
                 row = dict(candidates[0])
                 if key[1] == ("FANTASY",):
-                    row.update({"Stat": "Fantasy Score", "Stat Key": "fantasy_score", "Period": "result"})
+                    row.update({"Platform": "prizepicks", "Stat": "Fantasy Score", "Stat Key": "fantasy_score", "Period": "result"})
                 row.update({
                     "Line": line, "Raw Handicap": line,
                     "Line Type": tier, "Direction": side,
@@ -6571,13 +6573,56 @@ def pp_merge_tiers(rows, projections, fetched):
     return kept + imported, len(imported)
 
 
+def pp_fantasy_check(rows, payload):
+    if not payload or not isinstance(payload.get('items'), list):
+        return {'Feed': 'No saved feed', 'Fantasy records returned': 0}, []
+    items = payload['items']
+    fantasy = [item for item in items if isinstance(item, dict)
+               and 'fantasy' in str((item.get('market') or {}).get('stat','')).lower()]
+    details = []
+    for item in fantasy:
+        market = item.get('market') or {}
+        start = (item.get('event') or {}).get('starts_at')
+        if pp_stat_key(market.get('stat')) != ('FANTASY',):
+            reason = 'Unrecognized fantasy stat label'
+        elif item.get('is_demo') is not False:
+            reason = 'Demo/live status not verified'
+        elif str(item.get('league','')).upper() != 'NBA':
+            reason = 'Not NBA'
+        elif item.get('status') != 'active':
+            reason = 'Inactive quote'
+        elif str(market.get('period','')).lower() != 'full game':
+            reason = 'Not full game'
+        elif not today_pregame(start):
+            reason = 'Not an upcoming game today (Pacific)'
+        else:
+            try:
+                pp_merge_tiers(rows, [item], payload.get('fetched_at'))
+                reason = 'Ready to import'
+            except (ValueError, KeyError, TypeError):
+                reason = 'No unique player/game/time match or no verified offered side/tier'
+        details.append({'Player':(item.get('player') or {}).get('name'),
+                        'Source stat':market.get('stat'), 'Line':item.get('line'),
+                        'Start (UTC)': start, 'Import check':reason})
+    return {'Feed fetched (UTC)':payload.get('fetched_at'),
+            'Total feed records':len(items), 'Fantasy records returned':len(fantasy),
+            'Ready fantasy records':sum(d['Import check']=='Ready to import' for d in details),
+            'Feed download incomplete':bool(payload.get('partial')),
+            'Imported fantasy lines today':len({identity(r) for r in rows if fantasy_weights(r)})}, details
+
+
 def render_pp_tier_refresh():
     rows = [row for row in st.session_state.get("v4_rows", [])
             if today_pregame(row.get("Start (UTC)"))]
-    if not rows:
-        return
     with st.expander("PrizePicks Regular / Goblin / Demon feed"):
         st.caption("Separate provider. Refresh uses its credits, never OddsPAPI. Up to 5 pages per refresh. Free feed may be delayed.")
+        if st.button("Check Fantasy feed — no API calls"):
+            summary, details = pp_fantasy_check(rows, workflow_store.get("source", "pp_tiers_v1"))
+            st.write(summary)
+            if details:
+                st.dataframe(pd.DataFrame(details), hide_index=True, use_container_width=True)
+            else:
+                st.info("No fantasy-labelled records in the saved feed. This does not mean the PrizePicks website has none. Check the saved feed timestamp and whether its download was incomplete.")
         if st.button("Rebuild from saved PrizePicks feed — no API calls"):
             try:
                 payload = workflow_store.get("source", "pp_tiers_v1")
