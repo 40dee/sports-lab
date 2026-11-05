@@ -2347,9 +2347,8 @@ def render_workflow(wf, st, rows, mode="settings"):
         )
     else:
         st.caption(
-            "Local storage active. Download the full "
-            "workspace backup before redeploying; "
-            "set DATABASE_URL once for permanent storage."
+            "Temporary session storage active. Download a workspace backup "
+            "after each slate; data may not survive restarts or redeploys."
         )
 
     with st.expander("Audit health and unresolved forecasts", expanded=(mode == "results")):
@@ -2418,6 +2417,63 @@ def render_workflow(wf, st, rows, mode="settings"):
                     st.error(str(error))
 
     if rows:
+        # Consolidated, no-paid-request preparation: reuse saved scans and
+        # cached PrizePicks quotes, then calculate all missing forecasts in
+        # bounded batches. Never mutate previously frozen forecasts.
+        if mode == "settings":
+            st.markdown("#### Prepare today's board — saved data first")
+            st.caption("0 OddsPAPI requests. Reuses existing game scans and saved "
+                       "PrizePicks feed. New scans remain a separate, explicit action below.")
+            if not wf.store.remote:
+                st.warning("Offline session: download a workspace backup after "
+                           "preparation. Automatic persistence across redeploys is NOT guaranteed.")
+            prepare_limit = st.number_input(
+                "Maximum new forecasts this run", min_value=1, max_value=300,
+                value=60, step=10, key="bulk_prepare_limit")
+            if st.button("Prepare today's board (saved data, no odds refresh)",
+                         type="primary", key="bulk_prepare_saved"):
+                try:
+                    current_rows = list(rows)
+                    saved_feed = globals().get("pp_cached_combined", lambda: None)()
+                    if saved_feed and saved_feed.get("items"):
+                        merge = globals().get("pp_merge_tiers")
+                        if merge:
+                            current_rows, matched = merge(
+                                current_rows, saved_feed["items"],
+                                saved_feed.get("fetched_at"), fantasy_only=False)
+                            st.session_state["v4_rows"] = current_rows
+                            workspace_store("board", {
+                                field: st.session_state.get(field)
+                                for field in BOARD_FIELDS})
+                            st.caption(f"Matched {matched} saved feed outcomes; no network refresh.")
+                    valid = {identity(card): card for card in current_rows
+                             if card.get("Decoded") and today_pregame(card.get("Start (UTC)"))}
+                    todo = [card for key, card in valid.items()
+                            if wf.store.get("forecast", key) is None]
+                    limit = int(prepare_limit)
+                    progress = st.progress(0.0)
+                    outcome = wf.board(todo[:limit], wf.e["current_season"](),
+                                       progress.progress) if todo else []
+                    progress.empty()
+                    st.session_state["board_last_issues"] = [
+                        x for x in outcome if x.get("Status") not in
+                        ("Frozen", "Started / historical forecast")]
+                    st.session_state["calculated_board"] = wf.board(
+                        [card for key, card in valid.items()
+                         if wf.store.get("forecast", key) is not None],
+                        wf.e["current_season"]())
+                    done = sum(wf.store.get("forecast", key) is not None for key in valid)
+                    st.success(f"Ready: {done}/{len(valid)} frozen. "
+                               f"Remaining: {len(valid)-done}. "
+                               "Run again to resume if needed.")
+                    if not wf.store.remote:
+                        st.download_button("Download prepared board backup",
+                            wf.store.export(), "sports_lab_prepared_backup.json",
+                            "application/json", key="bulk_prepare_backup")
+                except Exception as exc:
+                    st.error(f"Preparation stopped safely: {type(exc).__name__}: {exc}")
+                    st.info("Previously frozen picks remain unchanged. Download a backup before redeploying.")
+
         platforms = st.multiselect(
             "Platforms to calculate",
             ["prizepicks", "kalshi", "draftkings"],
