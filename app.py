@@ -2416,7 +2416,7 @@ def render_workflow(wf, st, rows, mode="settings"):
                 except Exception as error:
                     st.error(str(error))
 
-    if rows:
+    if mode == "settings" or rows:
         # Consolidated, no-paid-request preparation: reuse saved scans and
         # cached PrizePicks quotes, then calculate all missing forecasts in
         # bounded batches. Never mutate previously frozen forecasts.
@@ -2430,6 +2430,8 @@ def render_workflow(wf, st, rows, mode="settings"):
             prepare_limit = st.number_input(
                 "Maximum new forecasts this run", min_value=1, max_value=300,
                 value=60, step=10, key="bulk_prepare_limit")
+            if not rows:
+                st.info("No upcoming picks are currently loaded. The preparation control remains available; restore or scan today's games if saved data cannot populate the board.")
             if st.button("Prepare today's board (saved data, no odds refresh)",
                          type="primary", key="bulk_prepare_saved"):
                 try:
