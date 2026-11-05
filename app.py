@@ -6483,6 +6483,59 @@ def ui_board(page):
         st.caption('Ranked by projected gap relative to recent variability. This is not a proven probability or profit ranking. All props remains available.')
     else:
         records.sort(key=lambda c: (str(c['Player']), ui_stat(c), float(c['Line'])))
+    # Display-only grouping: alternate thresholds are still retained as
+    # separate immutable forecast identities for audit and grading.
+    if page != 'Saved' and records:
+        compact_lines = st.checkbox(
+            'Group repeated lines (show strongest threshold per player/stat)',
+            value=(view == 'Top plays'),
+            key='mobile_group_repeated_lines',
+            help='Only changes the visible cards. All original lines and frozen forecasts remain saved. Turn off to inspect every threshold.',
+        )
+        if compact_lines:
+            groups = {}
+            for candidate in records:
+                group_key = (
+                    str(candidate.get('Fixture ID', '')),
+                    str(candidate.get('Platform', '')).lower(),
+                    str(candidate.get('Player', '')).casefold().strip(),
+                    str(candidate.get('Stat Key', '')),
+                    str(candidate.get('Period', '')),
+                    str(candidate.get('Line Type', '')),
+                )
+                groups.setdefault(group_key, []).append(candidate)
+            grouped = []
+            hidden = 0
+            for alternatives in groups.values():
+                if len(alternatives) == 1:
+                    grouped.append(alternatives[0])
+                    continue
+                # Frozen, eligible forecasts rank ahead of uncalculated lines.
+                # Do not infer confidence from unvalidated probability fields.
+                def display_priority(candidate):
+                    frozen = forecasts.get(identity(candidate))
+                    if not frozen:
+                        return (0, -1.0, -1.0)
+                    result = frozen.get('result', {})
+                    if not result.get('selection_allowed', True) or result.get('tie'):
+                        return (1, -1.0, -1.0)
+                    score = ui_number(result.get('standardized_gap'), -1)
+                    gap = abs(ui_number(result.get('gap'), 0))
+                    return (2, score, gap)
+                grouped.append(max(alternatives, key=display_priority))
+                hidden += len(alternatives) - 1
+            records = grouped
+            if view == 'Top plays':
+                records.sort(key=lambda c: ui_number(
+                    forecasts[identity(c)]['result'].get('standardized_gap'), -1
+                ) if identity(c) in forecasts else -1, reverse=True)
+            else:
+                records.sort(key=lambda c: (str(c['Player']), ui_stat(c), float(c['Line'])))
+            if hidden:
+                st.caption(
+                    f'{hidden} alternate threshold(s) hidden from display only. '
+                    'Turn off grouping to see all lines; saved picks and grading are unchanged.'
+                )
     stamp = st.session_state.get('v4_scan_at')
     if stamp:
         st.caption('Base board scan (UTC): ' + str(stamp) + ' · Native feeds may have separate timestamps. Browsing uses saved data.')
