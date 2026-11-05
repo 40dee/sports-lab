@@ -116,7 +116,7 @@ class Store:
 
             con = psycopg.connect(
                 self.url,
-                connect_timeout=10,
+                connect_timeout=3,
             )
         else:
             con = sqlite3.connect(
@@ -5940,6 +5940,37 @@ def calculate_player_projection(
     return result
 
 
+# Emergency mode deliberately uses only browser-session memory.
+# It never creates a second permanent database or changes Neon records.
+class OfflineSessionStore:
+    remote = False
+    offline = True
+
+    def __init__(self):
+        self.records = st.session_state.setdefault("_sports_lab_offline_records_v1", {})
+
+    def put(self, namespace, key, value, immutable=False):
+        record_key = (namespace, key)
+        if not immutable or record_key not in self.records:
+            self.records[record_key] = value
+
+    def get(self, namespace, key, default=None):
+        return self.records.get((namespace, key), default)
+
+    def items(self, namespace):
+        return [(key, value) for (ns, key), value in self.records.items() if ns == namespace]
+
+    def export(self):
+        return encode({"format": "sports-lab-workspace-v2", "records": [
+            [ns, key, encode(value), now()] for (ns, key), value in self.records.items()
+        ]})
+
+    def restore(self, value):
+        if value.get("format") != "sports-lab-workspace-v2":
+            raise ValueError("Unsupported workspace backup")
+        for ns, key, payload, _updated in value.get("records", []):
+            self.put(ns, key, json.loads(payload))
+
 # ---------------- COMPLETE NBA WORKFLOW ----------------
 
 def current_season():
@@ -5953,67 +5984,33 @@ _database_url = (
     or setting("DATABASE_URL", "")
 )
 
-# Fail closed: cloud forecasts must never silently move to local SQLite.
-if not _database_url or not str(_database_url).strip():
-    st.error("Permanent storage unavailable: DATABASE_URL is not configured.")
-    print("SPORTS_LAB_DB_DIAGNOSTIC stage=configuration status=missing_DATABASE_URL", flush=True)
-    st.stop()
+# Neon is the only permanent store. When it is unreachable, the UI remains
+# available with an explicitly temporary browser-session workspace.
+_database_online = False
+_db_failure = None
+if _database_url and str(_database_url).strip():
+    try:
+        workflow_store = Store(url=_database_url)
+        _database_online = True
+    except Exception as exc:
+        _db_failure = type(exc).__name__
+        print(f"SPORTS_LAB_DB_DIAGNOSTIC stage=connect exception_type={_db_failure} mode=offline_session", flush=True)
 
-try:
-    workflow_store = Store(url=_database_url)
-except Exception as exc:
-    # Do not print exception messages, connection strings, or tracebacks:
-    # database driver errors can contain credentials or full DSNs.
-    error_type = type(exc).__name__
-    sqlstate = getattr(exc, "sqlstate", None)
-    if not (isinstance(sqlstate, str) and len(sqlstate) == 5 and sqlstate.isalnum()):
-        sqlstate = "none"
-    # Classify the driver message without exposing the connection URL,
-    # database hostname, username, password, or arbitrary server text.
-    _db_error_text = str(exc).lower()
-    if "password authentication failed" in _db_error_text or "authentication failed" in _db_error_text:
-        _db_failure = "authentication_failed"
-        _db_guidance = "Neon rejected the database credentials."
-    elif "name or service not known" in _db_error_text or "could not translate host name" in _db_error_text or "nodename nor servname" in _db_error_text or "temporary failure in name resolution" in _db_error_text:
-        _db_failure = "dns_resolution_failed"
-        _db_guidance = "The Neon hostname could not be resolved."
-    elif "connection timed out" in _db_error_text or "timeout expired" in _db_error_text or "operation timed out" in _db_error_text:
-        _db_failure = "connection_timeout"
-        _db_guidance = "The connection timed out before Neon responded."
-    elif "connection refused" in _db_error_text:
-        _db_failure = "connection_refused"
-        _db_guidance = "The server refused the network connection."
-    elif "ssl" in _db_error_text or "certificate" in _db_error_text or "tls" in _db_error_text:
-        _db_failure = "tls_or_certificate_error"
-        _db_guidance = "The encrypted connection failed."
-    elif "no pg_hba.conf entry" in _db_error_text:
-        _db_failure = "server_access_rejected"
-        _db_guidance = "The database server rejected the connection policy."
-    elif "database" in _db_error_text and "does not exist" in _db_error_text:
-        _db_failure = "database_not_found"
-        _db_guidance = "The configured database does not exist on the server."
-    elif "server closed the connection" in _db_error_text or "connection reset" in _db_error_text:
-        _db_failure = "connection_dropped"
-        _db_guidance = "The connection was closed unexpectedly."
-    elif "invalid connection option" in _db_error_text or "invalid connection string" in _db_error_text or "missing" in _db_error_text and "=" in _db_error_text:
-        _db_failure = "invalid_connection_configuration"
-        _db_guidance = "The database connection configuration could not be parsed."
-    else:
-        _db_failure = "unclassified_connection_error"
-        _db_guidance = "The driver reported an unclassified connection error."
-    print(
-        f"SPORTS_LAB_DB_DIAGNOSTIC stage=connect "
-        f"exception_type={error_type} sqlstate={sqlstate} "
-        f"failure_category={_db_failure}",
-        flush=True,
+if not _database_online:
+    workflow_store = OfflineSessionStore()
+    st.warning(
+        "Neon permanent storage is unavailable. Sports Lab is running in "
+        "TEMPORARY SESSION MODE: new saves, frozen picks and ROI changes "
+        "are NOT stored permanently and may disappear when the session ends. "
+        "Existing Neon records have not been changed."
     )
-    st.error(
-        "Permanent storage connection failed. Saved data was not modified. "
-        f"Diagnostic: {error_type} (SQLSTATE: {sqlstate}). "
-        f"Category: {_db_failure}. {_db_guidance} "
-        "See Streamlit logs for SPORTS_LAB_DB_DIAGNOSTIC."
+    st.download_button(
+        "Download temporary workspace backup",
+        data=workflow_store.export(),
+        file_name="sports_lab_temporary_workspace.json",
+        mime="application/json",
+        key="offline_backup_top",
     )
-    st.stop()
 
 workflow = Workflow(globals(), workflow_store)
 _local_workspace_load = workspace_load
@@ -6036,10 +6033,8 @@ def workspace_load(key):
 import sys
 
 if "--maintenance" in sys.argv:
-    if not _database_url:
-        raise SystemExit(
-            "Set DATABASE_URL for scheduled grading and learning."
-        )
+    if not _database_online:
+        raise SystemExit("Neon unavailable; maintenance skipped without changing saved data.")
 
     _report = workflow.maintenance()
     print({
