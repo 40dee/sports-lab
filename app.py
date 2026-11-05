@@ -5925,12 +5925,30 @@ _database_url = (
     or setting("DATABASE_URL", "")
 )
 
+# Fail closed: cloud forecasts must never silently move to local SQLite.
+if not _database_url or not str(_database_url).strip():
+    st.error("Permanent storage unavailable: DATABASE_URL is not configured.")
+    print("SPORTS_LAB_DB_DIAGNOSTIC stage=configuration status=missing_DATABASE_URL", flush=True)
+    st.stop()
+
 try:
     workflow_store = Store(url=_database_url)
-except Exception:
+except Exception as exc:
+    # Do not print exception messages, connection strings, or tracebacks:
+    # database driver errors can contain credentials or full DSNs.
+    error_type = type(exc).__name__
+    sqlstate = getattr(exc, "sqlstate", None)
+    if not (isinstance(sqlstate, str) and len(sqlstate) == 5 and sqlstate.isalnum()):
+        sqlstate = "none"
+    print(
+        f"SPORTS_LAB_DB_DIAGNOSTIC stage=connect "
+        f"exception_type={error_type} sqlstate={sqlstate}",
+        flush=True,
+    )
     st.error(
-        "Permanent storage connection failed. Check DATABASE_URL; "
-        "no fallback was made that could lose your saved work."
+        "Permanent storage connection failed. Saved data was not modified. "
+        f"Diagnostic: {error_type} (SQLSTATE: {sqlstate}). "
+        "See Streamlit logs for SPORTS_LAB_DB_DIAGNOSTIC."
     )
     st.stop()
 
