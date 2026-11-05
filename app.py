@@ -2428,29 +2428,35 @@ def render_workflow(wf, st, rows, mode="settings"):
             ],
         )
 
-        if st.button(
-            "Calculate and freeze complete supported NBA board",
-            type="primary",
-        ):
-            progress = st.progress(0.0)
-
-            selected_rows = [
-                row
-                for row in rows
-                if row.get("Platform") in platforms
-            ]
-
-            calculated = wf.board(
-                selected_rows,
-                wf.e["current_season"](),
-                progress.progress,
-            )
-
-            st.session_state["calculated_board"] = (
-                calculated
-            )
-
-            progress.empty()
+        # Chunked calculations: each successful forecast is frozen by Workflow.calculate.
+        # This queue resumes on the next click after a Streamlit interruption.
+        selected_rows = [row for row in rows if row.get("Platform") in platforms and row.get("Decoded")]
+        pending_cards = {identity(card): card for card in selected_rows}
+        total = len(pending_cards)
+        completed = sum(bool(wf.store.get("forecast", key)) for key in pending_cards)
+        st.caption(f"Board progress: {completed}/{total} frozen · {total-completed} remaining")
+        chunk_size = st.number_input("Picks per calculation batch", min_value=1, max_value=100, value=20, step=5,
+                                     help="Smaller batches reduce timeouts. Click again to resume; saved forecasts are reused.")
+        if st.button("Calculate / resume board (saved data first)", type="primary"):
+            unfinished = [(key, card) for key, card in pending_cards.items() if not wf.store.get("forecast", key)]
+            batch = [card for _, card in unfinished[:int(chunk_size)]]
+            if batch:
+                progress = st.progress(0.0)
+                calculated_batch = wf.board(batch, wf.e["current_season"](), progress.progress)
+                progress.empty()
+                issues = [item for item in calculated_batch if item.get("Status") not in ("Frozen", "Started / historical forecast")]
+                st.session_state["board_last_issues"] = issues
+            # Read all frozen picks without recalculating them.
+            st.session_state["calculated_board"] = wf.board(
+                [card for key, card in pending_cards.items() if wf.store.get("forecast", key)],
+                wf.e["current_season"]())
+            finished = sum(bool(wf.store.get("forecast", key)) for key in pending_cards)
+            st.success(f"Saved {finished}/{total} forecasts. " +
+                       ("Board complete." if finished == total else "Click Calculate / resume to continue."))
+        if st.session_state.get("board_last_issues"):
+            with st.expander("Unavailable picks and reasons"):
+                st.dataframe(pd.DataFrame(st.session_state["board_last_issues"]),
+                             hide_index=True, use_container_width=True)
 
         calculated = st.session_state.get(
             "calculated_board",
@@ -3418,6 +3424,7 @@ def parse_player_log(data, player_id, player_name, season):
     return rows
 
 
+@st.cache_data(ttl=900, max_entries=600, show_spinner=False)
 def fetch_player_history(player_id, player_name, season):
     year = int(season.split("-")[0])
     rows = []
@@ -6152,7 +6159,7 @@ def ui_card(card, frozen, saved=False):
       </div></div>
       <div class="sl-pickline"><div class="sl-side {direction_class}">{ui_text(direction_text)}</div>
       <div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
-      <div class="sl-proj"><small>Est. hit</small><b>{prob_text}</b></div></div>
+      <div class="sl-proj"><small>Experimental estimate</small><b>{prob_text}</b></div></div>
       </div>''', unsafe_allow_html=True)
     if result and not result.get('selection_allowed', True):
         st.caption('This direction is not offered for the selected platform/tier.')
