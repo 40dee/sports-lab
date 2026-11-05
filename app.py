@@ -90,6 +90,14 @@ class Store:
         self.path = str(path)
         self.url = url or os.getenv("DATABASE_URL", "")
         self.remote = bool(self.url)
+        # Read-through cache is scoped to one Streamlit browser session.
+        # Never persists data outside Neon and never replaces the database.
+        self._read_cache = None
+        if self.remote:
+            try:
+                self._read_cache = st.session_state.setdefault("_neon_read_cache_v1", {})
+            except Exception:
+                pass
 
         with self.connection() as con:
             con.execute(
@@ -163,27 +171,47 @@ class Store:
                 now(),
             ),
         )
+        # A successful write invalidates all cached reads for its namespace.
+        if self._read_cache is not None:
+            for cache_key in list(self._read_cache):
+                if cache_key[1] == namespace:
+                    self._read_cache.pop(cache_key, None)
+
+    def _cached_read(self, kind, namespace, key, loader):
+        if self._read_cache is None:
+            return loader()
+        cache_key = (kind, namespace, key)
+        cached = self._read_cache.get(cache_key)
+        stamp = time.monotonic()
+        if cached is not None and stamp - cached[0] < 30:
+            return cached[1]
+        result = loader()
+        # Bound cache size to prevent accumulating large historic snapshots.
+        if len(self._read_cache) >= 32:
+            self._read_cache.clear()
+        self._read_cache[cache_key] = (stamp, result)
+        return result
 
     def get(self, namespace, key, default=None):
-        rows = self.query(
-            "SELECT payload FROM sports_records "
-            "WHERE namespace=? AND key=?",
-            (namespace, key),
-            True,
-        )
-        return json.loads(rows[0][0]) if rows else default
+        def load():
+            rows = self.query(
+                "SELECT payload FROM sports_records "
+                "WHERE namespace=? AND key=?",
+                (namespace, key), True,
+            )
+            return json.loads(rows[0][0]) if rows else None
+        value = self._cached_read("get", namespace, key, load)
+        return value if value is not None else default
 
     def items(self, namespace):
-        rows = self.query(
-            "SELECT key,payload FROM sports_records "
-            "WHERE namespace=? ORDER BY updated,key",
-            (namespace,),
-            True,
-        )
-        return [
-            (key, json.loads(payload))
-            for key, payload in rows
-        ]
+        def load():
+            rows = self.query(
+                "SELECT key,payload FROM sports_records "
+                "WHERE namespace=? ORDER BY updated,key",
+                (namespace,), True,
+            )
+            return [(key, json.loads(payload)) for key, payload in rows]
+        return self._cached_read("items", namespace, None, load)
 
     def export(self):
         rows = self.query(
