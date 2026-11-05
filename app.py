@@ -5940,14 +5940,49 @@ except Exception as exc:
     sqlstate = getattr(exc, "sqlstate", None)
     if not (isinstance(sqlstate, str) and len(sqlstate) == 5 and sqlstate.isalnum()):
         sqlstate = "none"
+    # Classify the driver message without exposing the connection URL,
+    # database hostname, username, password, or arbitrary server text.
+    _db_error_text = str(exc).lower()
+    if "password authentication failed" in _db_error_text or "authentication failed" in _db_error_text:
+        _db_failure = "authentication_failed"
+        _db_guidance = "Neon rejected the database credentials."
+    elif "name or service not known" in _db_error_text or "could not translate host name" in _db_error_text or "nodename nor servname" in _db_error_text or "temporary failure in name resolution" in _db_error_text:
+        _db_failure = "dns_resolution_failed"
+        _db_guidance = "The Neon hostname could not be resolved."
+    elif "connection timed out" in _db_error_text or "timeout expired" in _db_error_text or "operation timed out" in _db_error_text:
+        _db_failure = "connection_timeout"
+        _db_guidance = "The connection timed out before Neon responded."
+    elif "connection refused" in _db_error_text:
+        _db_failure = "connection_refused"
+        _db_guidance = "The server refused the network connection."
+    elif "ssl" in _db_error_text or "certificate" in _db_error_text or "tls" in _db_error_text:
+        _db_failure = "tls_or_certificate_error"
+        _db_guidance = "The encrypted connection failed."
+    elif "no pg_hba.conf entry" in _db_error_text:
+        _db_failure = "server_access_rejected"
+        _db_guidance = "The database server rejected the connection policy."
+    elif "database" in _db_error_text and "does not exist" in _db_error_text:
+        _db_failure = "database_not_found"
+        _db_guidance = "The configured database does not exist on the server."
+    elif "server closed the connection" in _db_error_text or "connection reset" in _db_error_text:
+        _db_failure = "connection_dropped"
+        _db_guidance = "The connection was closed unexpectedly."
+    elif "invalid connection option" in _db_error_text or "invalid connection string" in _db_error_text or "missing" in _db_error_text and "=" in _db_error_text:
+        _db_failure = "invalid_connection_configuration"
+        _db_guidance = "The database connection configuration could not be parsed."
+    else:
+        _db_failure = "unclassified_connection_error"
+        _db_guidance = "The driver reported an unclassified connection error."
     print(
         f"SPORTS_LAB_DB_DIAGNOSTIC stage=connect "
-        f"exception_type={error_type} sqlstate={sqlstate}",
+        f"exception_type={error_type} sqlstate={sqlstate} "
+        f"failure_category={_db_failure}",
         flush=True,
     )
     st.error(
         "Permanent storage connection failed. Saved data was not modified. "
         f"Diagnostic: {error_type} (SQLSTATE: {sqlstate}). "
+        f"Category: {_db_failure}. {_db_guidance} "
         "See Streamlit logs for SPORTS_LAB_DB_DIAGNOSTIC."
     )
     st.stop()
