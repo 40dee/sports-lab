@@ -2968,6 +2968,27 @@ st.markdown("""<style id="sports-lab-readable-controls">
 .stApp [data-testid="stExpander"] details,
 .stApp [data-testid="stFileUploaderDropzone"] {
  background:#102234 !important;color:#f3f8ff !important;}
+.stApp [data-testid="stFileUploader"] button,
+.stApp [data-testid="stFileUploaderDropzone"] button,
+.stApp [data-testid="stFileUploaderDropzoneButton"],
+.stApp [data-testid="stNumberInput"] button {
+ background:#142536 !important;color:#f3f8ff !important;
+ border:1px solid #63829c !important;border-radius:10px;}
+.stApp [data-testid="stFileUploader"] button:hover {
+ background:#203e55 !important;border-color:#37d6f7 !important;}
+.stApp [data-testid="stFileUploader"] button p,
+.stApp [data-testid="stFileUploader"] button span,
+.stApp [data-testid="stFileUploader"] button svg,
+.stApp [data-testid="stFileUploaderDropzone"] p,
+.stApp [data-testid="stFileUploaderDropzone"] span,
+.stApp [data-testid="stFileUploaderDropzone"] small,
+.stApp [data-testid="stFileUploaderFileName"],
+.stApp [data-testid="stFileUploaderFileData"] small {
+ color:#f3f8ff !important;}
+.stApp [data-testid="stTextInput"] [data-baseweb="base-input"],
+.stApp [data-testid="stNumberInput"] [data-baseweb="base-input"],
+.stApp [data-testid="stFileUploaderFile"] {
+ background:#142536 !important;color:#f3f8ff !important;}
 </style>""", unsafe_allow_html=True)
 
 BASE = "https://api.oddspapi.io/v4"
