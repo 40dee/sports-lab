@@ -263,6 +263,7 @@ class Store:
             "paper_settlement",
             "preparation",
             "calculation_status",
+            "grade_run",
         }
 
         checked = []
@@ -1936,6 +1937,8 @@ class Workflow:
                 ),
                 "Created (UTC)": frozen["created_at"],
                 "Event": frozen["event_id"],
+                "Game date": pd.to_datetime(card.get("Start (UTC)"), utc=True, errors="coerce").tz_convert("America/Los_Angeles").strftime("%Y-%m-%d")
+                    if pd.notna(pd.to_datetime(card.get("Start (UTC)"), utc=True, errors="coerce")) else "Unknown",
             })
 
         return rows
@@ -2263,8 +2266,8 @@ class Workflow:
 
     def maintenance(self, interactive=False):
         count = self.grade(
-            limit=20 if interactive else 100,
-            time_budget=8 if interactive else 480,
+            limit=max(1, len(unique_forecasts(self.store.items("forecast")))),
+            time_budget=15 if interactive else 480,
         )
 
         reports = self.learn()
@@ -2374,7 +2377,7 @@ def market_signature(card, event_id=None, across_platforms=False):
         if not line.is_finite():
             raise ValueError('Invalid line')
         columns = tuple(sorted(market_columns(card) or ()))
-    except (ValueError, TypeError, KeyError):
+    except (ValueError, TypeError, KeyError, ArithmeticError):
         return ('unverified', identity(card))
     if not columns:
         return ('unverified', identity(card))
@@ -2537,6 +2540,171 @@ def storage_failure_hint(error):
     return 'Permanent storage could not connect. Check Neon status, Usage and DATABASE_URL in Streamlit secrets.'
 
 
+def run_grading_pass(wf, time_budget=15):
+    """Visit every eligible saved forecast, resuming automatically if time expires."""
+    forecasts = unique_forecasts(wf.store.items('forecast'))
+    wf.store.items('audit_error')  # Reuse one cached list rather than N remote reads.
+    original_engine = wf.e
+    engine = dict(original_engine)
+    fetch = original_engine['saved_fetch']
+    summaries = {}
+    def fetch_once(url, params=None, **kwargs):
+        key = encode([url, params, kwargs])
+        if key not in summaries:
+            try:
+                summaries[key] = (True, fetch(url, params, **kwargs))
+            except Exception as error:
+                summaries[key] = (False, error)
+        ok, value = summaries[key]
+        if not ok:
+            raise value
+        return value
+    engine['saved_fetch'] = fetch_once
+    wf.e = engine
+    try:
+        counts = wf.grade(limit=max(1, len(forecasts)), time_budget=time_budget)
+    finally:
+        wf.e = original_engine
+    grades = dict(wf.store.items('grade'))
+    resolved = sum(key in grades for key, _ in forecasts)
+    report = {'run_at': now(), 'total': len(forecasts), 'resolved': resolved,
+              'unresolved': len(forecasts) - resolved, 'grading': counts,
+              'state': 'running' if counts.get('remaining', 0) else 'complete'}
+    if report['state'] == 'complete':
+        reviews = wf.learn()
+        wf.model_roi_rows()
+        settled = wf.settle_kalshi_tickets()
+        wf.store.put('maintenance', 'last', {'run_at': now(), 'grading': counts,
+            'learning': reviews, 'kalshi_tickets_settled': settled})
+    wf.store.put('grade_run', 'last', report)
+    return report
+
+
+def compact_result_stat(value):
+    import re
+    text = re.sub(r'(?i)^over under player\s+', '', str(value))
+    text = re.sub(r'(?i)\s*\(incl\.?\s*overtime\)', '', text)
+    for word, short in [('fantasy score', 'Fantasy'), ('3 point field goals', '3PM'),
+                        ('3 point fg', '3PM'), ('points', 'PTS'), ('rebounds', 'REB'),
+                        ('assists', 'AST'), ('steals', 'STL'), ('blocks', 'BLK'),
+                        ('turnovers', 'TOV')]:
+        text = re.sub(re.escape(word), short, text, flags=re.I)
+    return text.strip()
+
+
+def result_table_html(records):
+    """Human-readable results; internal identifiers stay in the CSV export."""
+    from html import escape
+    def number(value):
+        try:
+            value = float(value)
+            return f'{value:.2f}'.rstrip('0').rstrip('.') if math.isfinite(value) else '—'
+        except (TypeError, ValueError):
+            return '—'
+    headers = ['Player', 'Prop', 'Line', 'Pick', 'Projection', 'Actual', 'Result', 'Platform']
+    html = ['<div class="sl-results-scroll"><table class="sl-results"><thead><tr>']
+    html += ['<th>' + label + '</th>' for label in headers]
+    html.append('</tr></thead><tbody>')
+    for row in records:
+        name = str(row.get('Player', ''))
+        if ',' in name:
+            surname, first = name.rsplit(',', 1)
+            name = first.strip() + ' ' + surname.strip()
+        direction = str(row.get('Pick', ''))
+        outcome = str(row.get('Outcome', 'PENDING'))
+        css = 'hit' if outcome == 'WIN' else 'miss' if outcome == 'LOSS' else 'waiting'
+        label = {'WIN': '✓ WIN', 'LOSS': '✕ LOSS', 'PENDING': 'Pending',
+                 'TIE': 'Tie', 'DNP': 'DNP', 'LATE_EXCLUDED': 'Excluded'}.get(outcome, outcome)
+        cells = [name, compact_result_stat(row.get('Stat', '')), number(row.get('Line')),
+                 ('↑ ' if direction == 'MORE' else '↓ ') + direction,
+                 number(row.get('Projection')), number(row.get('Actual')), label,
+                 {'prizepicks': 'PrizePicks', 'draftkings': 'DraftKings', 'kalshi': 'Kalshi'}.get(str(row.get('Platform')), str(row.get('Platform', '')))]
+        html.append('<tr>')
+        for index, value in enumerate(cells):
+            attrs = (' class="sl-outcome ' + css + '"') if index == 6 else ''
+            if index == 3:
+                attrs = ' class="' + ('hit' if direction == 'MORE' else 'miss') + '"'
+            html.append('<td' + attrs + '>' + escape(str(value)) + '</td>')
+        html.append('</tr>')
+    html.append('</tbody></table></div>')
+    return ''.join(html)
+
+
+def render_results_dashboard(wf, st):
+    st.markdown('### Results')
+    active = bool(st.session_state.get('_audit_active'))
+    if st.button('Grade all completed games', type='primary', disabled=active, key='grade_all_once'):
+        st.session_state['_audit_active'] = True
+        st.rerun()
+    st.caption('One click checks all saved picks. If interrupted by a time limit, grading continues automatically while this page stays open. No paid odds scan.')
+    report = wf.store.get('grade_run', 'last') or {}
+    if active:
+        st.info(f"Grading all completed games… {report.get('resolved', 0)}/{report.get('total', 0)} resolved.")
+    elif report:
+        st.caption(f"Last check: {report['resolved']}/{report['total']} resolved · "
+                   f"{report['unresolved']} awaiting finals, missing data or retry. A completed check does not mean every game is final.")
+    research = wf.research_rows()
+    if not research:
+        st.info('No saved forecasts loaded. Restore a full workspace backup in Settings.')
+        return
+    frame = pd.DataFrame(research)
+    dates = ['All dates'] + sorted(frame['Game date'].dropna().unique().tolist(), reverse=True)
+    left, center, right = st.columns(3)
+    date = left.selectbox('Game date (Pacific)', dates, key='results_date')
+    platform = center.selectbox('Platform', ['All platforms'] + sorted(frame['Platform'].unique().tolist()), key='results_platform')
+    outcome = right.selectbox('Result', ['All results', 'WIN', 'LOSS', 'PENDING', 'TIE', 'DNP', 'LATE_EXCLUDED'], key='results_outcome')
+    visible = frame.copy()
+    if date != 'All dates': visible = visible[visible['Game date'] == date]
+    if platform != 'All platforms': visible = visible[visible['Platform'] == platform]
+    if outcome != 'All results': visible = visible[visible['Outcome'] == outcome]
+    wins = int((visible['Outcome'] == 'WIN').sum())
+    losses = int((visible['Outcome'] == 'LOSS').sum())
+    pending = int((visible['Outcome'] == 'PENDING').sum())
+    metrics = st.columns(5)
+    for column, label, value in zip(metrics,
+        ['Picks', 'Wins', 'Losses', 'Hit rate', 'Pending'],
+        [len(visible), wins, losses, f'{wins / (wins + losses):.1%}' if wins + losses else '—', pending]):
+        column.metric(label, value)
+    st.caption('Summary follows your filters. Hit rate excludes ties, DNP and excluded records. It is not ROI.')
+    more_less = []
+    for side in ['MORE', 'LESS']:
+        selected = visible[visible['Pick'] == side]
+        hits = int((selected['Outcome'] == 'WIN').sum())
+        misses = int((selected['Outcome'] == 'LOSS').sum())
+        more_less.append(f'{side}: {hits}W–{misses}L')
+    st.caption(' · '.join(more_less))
+    st.markdown('''<style>
+    .sl-results-scroll {overflow-x:auto;border:1px solid #395268;border-radius:12px;}
+    .sl-results {width:100%;border-collapse:collapse;background:#102234;color:#f3f8ff;font-size:.9rem;}
+    .sl-results th {text-align:left;background:#183246;color:#c6d6e5;padding:12px 10px;white-space:nowrap;}
+    .sl-results td {padding:10px;border-top:1px solid #2b4356;white-space:nowrap;}
+    .sl-results tbody tr:nth-child(even) {background:#12293b;}
+    .sl-results .hit {color:#62e6a5;font-weight:700;}
+    .sl-results .miss {color:#ff929b;font-weight:700;}
+    .sl-results .waiting {color:#f4cf7a;}
+    </style>''', unsafe_allow_html=True)
+    if len(visible):
+        pages = max(1, math.ceil(len(visible) / 50))
+        filters = (date, platform, outcome)
+        if st.session_state.get('_results_filters') != filters or int(st.session_state.get('results_page', 1)) > pages:
+            st.session_state.pop('results_page', None)
+            st.session_state['_results_filters'] = filters
+        page = int(st.number_input('Results page', min_value=1, max_value=pages, value=1, step=1, key='results_page'))
+        st.markdown(result_table_html(visible.iloc[(page - 1) * 50:page * 50].to_dict('records')), unsafe_allow_html=True)
+        st.caption(f'{len(visible)} matching picks · up to 50 per page')
+    else:
+        st.info('No results match these filters.')
+    combined = wf.research_rows(across_platforms=True)
+    decided = [r for r in combined if r['Outcome'] in ('WIN', 'LOSS')]
+    combined_wins = sum(r['Outcome'] == 'WIN' for r in decided)
+    with st.expander('Audit details and learning'):
+        raw_count = len(wf.store.items('forecast'))
+        st.caption(f'{raw_count - len(research)} duplicate records excluded from platform totals; originals retained.')
+        st.caption(f'Combined model record across all dates: {combined_wins}W–{len(decided) - combined_wins}L. Identical cross-platform markets counted once.')
+        st.caption(f"{len(wf.store.items('model'))} learned stat models active. Updates require a chronological holdout; a successful grading run alone does not promote a model.")
+    st.download_button('Download full audit CSV', frame.to_csv(index=False), 'nba_audit.csv', 'text/csv')
+
+
 def render_workflow(wf, st, rows, mode="settings"):
     st.subheader("NBA workflow")
 
@@ -2556,7 +2724,7 @@ def render_workflow(wf, st, rows, mode="settings"):
             "after each slate; data may not survive restarts or redeploys."
         )
 
-    with st.expander("Audit health and unresolved forecasts", expanded=(mode == "results")):
+    with st.expander("Audit health and unresolved forecasts", expanded=False):
         status = wf.store.get("maintenance", "last") or {}
         st.caption("Last maintenance: " + str(status.get("run_at", "Never")))
         if status.get("grading"):
@@ -2579,9 +2747,9 @@ def render_workflow(wf, st, rows, mode="settings"):
             st.dataframe(pd.DataFrame(errors), hide_index=True, use_container_width=True)
         else:
             st.caption("No unresolved grading errors recorded.")
-        if st.button("Retry audit now", key="audit_retry_now"):
-            result = wf.grade(limit=100, time_budget=45, force_retry=True)
-            st.json(result)
+        if st.button("Recheck all completed games", key="audit_retry_now"):
+            st.session_state['_audit_active'] = True
+            st.rerun()
 
     if mode == "settings":
         with st.expander("Full workspace backup / restore"):
@@ -2617,11 +2785,12 @@ def render_workflow(wf, st, rows, mode="settings"):
                         json.loads(uploaded.getvalue())
                     )
 
-                    st.success(
-                        f"Checked {count} records. "
-                        "Existing records preserved. "
-                        "Reload the app to restore the board."
-                    )
+                    restored_board = wf.store.get("board", "board")
+                    if restored_board:
+                        st.session_state.update(validate_board(restored_board))
+                    restored_count = len(wf.store.items("forecast"))
+                    st.success(f"Checked {count} records. {restored_count} saved forecasts available. "
+                               "Open Results to view earlier picks. No browser refresh needed.")
 
                 except Exception as error:
                     st.error(str(error))
@@ -2676,92 +2845,7 @@ def render_workflow(wf, st, rows, mode="settings"):
     if mode == "settings":
         return
 
-    with st.expander(
-        "Grades and learning",
-        expanded=True,
-    ):
-        if st.button(
-            "Refresh completed-game grades and learning review"
-        ):
-            with st.spinner(
-                "Checking ESPN finals and reviewing "
-                "settled forecasts..."
-            ):
-                st.json(
-                    wf.maintenance(interactive=True)
-                )
-
-        last = wf.store.get(
-            "maintenance",
-            "last",
-        )
-
-        if last:
-            st.caption(
-                "Last maintenance run: "
-                + last["run_at"]
-            )
-
-        research = wf.research_rows()
-
-        if research:
-            frame = pd.DataFrame(research)
-
-            decided = frame[
-                frame["Outcome"].isin(
-                    ["WIN", "LOSS"]
-                )
-            ]
-
-            rate = (
-                f"{(decided['Outcome'] == 'WIN').mean():.1%}"
-                if len(decided)
-                else "Awaiting finals"
-            )
-
-            combined = wf.research_rows(across_platforms=True)
-            combined_decided = [r for r in combined if r["Outcome"] in ("WIN", "LOSS")]
-            combined_wins = sum(r["Outcome"] == "WIN" for r in combined_decided)
-            st.caption(f"Combined model record, identical cross-platform markets counted once: "
-                       f"{combined_wins}/{len(combined_decided)} wins. "
-                       "Platform records and actual-priced paper returns remain separate.")
-            raw_count = len(wf.store.items("forecast"))
-            st.caption(f"{raw_count - len(research)} repeated forecast records excluded from platform totals; originals retained.")
-            st.metric(
-                "Directional accuracy",
-                rate,
-                f"{len(decided)} decided forecasts",
-            )
-
-            st.dataframe(
-                frame,
-                hide_index=True,
-                use_container_width=True,
-            )
-
-            st.download_button(
-                "Download audit",
-                frame.to_csv(index=False),
-                "nba_audit.csv",
-                "text/csv",
-            )
-
-        models = wf.store.items("model")
-
-        st.caption(
-            f"{len(models)} learned stat models active. "
-            "Initial formulas remain active until a "
-            "chronological holdout supports a change. "
-            "Research grades do not assume "
-            "sportsbook settlement."
-        )
-
-        st.caption(
-            "While open, maintenance runs at most "
-            "every 15 minutes. Unattended maintenance "
-            "uses this same app.py with --maintenance "
-            "and a configured DATABASE_URL."
-        )
+    render_results_dashboard(wf, st)
 
     with st.expander(
         "PrizePicks percentage hit-rate tracker",
@@ -7667,3 +7751,21 @@ def _resume_preparation_fragment():
         st.rerun()
 
 _resume_preparation_fragment()
+
+
+@st.fragment(run_every="4s" if st.session_state.get("_audit_active") else None)
+def _resume_grading_fragment():
+    if not st.session_state.get('_audit_active'):
+        return
+    try:
+        with st.spinner('Grading all completed games…'):
+            report = run_grading_pass(workflow, time_budget=15)
+    except Exception as error:
+        st.session_state['_audit_active'] = False
+        st.error('Grading paused: ' + type(error).__name__ + '. Saved grades are preserved; check app logs.')
+        return
+    if report['state'] == 'complete':
+        st.session_state['_audit_active'] = False
+    st.rerun()
+
+_resume_grading_fragment()
