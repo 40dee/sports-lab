@@ -264,6 +264,7 @@ class Store:
             "preparation",
             "calculation_status",
             "grade_run",
+            "automation",
         }
 
         checked = []
@@ -2413,6 +2414,50 @@ def saved_prediction(index, card):
     return index.get(market_signature(card)) or index.get(identity(card))
 
 
+class TursoStore(Store):
+    """Remote libSQL store, retaining the same immutable records and backup format."""
+    def __init__(self, url, token):
+        from urllib.parse import urlparse
+        parsed = urlparse(str(url).replace('libsql://', 'https://', 1))
+        if parsed.scheme != 'https' or not parsed.hostname or not parsed.hostname.endswith('.turso.io') or parsed.username or parsed.password or parsed.query:
+            raise ValueError('Invalid Turso database URL')
+        if not token:
+            raise ValueError('Turso authentication token missing')
+        self.endpoint = 'https://' + parsed.netloc + '/v2/pipeline'
+        self.token = token
+        self.remote = True
+        self._read_cache = st.session_state.setdefault('_turso_read_cache_v1', {})
+        self.query('CREATE TABLE IF NOT EXISTS sports_records (namespace TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(namespace,key))')
+
+    def restore(self, value):
+        # Validate the complete backup before any remote writes. Original records win.
+        validator = OfflineSessionStore.__new__(OfflineSessionStore)
+        validator.records = {}
+        checked = validator.restore(value)
+        for (namespace, key), payload in validator.records.items():
+            self.put(namespace, key, payload, immutable=True)
+        return checked
+
+    def query(self, sql, values=(), fetch=False):
+        def argument(value):
+            if value is None: return {'type': 'null'}
+            if isinstance(value, int): return {'type': 'integer', 'value': str(value)}
+            if isinstance(value, float): return {'type': 'float', 'value': value}
+            return {'type': 'text', 'value': str(value)}
+        try:
+            response = requests.post(self.endpoint, headers={'Authorization': 'Bearer ' + self.token},
+                json={'requests': [{'type': 'execute', 'stmt': {'sql': sql, 'args': [argument(v) for v in values], 'want_rows': fetch}}, {'type': 'close'}]}, timeout=30)
+            if response.status_code != 200:
+                raise ValueError('Database HTTP failure')
+            item = response.json()['results'][0]
+            if item.get('type') != 'ok' or item.get('response', {}).get('type') != 'execute':
+                raise ValueError('Database query rejected')
+            rows = item['response']['result'].get('rows', [])
+            return [[cell.get('value') for cell in row] for row in rows] if fetch else None
+        except Exception:
+            raise RuntimeError('Turso query failed; saved records were not replaced with temporary data.') from None
+
+
 def preparation_rows(rows):
     unique = {}
     for card in rows:
@@ -2502,7 +2547,14 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
 
 def preparation_panel(wf, st, rows):
     st.markdown("#### Prepare today's board")
-    st.caption('Uses saved lines. No paid odds or PrizePicks feed refresh is triggered here.')
+    st.caption('The scheduled worker imports today’s lines and calculates them automatically when configured. This button resumes calculations using saved lines without a paid refresh.')
+    auto = wf.store.get('automation', slate_day()) or {}
+    if auto:
+        st.caption(f"Automatic worker last run (UTC): {auto.get('last_run', 'Import started')} · Odds request reservations: {auto.get('odds_requests', 0)}/34 · Tier feed: {auto.get('feed_requests', 0)}/10")
+        if auto.get('feed_partial'):
+            st.warning('PrizePicks tier/Fantasy download is incomplete. Scheduled runs continue it within the daily request budget; ready counts cover saved lines only.')
+        for issue in auto.get('errors', []):
+            st.warning(issue)
     if not wf.store.remote:
         st.warning('Temporary session only. Keep this page open and download a backup before leaving. Background preparation is unavailable until permanent storage is restored.')
     current = preparation_rows(rows)
@@ -2513,7 +2565,7 @@ def preparation_panel(wf, st, rows):
     if last.get('unavailable'):
         st.caption(f"Last batch: {last['unavailable']} unavailable; retried after 15 minutes while preparation is active.")
     if not current:
-        st.info("No saved upcoming lines for today. Restore a backup or use the explicit feed/scan controls in Settings.")
+        st.info("No upcoming lines saved for today's Pacific date. The automatic worker must import today's slate first. Restoring an older board cannot supply today's lines.")
     if st.button("Prepare today's board", type='primary', disabled=not current, key='prepare_one_action'):
         board = {field: st.session_state.get(field) for field in BOARD_FIELDS}
         wf.store.put('board', 'board', board)
@@ -2732,7 +2784,7 @@ def render_workflow(wf, st, rows, mode="settings"):
 
     if wf.store.remote:
         st.caption(
-            "Permanent PostgreSQL storage connected."
+            "Permanent database storage connected."
         )
     else:
         st.caption(
@@ -6280,9 +6332,11 @@ _database_url = (
 # available with an explicitly temporary browser-session workspace.
 _database_online = False
 _db_failure = None
-if _database_url and str(_database_url).strip():
+_turso_url = setting('TURSO_DATABASE_URL', '')
+_turso_token = setting('TURSO_AUTH_TOKEN', '')
+if _turso_url or (_database_url and str(_database_url).strip()):
     try:
-        workflow_store = Store(url=_database_url)
+        workflow_store = TursoStore(_turso_url, _turso_token) if _turso_url else Store(url=_database_url)
         _database_online = True
     except Exception as exc:
         _db_failure = type(exc).__name__
@@ -6293,10 +6347,10 @@ if not _database_online:
     workflow_store = OfflineSessionStore()
     st.info(globals().get("_db_hint", "Set DATABASE_URL for permanent storage and unattended preparation."))
     st.warning(
-        "Neon permanent storage is unavailable. Sports Lab is running in "
+        "Permanent storage is unavailable. Sports Lab is running in "
         "TEMPORARY SESSION MODE: new saves, frozen picks and ROI changes "
         "are NOT stored permanently and may disappear when the session ends. "
-        "Existing Neon records have not been changed."
+        "Existing remote records have not been changed."
     )
     st.download_button(
         "Download temporary workspace backup",
@@ -6321,10 +6375,352 @@ def workspace_load(key):
     return value
 
 
+def pp_stat_key(label):
+    label = re.sub(r"[^a-z0-9]", "", str(label).lower())
+    mapping = {
+        "points": ("PTS",), "rebounds": ("REB",),
+        "assists": ("AST",), "steals": ("STL",),
+        "blocks": ("BLK",), "turnovers": ("TOV",),
+        "3ptmade": ("FG3M",), "3pointersmade": ("FG3M",),
+        "ptsrebs": ("PTS", "REB"),
+        "ptsasts": ("PTS", "AST"),
+        "rebsasts": ("REB", "AST"),
+        "ptsrebsasts": ("PTS", "REB", "AST"),
+        "blksstls": ("BLK", "STL"),
+        "fantasyscore": ("FANTASY",),
+        "nbafantasyscore": ("FANTASY",),
+    }
+    return tuple(sorted(mapping.get(label, ())))
+
+
+def pp_card_key(card):
+    columns = (
+        ("FANTASY",) if fantasy_weights(card)
+        else tuple(sorted(market_columns(card) or ()))
+    )
+    start = pd.to_datetime(card.get("Start (UTC)"), utc=True)
+    return normalize_player(card["Player"]), columns, start.isoformat()
+
+
+def pp_nba_team_code(value):
+    if isinstance(value, dict):
+        value = value.get('abbreviation') or value.get('displayName') or value.get('name')
+    key = normalize_player(value or '')
+    teams = {
+        'ATL':'Atlanta Hawks', 'BOS':'Boston Celtics', 'BKN':'Brooklyn Nets',
+        'CHA':'Charlotte Hornets', 'CHI':'Chicago Bulls', 'CLE':'Cleveland Cavaliers',
+        'DAL':'Dallas Mavericks', 'DEN':'Denver Nuggets', 'DET':'Detroit Pistons',
+        'GSW':'Golden State Warriors', 'HOU':'Houston Rockets', 'IND':'Indiana Pacers',
+        'LAC':'Los Angeles Clippers', 'LAL':'Los Angeles Lakers', 'MEM':'Memphis Grizzlies',
+        'MIA':'Miami Heat', 'MIL':'Milwaukee Bucks', 'MIN':'Minnesota Timberwolves',
+        'NOP':'New Orleans Pelicans', 'NYK':'New York Knicks', 'OKC':'Oklahoma City Thunder',
+        'ORL':'Orlando Magic', 'PHI':'Philadelphia 76ers', 'PHX':'Phoenix Suns',
+        'POR':'Portland Trail Blazers', 'SAC':'Sacramento Kings', 'SAS':'San Antonio Spurs',
+        'TOR':'Toronto Raptors', 'UTA':'Utah Jazz', 'WAS':'Washington Wizards',
+    }
+    aliases = {'gs':'GSW','ny':'NYK','no':'NOP','sa':'SAS','wsh':'WAS','pho':'PHX','utah':'UTA','laclippers':'LAC'}
+    if key in aliases:
+        return aliases[key]
+    for code,name in teams.items():
+        if key in (normalize_player(code),normalize_player(name)):
+            return code
+    return None
+
+
+def pp_nearby_fantasy_candidates(rows, item, source_start):
+    """Allow a small feed-time offset only with independent two-team agreement."""
+    player = item.get('player') or {}
+    event = item.get('event') or {}
+    team = pp_nba_team_code(player.get('team'))
+    opponent = pp_nba_team_code(event.get('opponent'))
+    if not team or not opponent or team == opponent:
+        return []
+    name = normalize_player(player.get('name',''))
+    candidates = []
+    for row in rows:
+        if not row.get('Decoded') or str(row.get('Period','')).lower() != 'result':
+            continue
+        if normalize_player(row.get('Player','')) != name:
+            continue
+        if str(row.get('Player ID','')).lower() in ('','none','nan'):
+            continue
+        scheduled = pd.to_datetime(row.get('Start (UTC)'),utc=True,errors='coerce')
+        if pd.isna(scheduled) or not today_pregame(scheduled):
+            continue
+        if scheduled.tz_convert(SLATE_TIMEZONE).date() != source_start.tz_convert(SLATE_TIMEZONE).date():
+            continue
+        if abs((scheduled-source_start).total_seconds()) > 15*60:
+            continue
+        teams = [pp_nba_team_code(t) for t in str(row.get('Game','')).split(' vs ')]
+        if len(teams) != 2 or None in teams or set(teams) != {team,opponent}:
+            continue
+        candidates.append(row)
+    return candidates
+
+
+def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
+    templates = {}
+    player_games = {}
+    for row in rows:
+        row_key = pp_card_key(row)
+        if row.get("Platform") == "prizepicks":
+            templates.setdefault(row_key, []).append(row)
+        if (row.get("Decoded") and str(row.get("Period", "")).lower() == "result"
+                and str(row.get("Player ID", "")).lower() not in ("", "none", "nan")):
+            player_games.setdefault((row_key[0], row_key[2]), []).append(row)
+    imported, matched = [], set()
+    labels = {"standard": "Standard", "goblin": "Goblin", "demon": "Demon"}
+    for item in projections:
+        if item.get("is_demo") is not False or item.get("status") != "active":
+            continue
+        if str(item.get("league", "")).upper() != "NBA":
+            continue
+        market = item.get("market") or {}
+        if str(market.get("period", "")).lower() != "full game":
+            continue
+        start = pd.to_datetime((item.get("event") or {}).get("starts_at"), utc=True, errors="coerce")
+        if pd.isna(start) or start <= pd.Timestamp.now(tz="UTC"):
+            continue
+        key = (
+            normalize_player((item.get("player") or {}).get("name", "")),
+            pp_stat_key(market.get("stat")), start.isoformat(),
+        )
+        candidates = templates.get(key, [])
+        if not candidates and key[1] == ("FANTASY",):
+            # Borrow only a uniquely matched player/game identity; never its stat or line.
+            candidates = player_games.get((key[0], key[2]), [])
+        if not candidates and key[1] == ("FANTASY",):
+            candidates = pp_nearby_fantasy_candidates(rows, item, start)
+        if not key[1] or not candidates:
+            continue
+        if len({str(c["Player ID"]) for c in candidates}) != 1:
+            continue
+        if len({str(c["Fixture ID"]) for c in candidates}) != 1:
+            continue
+        line = numeric_line(item.get("line"))
+        if line is None or not item.get("id"):
+            continue
+        groups = {}
+        for selection in item.get("selections", []):
+            side = str(selection.get("side", "")).upper()
+            tier = labels.get(selection.get("tier"))
+            if selection.get("available") is True and side in ("MORE", "LESS") and tier:
+                groups.setdefault(tier, set()).add(side)
+        for tier, sides in groups.items():
+            for side in sorted(sides):
+                row = dict(candidates[0])
+                if key[1] == ("FANTASY",):
+                    row.update({"Platform": "prizepicks", "Stat": "Fantasy Score", "Stat Key": "fantasy_score", "Period": "result"})
+                row.update({
+                    "Line": line, "Raw Handicap": line,
+                    "Line Type": tier, "Direction": side,
+                    "Market ID": "ppfeed:" + str(item["id"]),
+                    "Outcome ID": "ppfeed:" + str(item["id"]) + ":" + side,
+                    "Odds": None, "mainLine Flag": None,
+                    "Decoded": True, "Line Status": "Provider tier-labelled threshold",
+                    "Available Sides": sorted(sides),
+                    "Tier Source": "prizepicksapi.com",
+                    "Tier Observed At": item.get("observed_at"),
+                    "Tier Fetched At": fetched,
+                    "Tier Projection ID": str(item["id"]),
+                    "Tier Source Start (UTC)": start.isoformat(),
+                    "Tier Time Match": ("Exact" if pd.to_datetime(row["Start (UTC)"],utc=True) == start else "Two-team verified; within 15 minutes"),
+                })
+                imported.append(row)
+                matched.add((key, line))
+    kept = [r for r in rows if not (
+        r.get("Platform") == "prizepicks"
+        and (not fantasy_only or bool(fantasy_weights(r)))
+        and (r.get("Tier Source") == "prizepicksapi.com" or
+             (pp_card_key(r), numeric_line(r.get("Line"))) in matched)
+    )]
+    if not imported:
+        raise ValueError("No unique future player/game/stat matches. Existing board preserved.")
+    return kept + imported, len(imported)
+
+
+def pp_fantasy_check(rows, payload):
+    if not payload or not isinstance(payload.get('items'), list):
+        return {'Feed': 'No saved feed', 'Fantasy records returned': 0}, []
+    items = payload['items']
+    fantasy = [item for item in items if isinstance(item, dict)
+               and 'fantasy' in str((item.get('market') or {}).get('stat','')).lower()]
+    details = []
+    for item in fantasy:
+        market = item.get('market') or {}
+        start = (item.get('event') or {}).get('starts_at')
+        if pp_stat_key(market.get('stat')) != ('FANTASY',):
+            reason = 'Unrecognized fantasy stat label'
+        elif item.get('is_demo') is not False:
+            reason = 'Demo/live status not verified'
+        elif str(item.get('league','')).upper() != 'NBA':
+            reason = 'Not NBA'
+        elif item.get('status') != 'active':
+            reason = 'Inactive quote'
+        elif str(market.get('period','')).lower() != 'full game':
+            reason = 'Not full game'
+        elif not today_pregame(start):
+            reason = 'Not an upcoming game today (Pacific)'
+        else:
+            try:
+                pp_merge_tiers(rows, [item], payload.get('fetched_at'))
+                reason = 'Ready to import'
+            except (ValueError, KeyError, TypeError):
+                reason = 'No unique player/game/time match or no verified offered side/tier'
+        local_start = pd.to_datetime(start, utc=True, errors='coerce')
+        local_text = (local_start.tz_convert(SLATE_TIMEZONE).strftime('%b %d, %Y · %I:%M %p PT')
+                      if pd.notna(local_start) else 'Unavailable')
+        details.append({'Player':(item.get('player') or {}).get('name'),
+                        'Source stat':market.get('stat'), 'Line':item.get('line'),
+                        'Start (Pacific)': local_text, 'Start (UTC)': start, 'Import check':reason})
+    return {'Feed fetched (UTC)':payload.get('fetched_at'),
+            'Total feed records':len(items), 'Fantasy records returned':len(fantasy),
+            'Ready fantasy records':sum(d['Import check']=='Ready to import' for d in details),
+            'Feed download incomplete':bool(payload.get('partial')),
+            'Imported fantasy lines today':len({identity(r) for r in rows if fantasy_weights(r)})}, details
+
+
+def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, reference=None, continuation_seconds=1800):
+    """Persist each successful page; explicit calls only, with a hard request cap."""
+    current = pd.Timestamp.now(tz='UTC') if reference is None else pd.to_datetime(reference, utc=True)
+    saved = store.get('source', cache_key) or {}
+    stamp = pd.to_datetime(saved.get('updated_at'), utc=True, errors='coerce')
+    reusable = (saved.get('version') == 3 and saved.get('filters') == filters
+                and saved.get('slate_day') == slate_day(current)
+                and pd.notna(stamp) and 0 <= (current-stamp).total_seconds() < continuation_seconds)
+    if reusable and not saved.get('partial') and (current-stamp).total_seconds() < 300:
+        return saved, 0
+    continuing = reusable and saved.get('partial') and saved.get('next_cursor')
+    state = dict(saved) if continuing else {
+        'version':3, 'filters':dict(filters), 'slate_day':slate_day(current),
+        'items':[], 'fetched_at':current.isoformat(), 'updated_at':current.isoformat(),
+        'next_cursor':None, 'partial':True, 'seen_cursors':[], 'pages_downloaded':0,
+    }
+    items = {str(item['id']):item for item in state['items'] if isinstance(item,dict) and item.get('id')}
+    cursor = state.get('next_cursor') if continuing else None
+    seen = set(state.get('seen_cursors', []))
+    requests_made = 0
+    for _ in range(min(2, max(1, int(max_pages)))):
+        params = dict(filters)
+        if cursor:
+            params['cursor'] = cursor
+        body = fetch_page(params)
+        requests_made += 1
+        meta = body.get('meta') or {}
+        if meta.get('mode') != 'live' or not isinstance(body.get('data'), list):
+            raise ValueError('Expected live projection data. Previous saved pages preserved.')
+        next_cursor = meta.get('next_cursor')
+        if next_cursor is not None and not isinstance(next_cursor,str):
+            raise ValueError('Invalid continuation cursor. Previous saved pages preserved.')
+        if next_cursor and (next_cursor == cursor or next_cursor in seen):
+            raise ValueError('Repeated pagination cursor. Previous saved pages preserved.')
+        for item in body['data']:
+            if not isinstance(item,dict) or not item.get('id'):
+                raise ValueError('Projection record missing ID. Previous saved pages preserved.')
+            items[str(item['id'])] = item
+        if cursor:
+            seen.add(cursor)
+        state.update({'items':list(items.values()), 'next_cursor':next_cursor,
+                      'partial':bool(next_cursor), 'seen_cursors':sorted(seen),
+                      'updated_at':current.isoformat(),
+                      'pages_downloaded':state.get('pages_downloaded',0)+1})
+        store.put('source',cache_key,state)
+        cursor = next_cursor
+        if not cursor:
+            break
+    return state, requests_made
+
+
+def pp_cached_combined():
+    full = workflow_store.get('source','pp_tiers_v1') or {}
+    fantasy = workflow_store.get('source','pp_fantasy_v3') or {}
+    items = {}
+    for payload in (full,fantasy):
+        for item in payload.get('items',[]):
+            if isinstance(item,dict) and item.get('id'):
+                items[str(item['id'])] = item
+    if not full and not fantasy:
+        return None
+    return {'items':list(items.values()), 'fetched_at':fantasy.get('updated_at') or full.get('fetched_at'),
+            'partial':bool(full.get('partial') or fantasy.get('partial'))}
+
+
+
 # Scheduled maintenance uses this same app.py.
 # It exits before the UI and never executes the paid scan.
 
 import sys
+
+
+def automatic_board_run(wf, refresh=True, budget_seconds=420):
+    if not wf.store.remote:
+        raise RuntimeError('Permanent database required for automatic preparation')
+    day = slate_day()
+    ledger = wf.store.get('automation', day) or {'odds_requests': 0, 'feed_requests': 0}
+    board = wf.store.get('board', 'board') or {}
+    errors = []
+    def reserve(kind, maximum):
+        if ledger.get(kind, 0) >= maximum:
+            raise ValueError('Daily ' + kind + ' budget exhausted; saved board preserved')
+        ledger[kind] = ledger.get(kind, 0) + 1
+        wf.store.put('automation', day, ledger)
+    # At most two slate refreshes per Pacific day, including interrupted attempts.
+    if refresh and ledger.get('refreshes', 0) < 2:
+        ledger['refreshes'] = ledger.get('refreshes', 0) + 1
+        wf.store.put('automation', day, ledger)
+        reserve('odds_requests', 34)
+        games = upcoming_nba()
+        if games:
+            reserve('odds_requests', 34)
+            catalog = market_catalog()
+            decoded, summaries, successful = [], [], set()
+            for game in games:
+                try:
+                    reserve('odds_requests', 34)
+                    rows, summary = decode_game(game, game_odds(str(game['fixtureId'])), catalog)
+                    if rows:
+                        decoded.extend(rows); summaries.extend(summary)
+                        successful.add(str(game['fixtureId']))
+                except Exception as error:
+                    errors.append(type(error).__name__ + ': fixture import unavailable')
+            ledger['games_imported'] = len(successful)
+            ledger['games_found'] = len(games)
+            board['v4_rows'] = merge_scan_rows(board.get('v4_rows', []), decoded, successful)
+            board.update(v4_summary=summaries, v4_errors=errors, v4_scan_at=now())
+            wf.store.put('board', 'board', board)
+    # Continue a paginated tier/Fantasy download on later worker runs; never fetch without a key.
+    key = setting('PRIZEPICKS_API_KEY', '')
+    if key and preparation_rows(board.get('v4_rows', [])) and ledger.get('feed_requests', 0) < 10 and (refresh or ledger.get('feed_partial', True)):
+        def fetch_page(params):
+            reserve('feed_requests', 10)
+            response = requests.get('https://prizepicksapi.com/api/v1/projections',
+                headers={'Authorization': 'Bearer ' + key}, params=params, timeout=25)
+            if response.status_code != 200:
+                raise ValueError('PrizePicks feed unavailable')
+            return response.json()
+        try:
+            payload, calls = pp_download_pages(wf.store, 'pp_tiers_v1', fetch_page,
+                {'league': 'NBA', 'status': 'active', 'limit': 200}, max_pages=min(2, 10-ledger.get('feed_requests', 0)), continuation_seconds=86400)
+            merged, count = pp_merge_tiers(board.get('v4_rows', []), payload.get('items', []), payload['fetched_at'])
+            board['v4_rows'] = merged
+            wf.store.put('board', 'board', board)
+            ledger['feed_partial'] = payload.get('partial', False)
+        except Exception as error:
+            errors.append(type(error).__name__ + ': tier feed unavailable; saved lines retained')
+    report = prepare_saved_board(wf, board, budget_seconds=budget_seconds, max_picks=10000)
+    ledger.update(last_run=now(), errors=errors, preparation=report)
+    wf.store.put('automation', day, ledger)
+    return ledger
+
+
+if '--auto-board' in sys.argv:
+    if not _database_online:
+        raise SystemExit('Permanent database unavailable; no feed or odds requests made.')
+    try:
+        print(encode(automatic_board_run(workflow, refresh='--refresh' in sys.argv)))
+    except Exception as error:
+        raise SystemExit('Automatic board paused: ' + type(error).__name__ + '. Saved records preserved.') from None
+    raise SystemExit(0)
 
 if "--prepare-saved" in sys.argv:
     if not _database_online or not workflow_store.remote:
@@ -6430,6 +6826,14 @@ def ui_save_pick(card, frozen):
         })
 
 
+def ui_tier_marker(card):
+    """Confirmed PrizePicks specials only; a blank icon never verifies an unknown tier."""
+    if str(card.get('Platform', '')).lower() != 'prizepicks':
+        return ''
+    tier = str(card.get('Line Type', '')).strip().lower()
+    return {'goblin': '👹', 'demon': '😈'}.get(tier, '')
+
+
 def ui_card(card, frozen, saved=False):
     """Mobile-first pick card. Only frozen model values are displayed."""
     result = (frozen or {}).get('result') or {}
@@ -6446,15 +6850,18 @@ def ui_card(card, frozen, saved=False):
     direction_class = 'more' if is_more else 'less' if direction == 'LESS' else 'pending'
     direction_text = ('↑ MORE' if is_more else '↓ LESS' if direction == 'LESS' else (workflow_store.get('calculation_status', identity(card)) or {}).get('Status', 'Queued'))
     platform = str(card.get('Platform', '')).upper()
-    tier = str(card.get('Line Type', '')) if platform == 'PRIZEPICKS' else ''
+    tier = str(card.get('Line Type', '')).strip() if platform == 'PRIZEPICKS' else ''
+    marker = ui_tier_marker(card)
+    tier_note = 'Line type unverified' if platform == 'PRIZEPICKS' and tier.lower() not in ('standard', 'regular', 'goblin', 'demon') else ''
+    marker_html = f'<span title="{ui_text(tier)}">{marker}</span>' if marker else ''
     proj_text = f'{projection:.2f}' if projection is not None else '—'
     prob_text = f'{probability:.0%}' if probability is not None else '—'
     stat = ui_stat(card)
     st.markdown(f'''<div class="sl-card sl-compact">
       <div class="sl-person">{portrait}<div class="sl-player-info">
-      <h3>{ui_text(name)}</h3><div class="sl-team">{ui_text(card.get('Game', ''))}</div>
+      <h3>{ui_text(name)}{marker_html}</h3><div class="sl-team">{ui_text(card.get('Game', ''))}</div>
       <div class="sl-prop">{ui_text(stat)} <span class="sl-dot">·</span> Line {line_text}</div>
-      <div class="sl-muted">{ui_text(platform)}{(' · ' + ui_text(tier)) if tier else ''}</div>
+      <div class="sl-muted">{ui_text(platform)}{(' · ' + ui_text(tier_note)) if tier_note else ''}</div>
       </div></div>
       <div class="sl-pickline"><div class="sl-side {direction_class}">{ui_text(direction_text)}</div>
       <div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
@@ -6653,9 +7060,9 @@ def ui_detail(card, forecasts):
     line = ui_number(card.get('Line'))
     line_text = f'{line:g}' if line is not None else '—'
     st.markdown(f'''<div class="sl-detail-heading"><div class="sl-person">{portrait}<div>
-    <div class="sl-eyebrow">PLAYER BREAKDOWN</div><h2>{ui_text(name)}</h2>
+    <div class="sl-eyebrow">PLAYER BREAKDOWN</div><h2>{ui_text(name)} {ui_tier_marker(card)}</h2>
     <div class="sl-team">{ui_text(card.get('Game', ''))}</div>
-    <div class="sl-prop">{ui_text(ui_stat(card))} · {ui_text(str(card.get('Platform', '')).upper())} · {ui_text(card.get('Line Type', ''))}</div>
+    <div class="sl-prop">{ui_text(ui_stat(card))} · {ui_text(str(card.get('Platform', '')).upper())}{(' · Line type unverified') if str(card.get('Platform', '')).lower() == 'prizepicks' and str(card.get('Line Type', '')).strip().lower() not in ('standard', 'regular', 'goblin', 'demon') else ''}</div>
     </div></div></div>''', unsafe_allow_html=True)
     if result:
         direction = str(result.get('direction', '')).upper()
@@ -6957,276 +7364,6 @@ if app_page in ("Results", "Settings"):
                     mode="results" if app_page == "Results" else "settings")
 
 # PrizePicks tier feed: explicit refresh only.
-def pp_stat_key(label):
-    label = re.sub(r"[^a-z0-9]", "", str(label).lower())
-    mapping = {
-        "points": ("PTS",), "rebounds": ("REB",),
-        "assists": ("AST",), "steals": ("STL",),
-        "blocks": ("BLK",), "turnovers": ("TOV",),
-        "3ptmade": ("FG3M",), "3pointersmade": ("FG3M",),
-        "ptsrebs": ("PTS", "REB"),
-        "ptsasts": ("PTS", "AST"),
-        "rebsasts": ("REB", "AST"),
-        "ptsrebsasts": ("PTS", "REB", "AST"),
-        "blksstls": ("BLK", "STL"),
-        "fantasyscore": ("FANTASY",),
-        "nbafantasyscore": ("FANTASY",),
-    }
-    return tuple(sorted(mapping.get(label, ())))
-
-
-def pp_card_key(card):
-    columns = (
-        ("FANTASY",) if fantasy_weights(card)
-        else tuple(sorted(market_columns(card) or ()))
-    )
-    start = pd.to_datetime(card.get("Start (UTC)"), utc=True)
-    return normalize_player(card["Player"]), columns, start.isoformat()
-
-
-def pp_nba_team_code(value):
-    if isinstance(value, dict):
-        value = value.get('abbreviation') or value.get('displayName') or value.get('name')
-    key = normalize_player(value or '')
-    teams = {
-        'ATL':'Atlanta Hawks', 'BOS':'Boston Celtics', 'BKN':'Brooklyn Nets',
-        'CHA':'Charlotte Hornets', 'CHI':'Chicago Bulls', 'CLE':'Cleveland Cavaliers',
-        'DAL':'Dallas Mavericks', 'DEN':'Denver Nuggets', 'DET':'Detroit Pistons',
-        'GSW':'Golden State Warriors', 'HOU':'Houston Rockets', 'IND':'Indiana Pacers',
-        'LAC':'Los Angeles Clippers', 'LAL':'Los Angeles Lakers', 'MEM':'Memphis Grizzlies',
-        'MIA':'Miami Heat', 'MIL':'Milwaukee Bucks', 'MIN':'Minnesota Timberwolves',
-        'NOP':'New Orleans Pelicans', 'NYK':'New York Knicks', 'OKC':'Oklahoma City Thunder',
-        'ORL':'Orlando Magic', 'PHI':'Philadelphia 76ers', 'PHX':'Phoenix Suns',
-        'POR':'Portland Trail Blazers', 'SAC':'Sacramento Kings', 'SAS':'San Antonio Spurs',
-        'TOR':'Toronto Raptors', 'UTA':'Utah Jazz', 'WAS':'Washington Wizards',
-    }
-    aliases = {'gs':'GSW','ny':'NYK','no':'NOP','sa':'SAS','wsh':'WAS','pho':'PHX','utah':'UTA','laclippers':'LAC'}
-    if key in aliases:
-        return aliases[key]
-    for code,name in teams.items():
-        if key in (normalize_player(code),normalize_player(name)):
-            return code
-    return None
-
-
-def pp_nearby_fantasy_candidates(rows, item, source_start):
-    """Allow a small feed-time offset only with independent two-team agreement."""
-    player = item.get('player') or {}
-    event = item.get('event') or {}
-    team = pp_nba_team_code(player.get('team'))
-    opponent = pp_nba_team_code(event.get('opponent'))
-    if not team or not opponent or team == opponent:
-        return []
-    name = normalize_player(player.get('name',''))
-    candidates = []
-    for row in rows:
-        if not row.get('Decoded') or str(row.get('Period','')).lower() != 'result':
-            continue
-        if normalize_player(row.get('Player','')) != name:
-            continue
-        if str(row.get('Player ID','')).lower() in ('','none','nan'):
-            continue
-        scheduled = pd.to_datetime(row.get('Start (UTC)'),utc=True,errors='coerce')
-        if pd.isna(scheduled) or not today_pregame(scheduled):
-            continue
-        if scheduled.tz_convert(SLATE_TIMEZONE).date() != source_start.tz_convert(SLATE_TIMEZONE).date():
-            continue
-        if abs((scheduled-source_start).total_seconds()) > 15*60:
-            continue
-        teams = [pp_nba_team_code(t) for t in str(row.get('Game','')).split(' vs ')]
-        if len(teams) != 2 or None in teams or set(teams) != {team,opponent}:
-            continue
-        candidates.append(row)
-    return candidates
-
-
-def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
-    templates = {}
-    player_games = {}
-    for row in rows:
-        row_key = pp_card_key(row)
-        if row.get("Platform") == "prizepicks":
-            templates.setdefault(row_key, []).append(row)
-        if (row.get("Decoded") and str(row.get("Period", "")).lower() == "result"
-                and str(row.get("Player ID", "")).lower() not in ("", "none", "nan")):
-            player_games.setdefault((row_key[0], row_key[2]), []).append(row)
-    imported, matched = [], set()
-    labels = {"standard": "Standard", "goblin": "Goblin", "demon": "Demon"}
-    for item in projections:
-        if item.get("is_demo") is not False or item.get("status") != "active":
-            continue
-        if str(item.get("league", "")).upper() != "NBA":
-            continue
-        market = item.get("market") or {}
-        if str(market.get("period", "")).lower() != "full game":
-            continue
-        start = pd.to_datetime((item.get("event") or {}).get("starts_at"), utc=True, errors="coerce")
-        if pd.isna(start) or start <= pd.Timestamp.now(tz="UTC"):
-            continue
-        key = (
-            normalize_player((item.get("player") or {}).get("name", "")),
-            pp_stat_key(market.get("stat")), start.isoformat(),
-        )
-        candidates = templates.get(key, [])
-        if not candidates and key[1] == ("FANTASY",):
-            # Borrow only a uniquely matched player/game identity; never its stat or line.
-            candidates = player_games.get((key[0], key[2]), [])
-        if not candidates and key[1] == ("FANTASY",):
-            candidates = pp_nearby_fantasy_candidates(rows, item, start)
-        if not key[1] or not candidates:
-            continue
-        if len({str(c["Player ID"]) for c in candidates}) != 1:
-            continue
-        if len({str(c["Fixture ID"]) for c in candidates}) != 1:
-            continue
-        line = numeric_line(item.get("line"))
-        if line is None or not item.get("id"):
-            continue
-        groups = {}
-        for selection in item.get("selections", []):
-            side = str(selection.get("side", "")).upper()
-            tier = labels.get(selection.get("tier"))
-            if selection.get("available") is True and side in ("MORE", "LESS") and tier:
-                groups.setdefault(tier, set()).add(side)
-        for tier, sides in groups.items():
-            for side in sorted(sides):
-                row = dict(candidates[0])
-                if key[1] == ("FANTASY",):
-                    row.update({"Platform": "prizepicks", "Stat": "Fantasy Score", "Stat Key": "fantasy_score", "Period": "result"})
-                row.update({
-                    "Line": line, "Raw Handicap": line,
-                    "Line Type": tier, "Direction": side,
-                    "Market ID": "ppfeed:" + str(item["id"]),
-                    "Outcome ID": "ppfeed:" + str(item["id"]) + ":" + side,
-                    "Odds": None, "mainLine Flag": None,
-                    "Decoded": True, "Line Status": "Provider tier-labelled threshold",
-                    "Available Sides": sorted(sides),
-                    "Tier Source": "prizepicksapi.com",
-                    "Tier Observed At": item.get("observed_at"),
-                    "Tier Fetched At": fetched,
-                    "Tier Projection ID": str(item["id"]),
-                    "Tier Source Start (UTC)": start.isoformat(),
-                    "Tier Time Match": ("Exact" if pd.to_datetime(row["Start (UTC)"],utc=True) == start else "Two-team verified; within 15 minutes"),
-                })
-                imported.append(row)
-                matched.add((key, line))
-    kept = [r for r in rows if not (
-        r.get("Platform") == "prizepicks"
-        and (not fantasy_only or bool(fantasy_weights(r)))
-        and (r.get("Tier Source") == "prizepicksapi.com" or
-             (pp_card_key(r), numeric_line(r.get("Line"))) in matched)
-    )]
-    if not imported:
-        raise ValueError("No unique future player/game/stat matches. Existing board preserved.")
-    return kept + imported, len(imported)
-
-
-def pp_fantasy_check(rows, payload):
-    if not payload or not isinstance(payload.get('items'), list):
-        return {'Feed': 'No saved feed', 'Fantasy records returned': 0}, []
-    items = payload['items']
-    fantasy = [item for item in items if isinstance(item, dict)
-               and 'fantasy' in str((item.get('market') or {}).get('stat','')).lower()]
-    details = []
-    for item in fantasy:
-        market = item.get('market') or {}
-        start = (item.get('event') or {}).get('starts_at')
-        if pp_stat_key(market.get('stat')) != ('FANTASY',):
-            reason = 'Unrecognized fantasy stat label'
-        elif item.get('is_demo') is not False:
-            reason = 'Demo/live status not verified'
-        elif str(item.get('league','')).upper() != 'NBA':
-            reason = 'Not NBA'
-        elif item.get('status') != 'active':
-            reason = 'Inactive quote'
-        elif str(market.get('period','')).lower() != 'full game':
-            reason = 'Not full game'
-        elif not today_pregame(start):
-            reason = 'Not an upcoming game today (Pacific)'
-        else:
-            try:
-                pp_merge_tiers(rows, [item], payload.get('fetched_at'))
-                reason = 'Ready to import'
-            except (ValueError, KeyError, TypeError):
-                reason = 'No unique player/game/time match or no verified offered side/tier'
-        local_start = pd.to_datetime(start, utc=True, errors='coerce')
-        local_text = (local_start.tz_convert(SLATE_TIMEZONE).strftime('%b %d, %Y · %I:%M %p PT')
-                      if pd.notna(local_start) else 'Unavailable')
-        details.append({'Player':(item.get('player') or {}).get('name'),
-                        'Source stat':market.get('stat'), 'Line':item.get('line'),
-                        'Start (Pacific)': local_text, 'Start (UTC)': start, 'Import check':reason})
-    return {'Feed fetched (UTC)':payload.get('fetched_at'),
-            'Total feed records':len(items), 'Fantasy records returned':len(fantasy),
-            'Ready fantasy records':sum(d['Import check']=='Ready to import' for d in details),
-            'Feed download incomplete':bool(payload.get('partial')),
-            'Imported fantasy lines today':len({identity(r) for r in rows if fantasy_weights(r)})}, details
-
-
-def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, reference=None):
-    """Persist each successful page; explicit calls only, with a hard request cap."""
-    current = pd.Timestamp.now(tz='UTC') if reference is None else pd.to_datetime(reference, utc=True)
-    saved = store.get('source', cache_key) or {}
-    stamp = pd.to_datetime(saved.get('updated_at'), utc=True, errors='coerce')
-    reusable = (saved.get('version') == 3 and saved.get('filters') == filters
-                and saved.get('slate_day') == slate_day(current)
-                and pd.notna(stamp) and 0 <= (current-stamp).total_seconds() < 1800)
-    if reusable and not saved.get('partial') and (current-stamp).total_seconds() < 300:
-        return saved, 0
-    continuing = reusable and saved.get('partial') and saved.get('next_cursor')
-    state = dict(saved) if continuing else {
-        'version':3, 'filters':dict(filters), 'slate_day':slate_day(current),
-        'items':[], 'fetched_at':current.isoformat(), 'updated_at':current.isoformat(),
-        'next_cursor':None, 'partial':True, 'seen_cursors':[], 'pages_downloaded':0,
-    }
-    items = {str(item['id']):item for item in state['items'] if isinstance(item,dict) and item.get('id')}
-    cursor = state.get('next_cursor') if continuing else None
-    seen = set(state.get('seen_cursors', []))
-    requests_made = 0
-    for _ in range(min(2, max(1, int(max_pages)))):
-        params = dict(filters)
-        if cursor:
-            params['cursor'] = cursor
-        body = fetch_page(params)
-        requests_made += 1
-        meta = body.get('meta') or {}
-        if meta.get('mode') != 'live' or not isinstance(body.get('data'), list):
-            raise ValueError('Expected live projection data. Previous saved pages preserved.')
-        next_cursor = meta.get('next_cursor')
-        if next_cursor is not None and not isinstance(next_cursor,str):
-            raise ValueError('Invalid continuation cursor. Previous saved pages preserved.')
-        if next_cursor and (next_cursor == cursor or next_cursor in seen):
-            raise ValueError('Repeated pagination cursor. Previous saved pages preserved.')
-        for item in body['data']:
-            if not isinstance(item,dict) or not item.get('id'):
-                raise ValueError('Projection record missing ID. Previous saved pages preserved.')
-            items[str(item['id'])] = item
-        if cursor:
-            seen.add(cursor)
-        state.update({'items':list(items.values()), 'next_cursor':next_cursor,
-                      'partial':bool(next_cursor), 'seen_cursors':sorted(seen),
-                      'updated_at':current.isoformat(),
-                      'pages_downloaded':state.get('pages_downloaded',0)+1})
-        store.put('source',cache_key,state)
-        cursor = next_cursor
-        if not cursor:
-            break
-    return state, requests_made
-
-
-def pp_cached_combined():
-    full = workflow_store.get('source','pp_tiers_v1') or {}
-    fantasy = workflow_store.get('source','pp_fantasy_v3') or {}
-    items = {}
-    for payload in (full,fantasy):
-        for item in payload.get('items',[]):
-            if isinstance(item,dict) and item.get('id'):
-                items[str(item['id'])] = item
-    if not full and not fantasy:
-        return None
-    return {'items':list(items.values()), 'fetched_at':fantasy.get('updated_at') or full.get('fetched_at'),
-            'partial':bool(full.get('partial') or fantasy.get('partial'))}
-
-
 def render_pp_tier_refresh():
     rows = [row for row in st.session_state.get('v4_rows',[]) if today_pregame(row.get('Start (UTC)'))]
     with st.expander('PrizePicks Regular / Goblin / Demon feed'):
