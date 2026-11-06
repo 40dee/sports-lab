@@ -2630,6 +2630,22 @@ def result_table_html(records):
     return ''.join(html)
 
 
+def compact_audit_table(records, columns):
+    """Render an escaped, readable table with explicitly selected public columns."""
+    from html import escape
+    parts = ['<div class="sl-results-scroll"><table class="sl-results"><thead><tr>']
+    parts.extend('<th>' + escape(label) + '</th>' for key, label in columns)
+    parts.append('</tr></thead><tbody>')
+    for record in records:
+        parts.append('<tr>')
+        for key, label in columns:
+            value = record.get(key)
+            parts.append('<td>' + escape('—' if value is None else str(value)) + '</td>')
+        parts.append('</tr>')
+    parts.append('</tbody></table></div>')
+    return ''.join(parts)
+
+
 def render_results_dashboard(wf, st):
     st.markdown('### Results')
     active = bool(st.session_state.get('_audit_active'))
@@ -2728,8 +2744,18 @@ def render_workflow(wf, st, rows, mode="settings"):
         status = wf.store.get("maintenance", "last") or {}
         st.caption("Last maintenance: " + str(status.get("run_at", "Never")))
         if status.get("grading"):
-            st.json(status["grading"])
             g = status["grading"]
+            st.caption("This check only — these counts are not your lifetime results.")
+            checks = st.columns(3)
+            checks[0].metric("Newly graded", g.get("graded", 0))
+            checks[1].metric("Still pending", g.get("pending", 0))
+            checks[2].metric("Errors this check", g.get("errors", 0))
+            if not g.get("attempted", 0) and not g.get("pending", 0):
+                st.info("No additional pending picks found in this check. Previous grades remain in Results.")
+            elif g.get("remaining", 0):
+                st.caption(f"{g['remaining']} picks still queued for the next automatic grading pass.")
+            if g.get("DNP", 0) or g.get("ties", 0):
+                st.caption(f"DNP: {g.get('DNP', 0)} · Ties: {g.get('ties', 0)}")
             if g.get("future_start", 0) and not g.get("due", 0):
                 st.info(
                     f"All {g['future_start']} pending forecasts have recorded start times in the future "
@@ -2744,7 +2770,9 @@ def render_workflow(wf, st, rows, mode="settings"):
                   if not value.get("resolved")]
         if errors:
             st.warning(f"{len(errors)} forecast(s) need another grading attempt")
-            st.dataframe(pd.DataFrame(errors), hide_index=True, use_container_width=True)
+            st.caption("Original picks are retained. Recheck completed games to retry eligible records.")
+            st.download_button("Download grading error details", pd.DataFrame(errors).to_csv(index=False),
+                               "nba_grading_errors.csv", "text/csv")
         else:
             st.caption("No unresolved grading errors recorded.")
         if st.button("Recheck all completed games", key="audit_retry_now"):
@@ -2847,145 +2875,72 @@ def render_workflow(wf, st, rows, mode="settings"):
 
     render_results_dashboard(wf, st)
 
-    with st.expander(
-        "PrizePicks percentage hit-rate tracker",
-        expanded=True,
-    ):
-        st.caption(
-            "Goblins, Regular and Demons are tracked "
-            "separately by their pregame estimated "
-            "hit probability: 40–49%, 50–59%, 60–69%, "
-            "and so on. The estimates are experimental, "
-            "not proven win probabilities. Actual hit rate "
-            "uses hits / (hits + misses); ties and DNP "
-            "are shown separately. Unverified tiers "
-            "remain separate."
-        )
-
+    with st.expander("PrizePicks estimate accuracy", expanded=False):
+        st.caption("Compare saved pregame estimates with actual results. Line types stay separate; Unverified means the original tier was not confirmed. These estimates are experimental.")
         calibration = wf.probability_calibration()
-
         if calibration:
-            calibration_frame = pd.DataFrame(
-                calibration
-            )
-
-            st.dataframe(
-                calibration_frame,
-                hide_index=True,
-                use_container_width=True,
-            )
-
-            st.download_button(
-                "Download probability hit-rate audit",
-                calibration_frame.to_csv(index=False),
-                "prizepicks_probability_audit.csv",
-                "text/csv",
-            )
-
+            calibration_frame = pd.DataFrame(calibration)
+            st.markdown(compact_audit_table(calibration, [
+                ('Tier', 'Line type'), ('Predicted bucket', 'Estimated range'),
+                ('Decided', 'Decided'), ('Hits', 'Wins'), ('Misses', 'Losses'),
+                ('Actual hit rate', 'Actual hit rate')]), unsafe_allow_html=True)
+            st.caption("Hit rate = wins ÷ (wins + losses). Small groups are uncertain; ties, DNP and pending picks are excluded.")
+            with st.expander("Sample size and uncertainty"):
+                st.markdown(compact_audit_table(calibration, [
+                    ('Tier', 'Line type'), ('Predicted bucket', 'Estimated range'),
+                    ('Average predicted (decided)', 'Average estimate'),
+                    ('Actual 95% interval', '95% interval'), ('Forecasts', 'All picks'),
+                    ('Ties', 'Ties'), ('DNP', 'DNP'), ('Pending', 'Pending')]), unsafe_allow_html=True)
+            st.download_button("Download estimate accuracy CSV", calibration_frame.to_csv(index=False),
+                               "prizepicks_probability_audit.csv", "text/csv")
         else:
-            st.info(
-                "New frozen PrizePicks forecasts will "
-                "populate these groups. Older forecasts "
-                "without a saved percentage are "
-                "not backfilled."
-            )
+            st.info("No saved PrizePicks estimates to compare yet. Missing historical percentages are not invented.")
 
-    with st.expander(
-        "Automatic model paper ROI",
-        expanded=True,
-    ):
-        st.caption(
-            "Tracks the app’s frozen MORE/LESS selections "
-            "automatically. No betting-account connection "
-            "or actual wager is needed. Benchmark policy: "
-            "+1 unit for a win, −1 for a loss; ties, DNP, "
-            "unavailable sides and exact projection ties "
-            "do not risk a benchmark unit."
-        )
-
+    with st.expander("Paper performance by platform", expanded=False):
+        st.caption("Hypothetical performance of frozen picks. The direction benchmark and returns using saved prices are shown separately.")
         roi_rows = wf.model_roi_rows()
-
         if not roi_rows:
-            st.info(
-                "Calculate a board to start the paper "
-                "record. Results fill in after "
-                "games finish."
-            )
-
+            st.info("No paper results yet. Saved forecasts populate this section as games finish.")
         else:
             frame = pd.DataFrame(roi_rows)
-            summaries = []
-
-            for platform, group in frame.groupby(
-                "Platform"
-            ):
-                stake = float(
-                    group[
-                        "Benchmark stake (units)"
-                    ].sum()
-                )
-
-                profit = float(
-                    group[
-                        "Benchmark profit (units)"
-                    ].sum()
-                )
-
-                priced = group[
-                    group["Paper settled"]
-                ]
-
-                cash_cost = float(
-                    priced[
-                        "Priced paper cost ($)"
-                    ].sum()
-                )
-
-                cash_profit = float(
-                    priced[
-                        "Priced paper profit ($)"
-                    ].sum()
-                )
-
-                summaries.append({
-                    "Platform": platform,
-                    "Decided benchmark picks": int(stake),
-                    "Benchmark net units": profit,
-                    "1:1 benchmark ROI": (
-                        f"{profit / stake:.1%}"
-                        if stake
-                        else "Awaiting finals"
-                    ),
-                    "Settled priced paper picks": len(priced),
-                    "Priced paper profit ($)": round(
-                        cash_profit,
-                        4,
-                    ),
-                    "Priced paper ROI": (
-                        f"{cash_profit / cash_cost:.1%}"
-                        if cash_cost
-                        else "No settled priced entries"
-                    ),
-                })
-
-            st.dataframe(
-                pd.DataFrame(summaries),
-                hide_index=True,
-                use_container_width=True,
-            )
-
-            st.dataframe(
-                frame,
-                hide_index=True,
-                use_container_width=True,
-            )
-
-            st.download_button(
-                "Download automatic paper ROI",
-                frame.to_csv(index=False),
-                "model_paper_roi.csv",
-                "text/csv",
-            )
+            for platform, group in frame.groupby("Platform"):
+                title = {'prizepicks': 'PrizePicks', 'draftkings': 'DraftKings', 'kalshi': 'Kalshi'}.get(str(platform), str(platform))
+                st.markdown('#### ' + title)
+                stake = float(group["Benchmark stake (units)"].sum())
+                profit = float(group["Benchmark profit (units)"].sum())
+                metrics = st.columns(3)
+                metrics[0].metric("Benchmark picks", int(stake))
+                metrics[1].metric("Net benchmark units", f"{profit:+.1f}")
+                metrics[2].metric("Even-money benchmark", f"{profit / stake:.1%}" if stake else "—")
+                st.caption("Direction benchmark: +1 unit per win, −1 per loss. This is not a platform payout.")
+                priced = group[group["Paper settled"]]
+                cash_cost = float(priced["Priced paper cost ($)"].sum())
+                cash_profit = float(priced["Priced paper profit ($)"].sum())
+                if cash_cost:
+                    metrics = st.columns(3)
+                    metrics[0].metric("Priced settled picks", len(priced))
+                    metrics[1].metric("Paper profit", f"${cash_profit:+.2f}")
+                    metrics[2].metric("Priced paper ROI", f"{cash_profit / cash_cost:.1%}")
+                else:
+                    st.info("Priced paper ROI unavailable — no settled entries with a usable saved cost. This does not mean a 0% return.")
+            with st.expander("Individual paper results"):
+                platform = st.selectbox("Paper platform", ['All platforms'] + sorted(frame['Platform'].unique().tolist()), key='paper_platform')
+                detail = frame if platform == 'All platforms' else frame[frame['Platform'] == platform]
+                detail = detail.copy()
+                detail['Stat'] = detail['Stat'].map(compact_result_stat)
+                detail['Benchmark profit (units)'] = detail['Benchmark profit (units)'].map(lambda value: f'{float(value):+.1f}')
+                pages = max(1, math.ceil(len(detail) / 50))
+                if st.session_state.get('_paper_filter') != platform or int(st.session_state.get('paper_page', 1)) > pages:
+                    st.session_state.pop('paper_page', None)
+                    st.session_state['_paper_filter'] = platform
+                page = int(st.number_input('Paper results page', min_value=1, max_value=pages, value=1, step=1, key='paper_page'))
+                st.markdown(compact_audit_table(detail.iloc[(page-1)*50:page*50].to_dict('records'), [
+                    ('Player', 'Player'), ('Stat', 'Prop'), ('Line', 'Line'),
+                    ('Model side', 'Pick'), ('Result', 'Result'),
+                    ('Benchmark profit (units)', 'Net units'), ('Platform', 'Platform')]), unsafe_allow_html=True)
+                st.caption(f'{len(detail)} matching picks · up to 50 per page. Internal IDs and pricing details remain in the CSV.')
+            st.download_button("Download full paper performance CSV", frame.to_csv(index=False),
+                               "model_paper_roi.csv", "text/csv")
 
         st.caption(
             "The 1:1 benchmark compares model directions; "
