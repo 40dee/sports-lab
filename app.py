@@ -161,38 +161,54 @@ class Store:
             )
         )
 
-        self.query(
+        written = self.query(
             "INSERT INTO sports_records VALUES (?,?,?,?) "
-            "ON CONFLICT(namespace,key) " + suffix,
-            (
-                namespace,
-                key,
-                encode(value),
-                now(),
-            ),
+            "ON CONFLICT(namespace,key) " + suffix + " RETURNING key",
+            (namespace, key, encode(value), now()), fetch=True,
         )
-        # A successful write invalidates all cached reads for its namespace.
+        # Update this record in cached lists. A single new forecast must not
+        # force a download of every historic forecast on the next render.
         if self._read_cache is not None:
-            for cache_key in list(self._read_cache):
-                if cache_key[1] == namespace:
-                    self._read_cache.pop(cache_key, None)
+            import copy
+            stamp = time.monotonic()
+            if written:
+                self._read_cache[("get", namespace, key)] = (stamp, json.loads(encode(value)))
+                list_key = ("items", namespace, None)
+                cached = self._read_cache.get(list_key)
+                if cached is not None:
+                    values = dict(cached[1])
+                    values[key] = json.loads(encode(value))
+                    # Preserve the original refresh deadline for other workers.
+                    self._read_cache[list_key] = (cached[0], list(values.items()))
+            else:
+                self._read_cache.pop(("get", namespace, key), None)
+                cached = self._read_cache.get(("items", namespace, None))
+                if cached and key not in dict(cached[1]):
+                    self._read_cache.pop(("items", namespace, None), None)
+            while len(self._read_cache) > 128:
+                self._read_cache.pop(next((k for k in self._read_cache if k[0] == "get"), next(iter(self._read_cache))))
 
     def _cached_read(self, kind, namespace, key, loader):
         if self._read_cache is None:
             return loader()
+        import copy
         cache_key = (kind, namespace, key)
         cached = self._read_cache.get(cache_key)
         stamp = time.monotonic()
-        if cached is not None and stamp - cached[0] < 30:
-            return cached[1]
+        if cached is not None and stamp - cached[0] < 120:
+            return copy.deepcopy(cached[1])
         result = loader()
-        # Bound cache size to prevent accumulating large historic snapshots.
-        if len(self._read_cache) >= 32:
-            self._read_cache.clear()
-        self._read_cache[cache_key] = (stamp, result)
+        self._read_cache[cache_key] = (stamp, copy.deepcopy(result))
+        while len(self._read_cache) > 128:
+            self._read_cache.pop(next((k for k in self._read_cache if k[0] == "get"), next(iter(self._read_cache))))
         return result
 
     def get(self, namespace, key, default=None):
+        if self._read_cache is not None:
+            snapshot = self._read_cache.get(("items", namespace, None))
+            if snapshot is not None and time.monotonic() - snapshot[0] < 120:
+                import copy
+                return copy.deepcopy(dict(snapshot[1]).get(key, default))
         def load():
             rows = self.query(
                 "SELECT payload FROM sports_records "
@@ -245,6 +261,8 @@ class Store:
             "source",
             "paper_forecast",
             "paper_settlement",
+            "preparation",
+            "calculation_status",
         }
 
         checked = []
@@ -999,6 +1017,12 @@ class Workflow:
             )
 
         key = identity(card)
+        signature = market_signature(card, str(event["id"]))
+        existing = next((frozen for _, frozen in
+            unique_forecasts(self._preparation_existing if getattr(self, "_preparation_existing", None) is not None else self.store.items("forecast"))
+            if market_signature(frozen["card"], frozen.get("event_id")) == signature), None)
+        if existing is not None:
+            return existing
 
         value = {
             "id": key,
@@ -1127,20 +1151,17 @@ class Workflow:
         )
 
     def board(self, rows, season, progress=None):
-        unique = {
-            identity(card): card
-            for card in rows
-            if card.get("Decoded")
-        }
+        unique = {}
+        for card in rows:
+            if card.get("Decoded"):
+                unique.setdefault(market_signature(card), card)
+        saved_index = forecast_index(self.store.items("forecast"))
 
         outcomes = []
 
         for index, (key, card) in enumerate(unique.items()):
             try:
-                saved = self.store.get(
-                    "forecast",
-                    key,
-                )
+                saved = saved_prediction(saved_index, card)
 
                 value = saved or self.calculate(card, season)
                 result = value["result"]
@@ -1165,7 +1186,7 @@ class Workflow:
                     ),
                     "Games": result.get("ranking_games"),
                     "Start (UTC)": card["Start (UTC)"],
-                    "Forecast ID": key,
+                    "Forecast ID": value["id"],
                     "Eligible side": result.get(
                         "selection_allowed",
                         True,
@@ -1202,7 +1223,7 @@ class Workflow:
                   "earliest_future_start": None, "latest_future_start": None,
                   "due": 0}
         settled = {key for key, _ in self.store.items("grade")}
-        records = [(key, frozen) for key, frozen in self.store.items("forecast")
+        records = [(key, frozen) for key, frozen in unique_forecasts(self.store.items("forecast"))
                    if key not in settled]
         current = pd.Timestamp.now(tz="UTC")
         due = []
@@ -1565,7 +1586,7 @@ class Workflow:
         prices = dict(self.store.items("paper_forecast"))
         rows = []
 
-        for key, frozen in self.store.items("forecast"):
+        for key, frozen in unique_forecasts(self.store.items("forecast")):
             result = frozen["result"]
             card = frozen["card"]
             grade = grades.get(key, {})
@@ -1732,7 +1753,7 @@ class Workflow:
         grades = dict(self.store.items("grade"))
         buckets = {}
 
-        for key, frozen in self.store.items("forecast"):
+        for key, frozen in unique_forecasts(self.store.items("forecast")):
             card = frozen["card"]
             result = frozen["result"]
 
@@ -1886,11 +1907,11 @@ class Workflow:
 
         return output
 
-    def research_rows(self):
+    def research_rows(self, across_platforms=False):
         rows = []
         grades = dict(self.store.items("grade"))
 
-        for key, frozen in self.store.items("forecast"):
+        for key, frozen in unique_forecasts(self.store.items("forecast"), across_platforms=across_platforms):
             grade = grades.get(key)
             card = frozen["card"]
             result = frozen["result"]
@@ -1925,7 +1946,7 @@ class Workflow:
         grades = dict(self.store.items("grade"))
         reviews = self.store.items("model_review")
 
-        for key, frozen in self.store.items("forecast"):
+        for key, frozen in unique_forecasts(self.store.items("forecast")):
             result = frozen["result"]
             card = frozen["card"]
             grade = grades.get(key)
@@ -2332,6 +2353,190 @@ def save_ticket(store, ticket, settle=False):
     return ticket
 
 
+def market_signature(card, event_id=None, across_platforms=False):
+    """Stable market identity; scan IDs and tier-label corrections are metadata."""
+    import re
+    import unicodedata
+    def clean(value):
+        value = unicodedata.normalize('NFKD', str(value or ''))
+        return re.sub(r'[^a-z0-9]', '', value.encode('ascii', 'ignore').decode().lower())
+    player = str(card.get('Player') or '')
+    if ',' in player:
+        last, first = player.split(',', 1)
+        player = first + ' ' + last
+    start = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
+    game = clean(card.get('Game'))
+    # Refuse to merge unknown events or unknown players on weak metadata.
+    if not player or (not event_id and (not game or pd.isna(start))):
+        return ('unverified', identity(card))
+    try:
+        line = Decimal(str(card['Line'])).normalize()
+        if not line.is_finite():
+            raise ValueError('Invalid line')
+        columns = tuple(sorted(market_columns(card) or ()))
+    except (ValueError, TypeError, KeyError):
+        return ('unverified', identity(card))
+    if not columns:
+        return ('unverified', identity(card))
+    scoring = tuple(sorted((fantasy_weights(card) or {}).items()))
+    event = ('espn', str(event_id)) if event_id else ('fixture', game, start.isoformat())
+    return (event, clean(player), columns, scoring, clean(card.get('Period') or 'fullgame'),
+            str(line), '' if across_platforms else clean(card.get('Platform')))
+
+
+def unique_forecasts(records, across_platforms=False):
+    """Earliest original forecast wins; source records remain untouched."""
+    def created(item):
+        stamp = pd.to_datetime(item[1].get('created_at'), utc=True, errors='coerce')
+        return (pd.isna(stamp), stamp.value if pd.notna(stamp) else 0, str(item[0]))
+    kept = {}
+    for key, frozen in sorted(records, key=created):
+        signature = market_signature(frozen.get('card') or {}, frozen.get('event_id'), across_platforms)
+        kept.setdefault(signature, (key, frozen))
+    return list(kept.values())
+
+
+def forecast_index(records):
+    # Keep old IDs working for watchlists while aliasing new scans to old picks.
+    lookup = dict(records)
+    earliest = {}
+    for key, frozen in unique_forecasts(records):
+        earliest.setdefault(market_signature(frozen['card']), frozen)
+    lookup.update(earliest)
+    return lookup
+
+
+def saved_prediction(index, card):
+    return index.get(market_signature(card)) or index.get(identity(card))
+
+
+def preparation_rows(rows):
+    unique = {}
+    for card in rows:
+        if card.get('Decoded') and today_pregame(card.get('Start (UTC)')) and market_columns(card):
+            unique.setdefault(market_signature(card), card)
+    return list(unique.values())
+
+
+def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.monotonic):
+    """Bounded resumable saved-data work. Never calls an odds/feed refresh."""
+    import copy
+    board = board if isinstance(board, dict) else {}
+    rows = preparation_rows(board.get('v4_rows') or [])
+    snapshot = wf.store.items('forecast')
+    index = forecast_index(snapshot)
+    previous_snapshot = getattr(wf, '_preparation_existing', None)
+    wf._preparation_existing = list(snapshot)
+    states = dict(wf.store.items('calculation_status'))
+    began = clock()
+    report = {'run_at': now(), 'state': 'running', 'total': len(rows),
+              'ready': sum(bool(saved_prediction(index, c)) for c in rows),
+              'attempted': 0, 'source_scan_at': board.get('v4_scan_at')}
+    wf.store.put('preparation', 'last', report)
+    # Work on an isolated environment mapping; do not patch process-wide globals.
+    engine = wf.e
+    wf.e = dict(engine)
+    original_player, original_event = wf.player, wf.event_for
+    player_cache, event_cache, history_cache = {}, {}, {}
+    def reuse(cache, key, call):
+        if key not in cache:
+            try:
+                cache[key] = (True, call())
+            except Exception as error:
+                cache[key] = (False, error)
+        ok, value = cache[key]
+        if not ok:
+            raise value
+        return copy.deepcopy(value)
+    wf.player = lambda c: reuse(player_cache, (c.get('Game'), c.get('Player')), lambda: original_player(c))
+    wf.event_for = lambda c: reuse(event_cache, (c.get('Game'), c.get('Start (UTC)')), lambda: original_event(c))
+    history = engine['fetch_player_history']
+    wf.e['fetch_player_history'] = lambda *args: reuse(history_cache, args, lambda: history(*args))
+    try:
+        for card in sorted(rows, key=lambda c: str(c.get('Start (UTC)'))):
+            key = identity(card)
+            if saved_prediction(index, card):
+                continue
+            retry = pd.to_datetime((states.get(key) or {}).get('retry_at'), utc=True, errors='coerce')
+            if pd.notna(retry) and retry > pd.Timestamp.now(tz='UTC'):
+                continue
+            if clock() - began >= budget_seconds or report['attempted'] >= max_picks:
+                break
+            if not today_pregame(card.get('Start (UTC)')):
+                continue
+            state = {'Status': 'Calculating', 'updated_at': now(), 'Player': card.get('Player')}
+            wf.store.put('calculation_status', key, state)
+            report['current'] = str(card.get('Player')) + ' · ' + str(card.get('Stat'))
+            wf.store.put('preparation', 'last', report)
+            try:
+                frozen = wf.calculate(card, engine['current_season']())
+                index[key] = index[market_signature(card)] = frozen
+                wf._preparation_existing.append((frozen['id'], frozen))
+                state = {'Status': 'Ready', 'updated_at': now()}
+            except Exception as error:
+                # Exception messages can contain URLs; keep operational details in logs.
+                print('SPORTS_LAB_PREP_ERROR', key, type(error).__name__, flush=True)
+                state = {'Status': 'Unavailable', 'reason': type(error).__name__ + ': calculation could not complete; see app logs.',
+                         'updated_at': now(), 'retry_at': (pd.Timestamp.now(tz='UTC') + pd.Timedelta(minutes=15)).isoformat()}
+            states[key] = state
+            wf.store.put('calculation_status', key, state)
+            report['attempted'] += 1
+            report['ready'] = sum(bool(saved_prediction(index, c)) for c in rows)
+            wf.store.put('preparation', 'last', report)
+    finally:
+        wf.player, wf.event_for, wf.e = original_player, original_event, engine
+        wf._preparation_existing = previous_snapshot
+    report['ready'] = sum(bool(saved_prediction(index, c)) for c in rows)
+    report['unavailable'] = sum(not saved_prediction(index, c) and
+        (states.get(identity(c)) or {}).get('Status') == 'Unavailable' for c in rows)
+    report['pending'] = len(rows) - report['ready'] - report['unavailable']
+    report['state'] = 'complete' if report['ready'] == len(rows) else 'retry pending' if not report['pending'] else 'queued'
+    report['finished_at'] = now()
+    report.pop('current', None)
+    wf.store.put('preparation', 'last', report)
+    return report
+
+
+def preparation_panel(wf, st, rows):
+    st.markdown("#### Prepare today's board")
+    st.caption('Uses saved lines. No paid odds or PrizePicks feed refresh is triggered here.')
+    if not wf.store.remote:
+        st.warning('Temporary session only. Keep this page open and download a backup before leaving. Background preparation is unavailable until permanent storage is restored.')
+    current = preparation_rows(rows)
+    index = forecast_index(wf.store.items('forecast'))
+    ready = sum(bool(saved_prediction(index, c)) for c in current)
+    st.progress(ready / len(current) if current else 0, text=f'{ready}/{len(current)} ready')
+    last = wf.store.get('preparation', 'last') or {}
+    if last.get('unavailable'):
+        st.caption(f"Last batch: {last['unavailable']} unavailable; retried after 15 minutes while preparation is active.")
+    if not current:
+        st.info("No saved upcoming lines for today. Restore a backup or use the explicit feed/scan controls in Settings.")
+    if st.button("Prepare today's board", type='primary', disabled=not current, key='prepare_one_action'):
+        board = {field: st.session_state.get(field) for field in BOARD_FIELDS}
+        wf.store.put('board', 'board', board)
+        wf.store.put('preparation', 'request', {'requested_at': now(), 'day': slate_day(), 'enabled': True})
+        st.session_state['_prepare_active'] = True
+        st.rerun()
+    if st.session_state.get('_prepare_active'):
+        st.caption('Preparation resumes automatically while this page is open. Closing it requires a connected database and the scheduled worker to continue.')
+        if st.button('Pause preparation', key='pause_preparation'):
+            st.session_state['_prepare_active'] = False
+            wf.store.put('preparation', 'request', {'enabled': False, 'day': slate_day(), 'requested_at': now()})
+            st.rerun()
+
+
+def storage_failure_hint(error):
+    # Inspect locally, but never display a raw exception or connection string.
+    message = str(error).lower()
+    if any(word in message for word in ('quota', 'limit exceeded', 'data transfer', 'storage limit', 'compute time', 'disk full')):
+        return 'The database reports a usage or capacity limit. Check the Neon Usage page; code cannot restore exhausted capacity.'
+    if any(word in message for word in ('password authentication', 'authentication failed', 'invalid password')):
+        return 'Database credentials were rejected. Update DATABASE_URL in Streamlit secrets.'
+    if any(word in message for word in ('timeout', 'timed out', 'resolve', 'connection refused')):
+        return 'The database could not be reached. Check its endpoint status and connection settings.'
+    return 'Permanent storage could not connect. Check Neon status, Usage and DATABASE_URL in Streamlit secrets.'
+
+
 def render_workflow(wf, st, rows, mode="settings"):
     st.subheader("NBA workflow")
 
@@ -2380,12 +2585,17 @@ def render_workflow(wf, st, rows, mode="settings"):
 
     if mode == "settings":
         with st.expander("Full workspace backup / restore"):
-            st.download_button(
-                "Download forecasts, grades, model and board",
-                wf.store.export(),
-                "sports_lab_workspace.json",
-                "application/json",
-            )
+            if st.button("Prepare full workspace backup", key="prepare_full_backup"):
+                st.session_state["_prepared_full_backup"] = wf.store.export()
+                st.session_state["_prepared_full_backup_at"] = now()
+            backup = st.session_state.get("_prepared_full_backup")
+            if backup:
+                st.caption("Backup snapshot prepared (UTC): " + st.session_state["_prepared_full_backup_at"])
+                st.download_button(
+                    "Download forecasts, grades, model and board", backup,
+                    "sports_lab_workspace.json", "application/json",
+                )
+            st.caption("Preparing a full backup downloads the workspace once. Browsing this panel does not download the database.")
 
             uploaded = st.file_uploader(
                 "Restore full workspace",
@@ -2417,104 +2627,14 @@ def render_workflow(wf, st, rows, mode="settings"):
                     st.error(str(error))
 
     if mode == "settings" or rows:
-        # Consolidated, no-paid-request preparation: reuse saved scans and
-        # cached PrizePicks quotes, then calculate all missing forecasts in
-        # bounded batches. Never mutate previously frozen forecasts.
         if mode == "settings":
-            st.markdown("#### Prepare today's board — saved data first")
-            st.caption("0 OddsPAPI requests. Reuses existing game scans and saved "
-                       "PrizePicks feed. New scans remain a separate, explicit action below.")
-            if not wf.store.remote:
-                st.warning("Offline session: download a workspace backup after "
-                           "preparation. Automatic persistence across redeploys is NOT guaranteed.")
-            prepare_limit = st.number_input(
-                "Maximum new forecasts this run", min_value=1, max_value=300,
-                value=60, step=10, key="bulk_prepare_limit")
-            if not rows:
-                st.info("No upcoming picks are currently loaded. The preparation control remains available; restore or scan today's games if saved data cannot populate the board.")
-            if st.button("Prepare today's board (saved data, no odds refresh)",
-                         type="primary", key="bulk_prepare_saved"):
-                try:
-                    current_rows = list(rows)
-                    saved_feed = globals().get("pp_cached_combined", lambda: None)()
-                    if saved_feed and saved_feed.get("items"):
-                        merge = globals().get("pp_merge_tiers")
-                        if merge:
-                            current_rows, matched = merge(
-                                current_rows, saved_feed["items"],
-                                saved_feed.get("fetched_at"), fantasy_only=False)
-                            st.session_state["v4_rows"] = current_rows
-                            workspace_store("board", {
-                                field: st.session_state.get(field)
-                                for field in BOARD_FIELDS})
-                            st.caption(f"Matched {matched} saved feed outcomes; no network refresh.")
-                    valid = {identity(card): card for card in current_rows
-                             if card.get("Decoded") and today_pregame(card.get("Start (UTC)"))}
-                    todo = [card for key, card in valid.items()
-                            if wf.store.get("forecast", key) is None]
-                    limit = int(prepare_limit)
-                    progress = st.progress(0.0)
-                    outcome = wf.board(todo[:limit], wf.e["current_season"](),
-                                       progress.progress) if todo else []
-                    progress.empty()
-                    st.session_state["board_last_issues"] = [
-                        x for x in outcome if x.get("Status") not in
-                        ("Frozen", "Started / historical forecast")]
-                    st.session_state["calculated_board"] = wf.board(
-                        [card for key, card in valid.items()
-                         if wf.store.get("forecast", key) is not None],
-                        wf.e["current_season"]())
-                    done = sum(wf.store.get("forecast", key) is not None for key in valid)
-                    st.success(f"Ready: {done}/{len(valid)} frozen. "
-                               f"Remaining: {len(valid)-done}. "
-                               "Run again to resume if needed.")
-                    if not wf.store.remote:
-                        st.download_button("Download prepared board backup",
-                            wf.store.export(), "sports_lab_prepared_backup.json",
-                            "application/json", key="bulk_prepare_backup")
-                except Exception as exc:
-                    st.error(f"Preparation stopped safely: {type(exc).__name__}: {exc}")
-                    st.info("Previously frozen picks remain unchanged. Download a backup before redeploying.")
-
-        platforms = st.multiselect(
-            "Platforms to calculate",
-            ["prizepicks", "kalshi", "draftkings"],
-            default=[
-                "prizepicks",
-                "kalshi",
-                "draftkings",
-            ],
-        )
-
-        # Chunked calculations: each successful forecast is frozen by Workflow.calculate.
-        # This queue resumes on the next click after a Streamlit interruption.
-        selected_rows = [row for row in rows if row.get("Platform") in platforms and row.get("Decoded")]
-        pending_cards = {identity(card): card for card in selected_rows}
-        total = len(pending_cards)
-        completed = sum(bool(wf.store.get("forecast", key)) for key in pending_cards)
-        st.caption(f"Board progress: {completed}/{total} frozen · {total-completed} remaining")
-        chunk_size = st.number_input("Picks per calculation batch", min_value=1, max_value=100, value=20, step=5,
-                                     help="Smaller batches reduce timeouts. Click again to resume; saved forecasts are reused.")
-        if st.button("Calculate / resume board (saved data first)", type="primary"):
-            unfinished = [(key, card) for key, card in pending_cards.items() if not wf.store.get("forecast", key)]
-            batch = [card for _, card in unfinished[:int(chunk_size)]]
-            if batch:
-                progress = st.progress(0.0)
-                calculated_batch = wf.board(batch, wf.e["current_season"](), progress.progress)
-                progress.empty()
-                issues = [item for item in calculated_batch if item.get("Status") not in ("Frozen", "Started / historical forecast")]
-                st.session_state["board_last_issues"] = issues
-            # Read all frozen picks without recalculating them.
-            st.session_state["calculated_board"] = wf.board(
-                [card for key, card in pending_cards.items() if wf.store.get("forecast", key)],
-                wf.e["current_season"]())
-            finished = sum(bool(wf.store.get("forecast", key)) for key in pending_cards)
-            st.success(f"Saved {finished}/{total} forecasts. " +
-                       ("Board complete." if finished == total else "Click Calculate / resume to continue."))
-        if st.session_state.get("board_last_issues"):
-            with st.expander("Unavailable picks and reasons"):
-                st.dataframe(pd.DataFrame(st.session_state["board_last_issues"]),
-                             hide_index=True, use_container_width=True)
+            preparation_panel(wf, st, rows)
+        saved_index = forecast_index(wf.store.items("forecast")) if rows else {}
+        calculated = wf.board(
+            [card for card in preparation_rows(rows)
+             if saved_prediction(saved_index, card)],
+            wf.e["current_season"]()) if rows else []
+        st.session_state["calculated_board"] = calculated
 
         calculated = st.session_state.get(
             "calculated_board",
@@ -2599,6 +2719,14 @@ def render_workflow(wf, st, rows, mode="settings"):
                 else "Awaiting finals"
             )
 
+            combined = wf.research_rows(across_platforms=True)
+            combined_decided = [r for r in combined if r["Outcome"] in ("WIN", "LOSS")]
+            combined_wins = sum(r["Outcome"] == "WIN" for r in combined_decided)
+            st.caption(f"Combined model record, identical cross-platform markets counted once: "
+                       f"{combined_wins}/{len(combined_decided)} wins. "
+                       "Platform records and actual-priced paper returns remain separate.")
+            raw_count = len(wf.store.items("forecast"))
+            st.caption(f"{raw_count - len(research)} repeated forecast records excluded from platform totals; originals retained.")
             st.metric(
                 "Directional accuracy",
                 rate,
@@ -6033,8 +6161,17 @@ class OfflineSessionStore:
     def restore(self, value):
         if value.get("format") != "sports-lab-workspace-v2":
             raise ValueError("Unsupported workspace backup")
-        for ns, key, payload, _updated in value.get("records", []):
-            self.put(ns, key, json.loads(payload))
+        checked = []
+        for entry in value.get("records", []):
+            if not isinstance(entry, list) or len(entry) != 4:
+                raise ValueError("Invalid workspace record")
+            ns, key, payload, _updated = entry
+            if not isinstance(ns, str) or not isinstance(key, str) or not isinstance(payload, str):
+                raise ValueError("Invalid workspace record")
+            checked.append((ns, key, json.loads(payload)))
+        for ns, key, payload in checked:
+            self.put(ns, key, payload, immutable=True)
+        return len(checked)
 
 # ---------------- COMPLETE NBA WORKFLOW ----------------
 
@@ -6059,10 +6196,12 @@ if _database_url and str(_database_url).strip():
         _database_online = True
     except Exception as exc:
         _db_failure = type(exc).__name__
+        _db_hint = storage_failure_hint(exc)
         print(f"SPORTS_LAB_DB_DIAGNOSTIC stage=connect exception_type={_db_failure} mode=offline_session", flush=True)
 
 if not _database_online:
     workflow_store = OfflineSessionStore()
+    st.info(globals().get("_db_hint", "Set DATABASE_URL for permanent storage and unattended preparation."))
     st.warning(
         "Neon permanent storage is unavailable. Sports Lab is running in "
         "TEMPORARY SESSION MODE: new saves, frozen picks and ROI changes "
@@ -6096,6 +6235,18 @@ def workspace_load(key):
 # It exits before the UI and never executes the paid scan.
 
 import sys
+
+if "--prepare-saved" in sys.argv:
+    if not _database_online or not workflow_store.remote:
+        raise SystemExit("Permanent database unavailable: preparation cannot run safely in a temporary session.")
+    request = workflow_store.get("preparation", "request") or {}
+    board = workflow_store.get("board", "board") or {}
+    if request.get("enabled") and request.get("day") == slate_day():
+        print(encode(prepare_saved_board(workflow, board, budget_seconds=420, max_picks=300)))
+    else:
+        print("No active preparation request for today's Pacific date. No feed or odds requests made.")
+    raise SystemExit(0)
+
 
 if "--maintenance" in sys.argv:
     if not _database_online:
@@ -6203,7 +6354,7 @@ def ui_card(card, frozen, saved=False):
     line_text = f'{line:g}' if line is not None else '—'
     is_more = direction == 'MORE'
     direction_class = 'more' if is_more else 'less' if direction == 'LESS' else 'pending'
-    direction_text = ('↑ MORE' if is_more else '↓ LESS' if direction == 'LESS' else 'Not calculated')
+    direction_text = ('↑ MORE' if is_more else '↓ LESS' if direction == 'LESS' else (workflow_store.get('calculation_status', identity(card)) or {}).get('Status', 'Queued'))
     platform = str(card.get('Platform', '')).upper()
     tier = str(card.get('Line Type', '')) if platform == 'PRIZEPICKS' else ''
     proj_text = f'{projection:.2f}' if projection is not None else '—'
@@ -6219,6 +6370,10 @@ def ui_card(card, frozen, saved=False):
       <div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
       <div class="sl-proj"><small>Experimental estimate</small><b>{prob_text}</b></div></div>
       </div>''', unsafe_allow_html=True)
+    if not result:
+        state = workflow_store.get('calculation_status', identity(card)) or {}
+        if state.get('reason'):
+            st.caption(state['reason'])
     if result and not result.get('selection_allowed', True):
         st.caption('This direction is not offered for the selected platform/tier.')
     key = identity(card)
@@ -6482,8 +6637,14 @@ def ui_detail(card, forecasts):
 
 
 def ui_board(page):
+    if page == 'Plays':
+        preparation_panel(workflow, st, st.session_state.get('v4_rows', []))
     rows = st.session_state.get('v4_rows', [])
-    forecasts = dict(workflow_store.items('forecast'))
+    forecasts = forecast_index(workflow_store.items('forecast'))
+    for card in rows:
+        frozen = saved_prediction(forecasts, card)
+        if frozen:
+            forecasts[identity(card)] = frozen
     saved = {key: value for key, value in workflow_store.items('watchlist') if value.get('active', True)}
     selected = st.session_state.get('selected_prop_card')
     if selected is not None and page != 'Saved' and not today_pregame(selected.get('Start (UTC)')):
@@ -6517,7 +6678,7 @@ def ui_board(page):
             continue
         if search.strip() and search.strip().lower() not in ui_name(card['Player']).lower():
             continue
-        unique[identity(card)] = card
+        unique.setdefault(market_signature(card), card)
     records = list(unique.values())
     if kind == 'Fantasy':
         if platform not in ('All', 'PrizePicks'):
@@ -6696,25 +6857,8 @@ if app_page == "Settings":
 # ---------------- NBA SCANNER ----------------
 
 
-try:
-    _maintenance = workflow_store.get("maintenance", "last")
-    _age = (
-        (
-            pd.Timestamp.now(tz="UTC")
-            - pd.to_datetime(_maintenance["run_at"], utc=True)
-        ).total_seconds()
-        if _maintenance
-        else float("inf")
-    )
-
-    if _age >= 900:
-        workflow.maintenance(interactive=True)
-
-except Exception:
-    st.warning(
-        "Automatic grading could not finish. Saved forecasts "
-        "remain available; retry in the workflow panel."
-    )
+# Grading runs in the scheduled worker or the explicit Results refresh control.
+# Board browsing never waits for a whole maintenance pass.
 
 if app_page in ("Results", "Settings"):
     render_workflow(workflow, st,
@@ -7445,3 +7589,30 @@ if app_page == "Settings":
 
 
 # ================= END OF APP.PY =================
+
+
+@st.fragment(run_every="4s" if st.session_state.get("_prepare_active") else None)
+def _resume_preparation_fragment():
+    if not st.session_state.get("_prepare_active"):
+        return
+    board = workflow_store.get("board", "board") or {}
+    if board.get("v4_rows") != st.session_state.get("v4_rows"):
+        board = {field: st.session_state.get(field) for field in BOARD_FIELDS}
+        workflow_store.put("board", "board", board)
+    try:
+        report = prepare_saved_board(workflow, board, budget_seconds=15, max_picks=5)
+    except Exception as error:
+        st.session_state['_prepare_active'] = False
+        st.error(storage_failure_hint(error))
+        st.info('Preparation paused. Existing forecasts remain saved; export a workspace backup before restarting.')
+        return
+    st.caption(f"Preparation: {report['ready']}/{report['total']} ready · "
+               f"{report['pending']} queued · {report['unavailable']} unavailable")
+    if report['state'] == 'complete':
+        st.session_state['_prepare_active'] = False
+        st.rerun()
+    # Refresh cards after successful work, without requiring another user click.
+    if report['attempted']:
+        st.rerun()
+
+_resume_preparation_fragment()
