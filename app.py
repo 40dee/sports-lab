@@ -2940,6 +2940,36 @@ st.set_page_config(
     layout="wide",
 )
 
+# Keep native controls readable even when the browser selected a light theme.
+st.markdown("""<style id="sports-lab-readable-controls">
+[data-testid="stHeader"] {background:#07121f !important;color:#f3f8ff !important;}
+[data-testid="stToolbar"] button, [data-testid="stMainMenu"] button {
+ color:#f3f8ff !important;background:#142536 !important;}
+.stApp [data-testid="stAlertContainer"], .stApp [data-testid="stAlert"] {
+ background:#15283a !important;color:#f3f8ff !important;border-radius:12px;}
+.stApp [data-testid="stAlertContainer"] p,
+.stApp [data-testid="stAlertContainer"] li,
+.stApp [data-testid="stAlertContainer"] span,
+.stApp [data-testid="stAlert"] p,
+.stApp [data-testid="stAlert"] a {color:#f3f8ff !important;}
+.stApp [data-testid="stDownloadButton"] button,
+.stApp [data-testid="stButton"] button,
+.stApp [data-testid="stFormSubmitButton"] button {
+ background:#142536 !important;color:#f3f8ff !important;border:1px solid #63829c !important;}
+.stApp [data-testid="stDownloadButton"] button p,
+.stApp [data-testid="stButton"] button p {color:inherit !important;}
+.stApp button:disabled {opacity:.55;}
+.stApp [data-testid="stTextInput"] input,
+.stApp [data-testid="stNumberInput"] input,
+.stApp [data-testid="stTextArea"] textarea,
+.stApp [data-baseweb="select"] > div {
+ background:#142536 !important;color:#f3f8ff !important;}
+.stApp input::placeholder, .stApp textarea::placeholder {color:#b6c7d7 !important;}
+.stApp [data-testid="stExpander"] details,
+.stApp [data-testid="stFileUploaderDropzone"] {
+ background:#102234 !important;color:#f3f8ff !important;}
+</style>""", unsafe_allow_html=True)
+
 BASE = "https://api.oddspapi.io/v4"
 BOOKS = ("prizepicks", "kalshi", "draftkings")
 
