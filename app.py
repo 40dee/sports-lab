@@ -2579,7 +2579,12 @@ def preparation_panel(wf, st, rows):
     if auto:
         st.caption(f"Automatic worker last run (UTC): {auto.get('last_run', 'Import started')} · Odds request reservations: {auto.get('odds_requests', 0)}/34 · Tier feed: {auto.get('feed_requests', 0)}/10")
         if auto.get('feed_partial'):
-            st.warning('PrizePicks tier/Fantasy download is incomplete. Scheduled runs continue it within the daily request budget; ready counts cover saved lines only.')
+            if auto.get('feed_requests', 0) >= 10:
+                st.warning('PrizePicks download is incomplete and the app’s daily 10-request cap is reached. Automatic downloads cannot continue today under this cap. Saved props can still calculate; missing lines are not included in the ready count.')
+            else:
+                st.warning('PrizePicks download is incomplete. The background worker can continue saved pagination within the remaining daily request budget. Ready counts cover saved lines only.')
+        if auto.get('fantasy_partial'):
+            st.caption('Fantasy Score feed is incomplete or unavailable; a complete prop count does not confirm Fantasy coverage.')
         for issue in auto.get('errors', []):
             st.warning(issue)
     if not wf.store.remote:
@@ -6630,7 +6635,7 @@ def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, refere
     cursor = state.get('next_cursor') if continuing else None
     seen = set(state.get('seen_cursors', []))
     requests_made = 0
-    for _ in range(min(2, max(1, int(max_pages)))):
+    for _ in range(min(10, max(0, int(max_pages)))):
         params = dict(filters)
         if cursor:
             params['cursor'] = cursor
@@ -6712,15 +6717,22 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
                         decoded.extend(rows); summaries.extend(summary)
                         successful.add(str(game['fixtureId']))
                 except Exception as error:
-                    errors.append(type(error).__name__ + ': fixture import unavailable')
+                    # api_get produces credential-free messages. Never display arbitrary exceptions.
+                    import re
+                    message = str(error)
+                    safe = message if re.fullmatch(r'OddsPAPI /[a-z]+: HTTP [0-9]{3}\.', message) or message in (
+                        'Unable to connect to OddsPAPI.', 'OddsPAPI returned invalid JSON.',
+                        'Daily odds_requests budget exhausted; saved board preserved') else type(error).__name__ + ': fixture import unavailable'
+                    errors.append('Fixture ' + str(game['fixtureId']) + ': ' + safe)
             ledger['games_imported'] = len(successful)
             ledger['games_found'] = len(games)
             board['v4_rows'] = merge_scan_rows(board.get('v4_rows', []), decoded, successful)
             board.update(v4_summary=summaries, v4_errors=errors, v4_scan_at=now())
             wf.store.put('board', 'board', board)
-    # Continue a paginated tier/Fantasy download on later worker runs; never fetch without a key.
+    # Give Fantasy its own filtered cursor so it cannot sit behind thousands
+    # of ordinary props. Both feeds share the SAME existing daily call cap.
     key = setting('PRIZEPICKS_API_KEY', '')
-    if key and preparation_rows(board.get('v4_rows', [])) and ledger.get('feed_requests', 0) < 10 and (refresh or ledger.get('feed_partial', True)):
+    if key and preparation_rows(board.get('v4_rows', [])):
         def fetch_page(params):
             reserve('feed_requests', 10)
             response = requests.get('https://prizepicksapi.com/api/v1/projections',
@@ -6728,15 +6740,38 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
             if response.status_code != 200:
                 raise ValueError('PrizePicks feed unavailable')
             return response.json()
-        try:
-            payload, calls = pp_download_pages(wf.store, 'pp_tiers_v1', fetch_page,
-                {'league': 'NBA', 'status': 'active', 'limit': 200}, max_pages=min(10, 10-ledger.get('feed_requests', 0)), continuation_seconds=86400)
-            merged, count = pp_merge_tiers(board.get('v4_rows', []), payload.get('items', []), payload['fetched_at'])
-            board['v4_rows'] = merged
-            wf.store.put('board', 'board', board)
-            ledger['feed_partial'] = payload.get('partial', False)
-        except Exception as error:
-            errors.append(type(error).__name__ + ': tier feed unavailable; saved lines retained')
+        base_filters = {'league': 'NBA', 'status': 'active', 'limit': 200}
+        feeds = [('pp_fantasy_v3', dict(base_filters, stat='Fantasy Score'), 'fantasy_partial', 2),
+                 ('pp_tiers_v1', base_filters, 'feed_partial', 10)]
+        downloaded = {}
+        observed_at = None
+        for cache_key, filters, flag, allowance in feeds:
+            saved_feed = wf.store.get('source', cache_key) or {}
+            same_day = saved_feed.get('slate_day') == day and saved_feed.get('filters') == filters
+            needs_download = not same_day or saved_feed.get('partial', True) or refresh
+            remaining = 10 - ledger.get('feed_requests', 0)
+            if needs_download and remaining > 0:
+                try:
+                    saved_feed, calls = pp_download_pages(wf.store, cache_key, fetch_page,
+                        filters, max_pages=min(allowance, remaining), continuation_seconds=86400)
+                except Exception as error:
+                    errors.append(type(error).__name__ + ': ' + ('Fantasy Score' if flag == 'fantasy_partial' else 'tier') + ' feed unavailable; saved pages retained')
+                    saved_feed = wf.store.get('source', cache_key) or saved_feed
+            ledger[flag] = not (saved_feed.get('slate_day') == day and not saved_feed.get('partial', True))
+            # Even when the budget is exhausted, reprocess saved pages so a
+            # prior interruption cannot leave already-downloaded lines hidden.
+            if saved_feed.get('slate_day') == day and saved_feed.get('items'):
+                for item in saved_feed['items']:
+                    if isinstance(item, dict) and item.get('id'):
+                        downloaded[str(item['id'])] = item
+                observed_at = saved_feed.get('fetched_at') or observed_at
+        if downloaded:
+            try:
+                merged, count = pp_merge_tiers(board.get('v4_rows', []), list(downloaded.values()), observed_at)
+                board['v4_rows'] = merged
+            except (ValueError, TypeError, KeyError):
+                errors.append('Saved PrizePicks pages could not be matched to upcoming games; existing board retained.')
+        wf.store.put('board', 'board', board)
     report = prepare_saved_board(wf, board, budget_seconds=budget_seconds, max_picks=10000)
     ledger.update(last_run=now(), errors=errors, preparation=report)
     wf.store.put('automation', day, ledger)
