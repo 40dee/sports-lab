@@ -589,6 +589,23 @@ def completed_actual(summary, player_id, columns):
     )
 
 
+def espn_injury_player_id(athlete):
+    """ESPN injuries may expose identity only in official player links."""
+    import re
+    from urllib.parse import urlparse
+    if athlete.get('id') is not None:
+        return str(athlete['id'])
+    ids = set()
+    for link in athlete.get('links') or []:
+        parsed = urlparse(str(link.get('href') or ''))
+        if parsed.hostname not in ('espn.com', 'www.espn.com'):
+            continue
+        match = re.search(r'/nba/player/(?:[^/]+/)*id/(\d+)(?:/|$)', parsed.path)
+        if match:
+            ids.add(match.group(1))
+    return next(iter(ids)) if len(ids) == 1 else None
+
+
 class Workflow:
     def __init__(self, engine, store):
         self.e = engine
@@ -734,15 +751,16 @@ class Workflow:
 
             for group in data["injuries"]:
                 for injury in group.get("injuries", []):
-                    returned_id = (
-                        injury.get("athlete", {}).get("id")
-                    )
+                    if str(group.get('id')) != str(team_id):
+                        continue
+                    returned_id = espn_injury_player_id(injury.get('athlete') or {})
 
-                    if str(returned_id) == str(player_id):
+                    if returned_id == str(player_id):
                         entries.append(injury)
 
             return {
                 "entries": entries,
+                "identity_parser": 2,
                 "checked_at": now(),
                 "fetched_at": self.e[
                     "cached_response_time"
@@ -961,6 +979,8 @@ class Workflow:
                 "playing status is unverified."
             )
 
+        elif not availability["entries"]:
+            result["warnings"].append('No matching injury entry returned; this does not confirm playing or starting.')
         elif availability["entries"]:
             statuses = ", ".join(
                 str(entry.get("status", "Unknown"))
@@ -2551,7 +2571,7 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
     wf.player = lambda c: reuse(player_cache, (c.get('Game'), c.get('Player')), lambda: original_player(c))
     wf.event_for = lambda c: reuse(event_cache, (c.get('Game'), c.get('Start (UTC)')), lambda: original_event(c))
     if original_availability is not None:
-        wf.availability = lambda *args: reuse(availability_cache, args, lambda: original_availability(*args))
+        wf.availability = lambda *args: reuse(availability_cache, (int(clock() // 60), args), lambda: original_availability(*args))
     for name in ('load_team_advanced', 'load_position_defense', 'engine_position', 'engine_game_context'):
         if name in engine:
             function = engine[name]
@@ -7258,6 +7278,11 @@ def ui_board(page):
         frozen = saved_prediction(forecasts, card)
         if frozen:
             forecasts[identity(card)] = frozen
+    if page == 'Plays' and any(
+        today_pregame(f.get('card', {}).get('Start (UTC)'))
+        and f.get('result', {}).get('availability', {}).get('identity_parser') != 2
+        for f in forecasts.values()):
+        st.warning('Some saved picks predate the injury-matching repair. Their original projections are preserved; recheck player availability before using them.')
     saved = {key: value for key, value in workflow_store.items('watchlist') if value.get('active', True)}
     selected = st.session_state.get('selected_prop_card')
     if selected is not None and page != 'Saved' and not today_pregame(selected.get('Start (UTC)')):
