@@ -2418,13 +2418,13 @@ class TursoStore(Store):
     """Remote libSQL store, retaining the same immutable records and backup format."""
     def __init__(self, url, token):
         from urllib.parse import urlparse
-        parsed = urlparse(str(url).replace('libsql://', 'https://', 1))
+        parsed = urlparse(str(url).strip().replace('libsql://', 'https://', 1))
         if parsed.scheme != 'https' or not parsed.hostname or not parsed.hostname.endswith('.turso.io') or parsed.username or parsed.password or parsed.query:
             raise ValueError('Invalid Turso database URL')
         if not token:
             raise ValueError('Turso authentication token missing')
         self.endpoint = 'https://' + parsed.netloc + '/v2/pipeline'
-        self.token = token
+        self.token = str(token).strip()
         self.remote = True
         self._read_cache = st.session_state.setdefault('_turso_read_cache_v1', {})
         self.query('CREATE TABLE IF NOT EXISTS sports_records (namespace TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(namespace,key))')
@@ -2448,14 +2448,20 @@ class TursoStore(Store):
             response = requests.post(self.endpoint, headers={'Authorization': 'Bearer ' + self.token},
                 json={'requests': [{'type': 'execute', 'stmt': {'sql': sql, 'args': [argument(v) for v in values], 'want_rows': fetch}}, {'type': 'close'}]}, timeout=30)
             if response.status_code != 200:
-                raise ValueError('Database HTTP failure')
+                raise RuntimeError(f'Turso returned HTTP {response.status_code}. Check the database token and its permissions.' )
             item = response.json()['results'][0]
             if item.get('type') != 'ok' or item.get('response', {}).get('type') != 'execute':
-                raise ValueError('Database query rejected')
+                raise RuntimeError('Turso rejected the database statement. Confirm the token has read and write permission.')
             rows = item['response']['result'].get('rows', [])
             return [[cell.get('value') for cell in row] for row in rows] if fetch else None
+        except RuntimeError as error:
+            if str(error).startswith(('Turso returned HTTP ', 'Turso rejected the database statement.')):
+                raise
+            raise RuntimeError('Turso connection failed. Saved remote records are unchanged.') from None
+        except requests.Timeout:
+            raise RuntimeError('Turso connection timed out. Saved remote records are unchanged.') from None
         except Exception:
-            raise RuntimeError('Turso query failed; saved records were not replaced with temporary data.') from None
+            raise RuntimeError('Turso connection or response failed. Check the database URL. Saved remote records are unchanged.') from None
 
 
 def preparation_rows(rows):
@@ -6328,7 +6334,7 @@ _database_url = (
     or setting("DATABASE_URL", "")
 )
 
-# Neon is the only permanent store. When it is unreachable, the UI remains
+# Prefer Turso when configured; otherwise use PostgreSQL. The UI remains
 # available with an explicitly temporary browser-session workspace.
 _database_online = False
 _db_failure = None
@@ -6340,12 +6346,15 @@ if _turso_url or (_database_url and str(_database_url).strip()):
         _database_online = True
     except Exception as exc:
         _db_failure = type(exc).__name__
-        _db_hint = storage_failure_hint(exc)
+        _db_hint = str(exc) if _turso_url and type(exc) in (RuntimeError, ValueError) else storage_failure_hint(exc)
         print(f"SPORTS_LAB_DB_DIAGNOSTIC stage=connect exception_type={_db_failure} mode=offline_session", flush=True)
 
 if not _database_online:
     workflow_store = OfflineSessionStore()
-    st.info(globals().get("_db_hint", "Set DATABASE_URL for permanent storage and unattended preparation."))
+    st.info(globals().get("_db_hint", "Add top-level TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in Streamlit Secrets for permanent storage."))
+    st.caption('Storage configuration detected: Turso URL ' + ('present' if _turso_url else 'missing') +
+               ' · Turso token ' + ('present' if _turso_token else 'missing') +
+               ' · Attempted provider: ' + ('Turso' if _turso_url else 'PostgreSQL' if _database_url else 'none'))
     st.warning(
         "Permanent storage is unavailable. Sports Lab is running in "
         "TEMPORARY SESSION MODE: new saves, frozen picks and ROI changes "
