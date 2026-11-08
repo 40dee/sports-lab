@@ -2480,6 +2480,39 @@ def preparation_rows(rows):
     return list(unique.values())
 
 
+def calculation_failure_details(error):
+    """Keep known app errors and code location; never save arbitrary URLs/keys."""
+    import traceback
+    known = {
+        'No unique ESPN fixture matches the teams and start time.',
+        'Matchup team identities are unavailable.',
+        'Player does not uniquely match a current matchup roster.',
+        'Player is listed out or suspended; no playable projection.',
+        'Fixture is no longer pregame.',
+        'Fixture is no longer pregame; no new record saved.',
+        'New projections require a future fixture start time.',
+        'Choose the current season for a pregame projection.',
+        "This market's scoring is not mapped yet.",
+        'A verified positive prop line is required.',
+        'At least 3 current-season appearances are needed.',
+        'No regular-season appearances returned for these two seasons.',
+        'Incomplete player game-log row.',
+        'Unknown home/away marker.',
+        'Depth-chart team did not match.',
+        'Depth-chart season did not match.',
+    }
+    for field in ('prop line', 'projection', 'line', 'gap', 'minutes'):
+        known.add('Missing or invalid ' + field + '; forecast not saved.')
+    message = str(error)
+    reason = message if isinstance(error, ValueError) and message in known else (
+        type(error).__name__ + ': calculation failed; code location recorded for diagnosis.')
+    frames = traceback.extract_tb(error.__traceback__) if error.__traceback__ else []
+    local = [frame for frame in frames if frame.filename.endswith('app.py')]
+    frame = local[-1] if local else None
+    return {'reason': reason, 'error_type': type(error).__name__,
+            'location': (frame.name + ':' + str(frame.lineno)) if frame else 'Unavailable'}
+
+
 def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.monotonic):
     """Bounded resumable saved-data work. Never calls an odds/feed refresh."""
     import copy
@@ -2546,9 +2579,11 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
                 wf._preparation_existing.append((frozen['id'], frozen))
                 state = {'Status': 'Ready', 'updated_at': now()}
             except Exception as error:
-                # Exception messages can contain URLs; keep operational details in logs.
-                print('SPORTS_LAB_PREP_ERROR', key, type(error).__name__, flush=True)
-                state = {'Status': 'Unavailable', 'reason': type(error).__name__ + ': calculation could not complete; see app logs.',
+                details = calculation_failure_details(error)
+                print('SPORTS_LAB_PREP_ERROR', str(card.get('Player')), details['reason'], details['location'], flush=True)
+                state = {'Status': 'Unavailable', **details,
+                         'Player': card.get('Player'), 'Stat': card.get('Stat'),
+                         'Platform': card.get('Platform'),
                          'updated_at': now(), 'retry_at': (pd.Timestamp.now(tz='UTC') + pd.Timedelta(minutes=15)).isoformat()}
             states[key] = state
             wf.store.put('calculation_status', key, state)
@@ -2596,6 +2631,23 @@ def preparation_panel(wf, st, rows):
     last = wf.store.get('preparation', 'last') or {}
     if last.get('unavailable'):
         st.caption(f"Last batch: {last['unavailable']} unavailable; retried after 15 minutes while preparation is active.")
+    with st.expander('Unavailable props — failure reasons'):
+        failures = []
+        statuses = dict(wf.store.items('calculation_status'))
+        for card in current:
+            state = statuses.get(identity(card)) or {}
+            if state.get('Status') == 'Unavailable' and not saved_prediction(index, card):
+                failures.append({'Player': card.get('Player'), 'Prop': card.get('Stat'),
+                    'Platform': card.get('Platform'), 'Line': card.get('Line'),
+                    'Reason': state.get('reason'), 'Code location': state.get('location', 'Awaiting diagnostic retry'),
+                    'Checked (UTC)': state.get('updated_at')})
+        if failures:
+            st.dataframe(pd.DataFrame(failures), hide_index=True, use_container_width=True)
+            st.download_button('Download calculation failures CSV',
+                data=pd.DataFrame(failures).to_csv(index=False), file_name='calculation_failures.csv', mime='text/csv')
+            st.caption('Older generic errors gain a specific reason on the next scheduled retry. This panel makes no provider requests.')
+        else:
+            st.caption('No failed calculations recorded for the current upcoming board.')
     if not current:
         st.info("No upcoming lines saved for today's Pacific date. The automatic worker must import today's slate first. Restoring an older board cannot supply today's lines.")
     if st.button("Prepare today's board", type='primary', disabled=not current, key='prepare_one_action'):
