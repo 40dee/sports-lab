@@ -7,7 +7,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '0 16,22 * * *'
+    - cron: '0 14,22 * * *'
     - cron: '15,45 * * * *'
 permissions:
   contents: read
@@ -17,14 +17,14 @@ concurrency:
 jobs:
   board:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
     env:
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       PRIZEPICKS_API_KEY: ${{ secrets.PRIZEPICKS_API_KEY }}
-      REFRESH: ${{ (github.event_name == 'workflow_dispatch' && inputs.refresh) || github.event.schedule == '0 16,22 * * *' }}
+      REFRESH: ${{ (github.event_name == 'workflow_dispatch' && inputs.refresh) || github.event.schedule == '0 14,22 * * *' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
