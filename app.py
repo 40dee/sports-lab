@@ -151,6 +151,13 @@ class Store:
         value,
         immutable=False,
     ):
+        # Immutable source snapshots are often shared by hundreds of props.
+        # A successful earlier read/write proves this insert is unnecessary.
+        if immutable and self._read_cache is not None:
+            cached = self._read_cache.get(("get", namespace, key))
+            listed = self._read_cache.get(("items", namespace, None))
+            if (cached is not None and cached[1] is not None) or (listed is not None and key in dict(listed[1])):
+                return
         suffix = (
             "DO NOTHING"
             if immutable
@@ -2425,6 +2432,7 @@ class TursoStore(Store):
             raise ValueError('Turso authentication token missing')
         self.endpoint = 'https://' + parsed.netloc + '/v2/pipeline'
         self.token = str(token).strip()
+        self.http = requests.Session()
         self.remote = True
         self._read_cache = st.session_state.setdefault('_turso_read_cache_v1', {})
         self.query('CREATE TABLE IF NOT EXISTS sports_records (namespace TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(namespace,key))')
@@ -2445,7 +2453,7 @@ class TursoStore(Store):
             if isinstance(value, float): return {'type': 'float', 'value': value}
             return {'type': 'text', 'value': str(value)}
         try:
-            response = requests.post(self.endpoint, headers={'Authorization': 'Bearer ' + self.token},
+            response = getattr(self, 'http', requests).post(self.endpoint, headers={'Authorization': 'Bearer ' + self.token},
                 json={'requests': [{'type': 'execute', 'stmt': {'sql': sql, 'args': [argument(v) for v in values], 'want_rows': fetch}}, {'type': 'close'}]}, timeout=30)
             if response.status_code != 200:
                 raise RuntimeError(f'Turso returned HTTP {response.status_code}. Check the database token and its permissions.' )
@@ -2482,6 +2490,10 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
     previous_snapshot = getattr(wf, '_preparation_existing', None)
     wf._preparation_existing = list(snapshot)
     states = dict(wf.store.items('calculation_status'))
+    # Warm small namespaces once, including absent keys, instead of a remote
+    # lookup for every new forecast or every prop with the initial model.
+    wf.store.items('paper_forecast')
+    wf.store.items('model')
     began = clock()
     report = {'run_at': now(), 'state': 'running', 'total': len(rows),
               'ready': sum(bool(saved_prediction(index, c)) for c in rows),
@@ -2491,7 +2503,8 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
     engine = wf.e
     wf.e = dict(engine)
     original_player, original_event = wf.player, wf.event_for
-    player_cache, event_cache, history_cache = {}, {}, {}
+    original_availability = getattr(wf, 'availability', None)
+    player_cache, event_cache, history_cache, availability_cache, shared_cache = {}, {}, {}, {}, {}
     def reuse(cache, key, call):
         if key not in cache:
             try:
@@ -2504,6 +2517,13 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
         return copy.deepcopy(value)
     wf.player = lambda c: reuse(player_cache, (c.get('Game'), c.get('Player')), lambda: original_player(c))
     wf.event_for = lambda c: reuse(event_cache, (c.get('Game'), c.get('Start (UTC)')), lambda: original_event(c))
+    if original_availability is not None:
+        wf.availability = lambda *args: reuse(availability_cache, args, lambda: original_availability(*args))
+    for name in ('load_team_advanced', 'load_position_defense', 'engine_position', 'engine_game_context'):
+        if name in engine:
+            function = engine[name]
+            wf.e[name] = lambda *args, _fn=function, _name=name: reuse(
+                shared_cache, (_name, encode(args)), lambda: _fn(*args))
     history = engine['fetch_player_history']
     wf.e['fetch_player_history'] = lambda *args: reuse(history_cache, args, lambda: history(*args))
     try:
@@ -2519,9 +2539,7 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
             if not today_pregame(card.get('Start (UTC)')):
                 continue
             state = {'Status': 'Calculating', 'updated_at': now(), 'Player': card.get('Player')}
-            wf.store.put('calculation_status', key, state)
             report['current'] = str(card.get('Player')) + ' · ' + str(card.get('Stat'))
-            wf.store.put('preparation', 'last', report)
             try:
                 frozen = wf.calculate(card, engine['current_season']())
                 index[key] = index[market_signature(card)] = frozen
@@ -2535,10 +2553,13 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
             states[key] = state
             wf.store.put('calculation_status', key, state)
             report['attempted'] += 1
-            report['ready'] = sum(bool(saved_prediction(index, c)) for c in rows)
-            wf.store.put('preparation', 'last', report)
+            if report['attempted'] % 25 == 0:
+                report['ready'] = sum(bool(saved_prediction(index, c)) for c in rows)
+                wf.store.put('preparation', 'last', report)
     finally:
         wf.player, wf.event_for, wf.e = original_player, original_event, engine
+        if original_availability is not None:
+            wf.availability = original_availability
         wf._preparation_existing = previous_snapshot
     report['ready'] = sum(bool(saved_prediction(index, c)) for c in rows)
     report['unavailable'] = sum(not saved_prediction(index, c) and
@@ -6661,7 +6682,7 @@ def pp_cached_combined():
 import sys
 
 
-def automatic_board_run(wf, refresh=True, budget_seconds=420):
+def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     if not wf.store.remote:
         raise RuntimeError('Permanent database required for automatic preparation')
     day = slate_day()
@@ -6709,7 +6730,7 @@ def automatic_board_run(wf, refresh=True, budget_seconds=420):
             return response.json()
         try:
             payload, calls = pp_download_pages(wf.store, 'pp_tiers_v1', fetch_page,
-                {'league': 'NBA', 'status': 'active', 'limit': 200}, max_pages=min(2, 10-ledger.get('feed_requests', 0)), continuation_seconds=86400)
+                {'league': 'NBA', 'status': 'active', 'limit': 200}, max_pages=min(10, 10-ledger.get('feed_requests', 0)), continuation_seconds=86400)
             merged, count = pp_merge_tiers(board.get('v4_rows', []), payload.get('items', []), payload['fetched_at'])
             board['v4_rows'] = merged
             wf.store.put('board', 'board', board)
@@ -7143,8 +7164,7 @@ def ui_detail(card, forecasts):
 
 
 def ui_board(page):
-    if page == 'Plays':
-        preparation_panel(workflow, st, st.session_state.get('v4_rows', []))
+    # Browsing renders saved forecasts only; worker controls live in Settings.
     rows = st.session_state.get('v4_rows', [])
     forecasts = forecast_index(workflow_store.items('forecast'))
     for card in rows:
@@ -7829,7 +7849,7 @@ if app_page == "Settings":
 
 @st.fragment(run_every="4s" if st.session_state.get("_prepare_active") else None)
 def _resume_preparation_fragment():
-    if not st.session_state.get("_prepare_active"):
+    if not st.session_state.get("_prepare_active") or st.session_state.get('sports_lab_page') != 'Settings':
         return
     board = workflow_store.get("board", "board") or {}
     if board.get("v4_rows") != st.session_state.get("v4_rows"):
