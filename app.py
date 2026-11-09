@@ -8634,8 +8634,11 @@ if '--auto-board' in sys.argv:
                 raise SystemExit(0)
             minutes=(starts[0]-current).total_seconds()/60
             ledger=workflow_store.get('automation',today) or {}
-            # A half-hour scheduler tick gives a 30-60 minute pregame window.
-            explicit_refresh=30 <= minutes <= 60 and not ledger.get('refreshes')
+            # A delayed GitHub tick must not miss the slate. Bootstrap on the
+            # first tick within 60 minutes of the next upcoming tipoff, even
+            # if the ideal 30-minute lead has already passed. Never re-bootstrap
+            # a slate that already completed its daily import.
+            explicit_refresh=0 < minutes <= 60 and not ledger.get('refreshes')
         report = automatic_board_run(workflow, refresh=explicit_refresh)
         print(encode(report))
         coverage = report.get('coverage') or {}
