@@ -17,7 +17,7 @@ tree=ast.parse(SOURCE.read_text())
 names={'Store','now','json_safe','encode','identity','utc_timestamp','slate_day','today_pregame',
  'odds_cache_key','odds_daily_cap','reserve_odds_request','api_get','odds_fixture_params',
  'line_freshness','odds_refresh_plan','player_health_key','merge_scan_rows','decode_game',
- 'numeric_line','outcome_direction','explicit_tier'}
+ 'numeric_line','outcome_direction','explicit_tier','automatic_board_run'}
 env=dict(globals(),st=SimpleNamespace(session_state={}),SLATE_TIMEZONE='America/Los_Angeles',
          BASE='https://odds.invalid',BOOKS=['prizepicks'],re=__import__('re'))
 exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,(ast.FunctionDef,ast.ClassDef)) and n.name in names],type_ignores=[]),str(SOURCE),'exec'),env)
@@ -139,6 +139,29 @@ class FreshnessTests(unittest.TestCase):
       'Odds checked (UTC)':'2026-11-09T20:45:00Z' if i<3 else '2026-11-09T19:00:00Z'}) for i in range(6)]
   plan=env['odds_refresh_plan']({'v4_rows':cards},{},{},{},self.REF)
   self.assertEqual([p['fixture'] for p in plan],['3','4','5'])
+ def test_existing_board_bootstraps_shared_metadata_without_full_refresh(self):
+  from test_combo_regression import Memory
+  saved=dict(env)
+  try:
+   store=Memory();store.remote=True
+   day=env['slate_day']();current=env['now']()
+   store.put('board','board',{'v4_rows':[{'Fixture ID':'f1','Start (UTC)':'valid'}]})
+   store.put('automation',day,{'refreshes':1,'feed_requests':0,'odds_requests':11})
+   store.put('input_health','latest',{'checked_at':current})
+   calls=[]
+   def discovery():
+    calls.append('schedule');store.put('odds_fixture','f1',{'fixtureId':'f1','startTime':'valid'})
+    return [{'fixtureId':'f1','startTime':'valid'}]
+   env.update(feed_request_cap=lambda:10,setting=lambda *_:'',today_pregame=lambda value,*_:value=='valid',
+       upcoming_nba=discovery,refresh_board_health=lambda *_:{},
+       refresh_saved_game_lines=lambda wf,board,*_:(board,[]),
+       prepare_saved_board=lambda *_args,**_kw:{},update_combos=lambda *_args,**_kw:{},
+       board_coverage=lambda *_:{})
+   env['automatic_board_run'](SimpleNamespace(store=store),refresh=False)
+   self.assertEqual(calls,['schedule'])
+   self.assertIsNotNone(store.get('odds_fixture','f1'))
+  finally:
+   env.clear();env.update(saved)
  def test_workflow_turso_and_daily_guard_configuration(self):
   root=SOURCE.parent/'.github/workflows'
   audit=(root/'sports_lab_audit_schedule.yml').read_text()

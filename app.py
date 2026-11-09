@@ -8104,7 +8104,9 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
             board.update(v4_summary=summaries, v4_errors=errors, v4_scan_at=now())
             wf.store.put('board', 'board', board)
     known=wf.store.items('odds_fixture')
-    if refresh and not any(today_pregame(game.get('startTime')) for _,game in known):
+    has_upcoming_board=any(today_pregame(c.get('Start (UTC)')) for c in board.get('v4_rows') or [])
+    has_shared_metadata=any(today_pregame(game.get('startTime')) for _,game in known)
+    if not has_shared_metadata and (refresh or has_upcoming_board):
         try:
             upcoming_nba()
             known=wf.store.items('odds_fixture')
