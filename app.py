@@ -4218,24 +4218,36 @@ def batch_fixture_objects(payload):
     return items
 
 
+def batch_verified_games(wf, reference=None):
+    games=[]
+    for _,game in wf.store.items('odds_fixture'):
+        if not game.get('tournamentId') or not today_pregame(game.get('startTime'),reference):continue
+        card={'Game':str(game.get('participant1Name',''))+' vs '+str(game.get('participant2Name','')),
+              'Start (UTC)':game['startTime']}
+        try:
+            event,_=wf.event_for(card)
+            if event.get('id') and (event.get('status') or {}).get('type',{}).get('state')=='pre':games.append(game)
+        except (ValueError,KeyError,TypeError):continue
+    return games
+
+
 def probe_batch_odds(wf):
     """At most one guarded PrizePicks league probe per account/month."""
     account=odds_account_snapshot(wf.store,force=True)
     monthly=odds_monthly_budget(wf.store,account)
     report={'quota':{k:monthly[k] for k in ('limit','used','remaining','daily_cap','reset_at')},'checked_at':now()}
-    games=[g for _,g in wf.store.items('odds_fixture') if g.get('tournamentId') and str(g.get('sportId'))=='11']
+    games=batch_verified_games(wf)
     if not games:
-        report['batch']='No saved NBA league ID; no paid probe made.';return report
-    # All fixtures saved by the NBA-only scanner. Require one unique league.
+        report['batch']='No saved upcoming fixtures matched the ESPN NBA schedule; no paid probe made.';return report
     tournaments={str(g['tournamentId']) for g in games}
-    if len(tournaments)!=1:
-        report['batch']='Ambiguous saved league ID; no paid probe made.';return report
+    if len(tournaments)>3:
+        report['batch']='More than three verified league IDs; no paid probe made.';return report
     marker='batch-probe:'+account['month']+':'+account['credential'][:16]
     inserted=wf.store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING RETURNING key',
         ('odds_status',marker,encode({'attempted_at':now()}),now()),fetch=True)
     if not inserted:
         report['batch']=wf.store.get('odds_status',marker);return report
-    result={'attempted_at':now(),'bookmaker':'prizepicks','tournament':next(iter(tournaments))}
+    result={'attempted_at':now(),'bookmaker':'prizepicks','tournament':','.join(sorted(tournaments))}
     try:
         params={'tournamentIds':result['tournament'],'bookmaker':'prizepicks','language':'en','verbosity':3}
         payload=api_get('/odds-by-tournaments',params)
@@ -4484,6 +4496,7 @@ def odds_usage_panel(store,st):
         try:
             monthly=odds_monthly_budget(store,account)
             st.info(f"OddsPAPI: {monthly['remaining']} requests left under your monthly limit · paced to {monthly['daily_cap']} per day · resets {monthly['reset_at'][:10]} (UTC).")
+            cap=min(cap,monthly['daily_cap'])
             st.caption('Usage checked '+monthly['checked_at']+'. Local reservations may conservatively exceed provider usage. Other applications using this key can spend requests between checks.')
         except ValueError as error:st.info(str(error))
     else:st.info('Monthly allowance has not been checked. Paid downloads wait for a successful account check.')
