@@ -7412,10 +7412,12 @@ def ui_recent_chart(card, history):
         st.info('The comparison line is unavailable.')
         return
     st.markdown('#### ' + ui_stat(card) + ' · ' + direction + f' {line:g}')
-    window = st.radio('Window', ['L5','L10','L15','L20','Season','H2H'], index=2,
-                      horizontal=True, key='single_chart_window_' + identity(card))
-    location = st.radio('Location', ['All','Home','Away'], horizontal=True,
-                       key='single_chart_location_' + identity(card))
+    window = st.segmented_control('Window', ['L5','L10','L15','L20','Season','H2H'],
+                                  default='L15', key='chart_window_buttons_' + identity(card),
+                                  width='stretch') or 'L15'
+    location = st.segmented_control('Location', ['All','Home','Away'], default='All',
+                                    key='chart_location_buttons_' + identity(card),
+                                    width='stretch') or 'All'
     opponent_id = None
     if window == 'H2H':
         teams = espn_teams()
@@ -7546,11 +7548,27 @@ def ui_detail(card, forecasts):
             refreshed = st.session_state.get('detail_context_' + identity(card))
             if refreshed is not None:
                 st.caption('Refreshed display context; the original forecast is retained.')
-            render_game_context(refreshed if refreshed is not None else context)
+            shown = refreshed if refreshed is not None else context
+            if shown.get('available'):
+                total = ui_number(shown.get('total'))
+                columns = st.columns(2)
+                columns[0].metric('Game total', f'{total:g}' if total is not None else '—')
+                columns[1].metric('Market favorite', str(shown.get('favorite') or 'Unavailable'))
+                game_win = shown.get('moneyline_no_vig')
+                if game_win:
+                    st.caption(f"Game-win market: {shown.get('home', 'Home')} {game_win['home']:.1%} · "
+                               f"{shown.get('away', 'Away')} {game_win['away']:.1%}. These are game-win estimates, not player-prop probabilities.")
+                st.caption('Game context source: ' + str(shown.get('source') or 'Unavailable') +
+                           ' · fetched (UTC): ' + str(shown.get('fetched_at') or 'Unavailable'))
+            else:
+                st.caption(str(shown.get('reason') or 'Game market context unavailable.'))
         else:
             render_card_history(card)
             history = ui_history(card)
             ui_frozen_sources(result)
+        # One shared chart below the selected research section.
+        if history is None:
+            history = ui_history(card)
         if history is not None:
             st.divider()
             st.markdown('#### Recent performance')
@@ -7986,7 +8004,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-3 · detail-layout-1")
+            st.caption("App build: navigation-3 · detail-layout-2")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
