@@ -8577,10 +8577,14 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
         refresh_input_checks(wf)
     previous_health=wf.store.get('health',day) or {}
     health=refresh_board_health(wf, board)
-    try:
-        board,targeted_checks=refresh_saved_game_lines(wf,board,previous_health,health)
-    except ValueError as error:
-        targeted_checks=[];errors.append(str(error))
+    # Preserve the daily paid snapshot. Injury changes trigger free ESPN
+    # eligibility checks, never a surprise forced OddsPAPI download.
+    targeted_checks=[]
+    if refresh and str(setting('ODDSPAPI_ALLOW_TARGETED_PAID_REFRESH','false')).lower()=='true':
+        try:
+            board,targeted_checks=refresh_saved_game_lines(wf,board,previous_health,health)
+        except ValueError as error:
+            errors.append(str(error))
     ledger['targeted_checks']=targeted_checks
     ledger['odds_requests']=wf.store.get('request_budget',day+':oddspapi',ledger.get('odds_requests',0))
     report = prepare_saved_board(wf, board, budget_seconds=budget_seconds, max_picks=10000)
@@ -8610,7 +8614,29 @@ if '--auto-board' in sys.argv:
     if not _database_online:
         raise SystemExit('Permanent database unavailable; no feed or odds requests made.')
     try:
-        report = automatic_board_run(workflow, refresh='--refresh' in sys.argv)
+        explicit_refresh='--refresh' in sys.argv
+        scheduled='--scheduled' in sys.argv
+        if scheduled:
+            # GitHub wakes the worker every 30 minutes. Only bootstrap the
+            # day's paid snapshot near the first tipoff, never at fixed UTC hours.
+            current=pd.Timestamp.now(tz='UTC')
+            today=slate_day(current)
+            try:
+                schedule=workflow.e['saved_fetch'](workflow.e['ESPN_BASE']+'scoreboard',
+                    {'dates':today.replace('-',''),'limit':1000},ttl_seconds=300)
+                starts=sorted(utc_timestamp(g.get('date')) for g in schedule.get('events',[])
+                    if pd.notna(utc_timestamp(g.get('date')))
+                    and today_pregame(g.get('date'),current))
+            except Exception:
+                starts=[]
+            if not starts:
+                print('No upcoming NBA games verified; paid board refresh skipped.')
+                raise SystemExit(0)
+            minutes=(starts[0]-current).total_seconds()/60
+            ledger=workflow_store.get('automation',today) or {}
+            # A half-hour scheduler tick gives a 30-60 minute pregame window.
+            explicit_refresh=30 <= minutes <= 60 and not ledger.get('refreshes')
+        report = automatic_board_run(workflow, refresh=explicit_refresh)
         print(encode(report))
         coverage = report.get('coverage') or {}
         if report.get('feed_partial') or report.get('fantasy_partial'):
