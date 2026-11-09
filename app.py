@@ -7610,9 +7610,9 @@ def ui_board(page):
         return
     st.subheader('Saved plays' if page == 'Saved' else 'Your NBA plays')
     st.caption('NBA is connected. Other sports will appear here when their engines and feeds are ready.')
-    platform = st.radio('Platform', ['All', 'PrizePicks', 'Kalshi', 'DraftKings'], horizontal=True, key='mobile_platform')
-    kind = st.radio('Pick type', ['Player Props', 'Fantasy'], horizontal=True, key='mobile_kind')
-    view = st.radio('Board view', ['Top plays', 'All props'], horizontal=True, key='mobile_view') if page != 'Saved' else 'All props'
+    platform = (st.segmented_control('Platform', ['All', 'PrizePicks', 'Kalshi', 'DraftKings'], default=st.session_state.get('mobile_platform', 'All'), key='mobile_platform_buttons', width='stretch') or 'All')
+    kind = (st.segmented_control('Pick type', ['Player Props', 'Fantasy'], default=st.session_state.get('mobile_kind', 'Player Props'), key='mobile_kind_buttons', width='stretch') or 'Player Props')
+    view = (st.segmented_control('Board view', ['Top plays', 'All props'], default=st.session_state.get('mobile_view', 'Top plays'), key='mobile_view_buttons', width='stretch') or 'Top plays') if page != 'Saved' else 'All props'
     search = st.text_input('Find player', placeholder='Search by name…', key='mobile_search')
     if page == 'Saved':
         records = [v['card'] for v in saved.values()]
@@ -7991,7 +7991,8 @@ def render_native_kalshi_refresh():
 def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
     st.caption("Model picks · Research · Results")
-    app_page = st.radio("Navigation", ["Plays", "Saved", "Results", "Settings"], horizontal=True, key="sports_lab_page")
+    app_page = (st.segmented_control("Navigation", ["Plays", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
+    st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
         st.session_state.pop("selected_prop_card", None)
         st.session_state["last_ui_page"] = app_page
@@ -8004,7 +8005,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-3 · detail-layout-2")
+            st.caption("App build: navigation-4 · detail-layout-2")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
