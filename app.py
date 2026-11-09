@@ -277,6 +277,7 @@ class Store:
             "coverage",
             "input_health",
             "request_budget",
+            "odds_cache", "odds_lock", "odds_fixture", "odds_refresh", "odds_status",
             "combo", "combo_grade", "combo_suggestions", "combo_actual",
             "combo_cohort", "combo_model", "combo_review",
         }
@@ -752,6 +753,7 @@ def combo_pool(store, reference=None):
     board = store.get('board', 'board') or {}
     health = (store.get('health', slate_day(current)) or {}).get('players') or {}
     index = forecast_index(store.items('forecast'))
+    line_checks=dict(store.items('odds_refresh'))
     pool, excluded, seen = [], {}, set()
     def reject(reason): excluded[reason] = excluded.get(reason, 0) + 1
     for card in board.get('v4_rows') or []:
@@ -768,6 +770,8 @@ def combo_pool(store, reference=None):
             reject('No valid frozen pregame projection'); continue
         if (start-current).total_seconds() < 300:
             reject('Within five minutes of recorded start'); continue
+        if not line_freshness(card,current,line_checks)[0]:
+            reject('Line source missing or stale'); continue
         if not pick_is_selectable(card, result):
             reject('Direction unavailable or unverified'); continue
         if str(card.get('Line Type', '')).lower() not in ('standard','regular','goblin','demon'):
@@ -882,6 +886,7 @@ def combo_live_check(store, combo, reference=None):
     board = store.get('board','board') or {}
     cards = {identity(c):c for c in board.get('v4_rows') or []}
     health = (store.get('health',slate_day(current)) or {}).get('players') or {}
+    line_checks=dict(store.items('odds_refresh'))
     for leg in combo['legs']:
         old = leg['card']
         start = utc_timestamp(old.get('Start (UTC)'))
@@ -890,6 +895,7 @@ def combo_live_check(store, combo, reference=None):
         card = cards.get(identity(old))
         if card is None or card.get('Start (UTC)') != old.get('Start (UTC)'):
             return False, 'Review needed: line, tier, schedule or board presence changed.'
+        if not line_freshness(card,current,line_checks)[0]:return False,'Review needed: line source is missing or stale.'
         if not pick_is_selectable(card, {'direction':leg['direction']}):
             return False, 'Review needed: the selected direction is no longer verified.'
         h = health.get(player_health_key(card)) or {}
@@ -4038,41 +4044,176 @@ def setting(name, default=""):
 
 # ---------------- ODDS CONNECTION ----------------
 
-def api_get(path, params):
-    key = setting("ODDS_API_KEY", "")
+def odds_cache_key(path, params, api_key=None):
+    credential = api_key if api_key is not None else setting('ODDS_API_KEY','')
+    return hashlib.sha256(encode([hashlib.sha256(credential.encode()).hexdigest(),path,params]).encode()).hexdigest()
 
-    if not key:
-        raise ValueError(
-            "Set ODDS_API_KEY in Streamlit Secrets."
-        )
 
+def odds_daily_cap():
+    try:return max(1,min(100,int(setting('ODDSPAPI_DAILY_REQUEST_CAP','34'))))
+    except (ValueError,TypeError):return 34
+
+
+def reserve_odds_request(store, reference=None):
+    day=slate_day(reference)
+    key=day+':oddspapi'
+    cap=odds_daily_cap()
+    caps=store.query('INSERT INTO sports_records VALUES (?,?,?,?) '
+        'ON CONFLICT(namespace,key) DO UPDATE SET payload=CASE '
+        'WHEN CAST(sports_records.payload AS INTEGER)>CAST(excluded.payload AS INTEGER) '
+        'THEN excluded.payload ELSE sports_records.payload END RETURNING payload',
+        ('request_budget',day+':oddspapi_cap',str(cap),now()),fetch=True)
+    cap=min(cap,int(caps[0][0]))
+    # Migrate today's old worker reservations conservatively. Earlier manual
+    # downloads were not counted; this cannot reconstruct the provider quota.
+    old=store.get('automation',day) or {}
+    initial=max(0,int(old.get('odds_requests',0)))
+    store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING',
+        ('request_budget',key,str(min(initial,cap)),now()))
+    rows=store.query('UPDATE sports_records SET payload=CAST(CAST(payload AS INTEGER)+1 AS TEXT),updated=? '
+        'WHERE namespace=? AND key=? AND CAST(payload AS INTEGER)<? RETURNING payload',
+        (now(),'request_budget',key,cap),fetch=True)
+    if not rows:raise ValueError('Daily OddsPAPI request guard reached; saved lines retained.')
+    return int(rows[0][0])
+
+
+def api_get(path, params, force=False):
+    key=setting('ODDS_API_KEY','')
+    if not key:raise ValueError('Set ODDS_API_KEY in Streamlit Secrets.')
+    store=globals().get('workflow_store')
+    if store is None or not hasattr(store,'query'):
+        raise ValueError('Permanent storage is required before downloading odds.')
+    cache_key=odds_cache_key(path,params,key)
+    cache=store.get('odds_cache',cache_key) or {}
+    stamp=utc_timestamp(cache.get('fetched_at'))
+    current=pd.Timestamp.now(tz='UTC')
+    ttl={'/markets':86400,'/fixtures':1800,'/odds':900}.get(path,900)
+    if not force and pd.notna(stamp) and 0 <= (current-stamp).total_seconds()<ttl and 'payload' in cache:
+        return cache['payload']
+    paused=store.get('odds_status','provider') or {}
+    resume=utc_timestamp(paused.get('resume_after'))
+    if pd.notna(resume) and current<resume:
+        raise ValueError('OddsPAPI downloads paused after an account or rate-limit error; cached lines retained.')
+    attempted=utc_timestamp(cache.get('failed_at'))
+    if pd.notna(attempted) and 0 <= (current-attempted).total_seconds()<900:
+        raise ValueError('OddsPAPI request is cooling down after an error; saved lines retained.')
+    cutoff=(current-pd.Timedelta(seconds=120)).isoformat()
+    locked=store.query('INSERT INTO sports_records VALUES (?,?,?,?) '
+        'ON CONFLICT(namespace,key) DO UPDATE SET payload=excluded.payload,updated=excluded.updated '
+        'WHERE sports_records.updated<? RETURNING key',
+        ('odds_lock',cache_key,'{}',now(),cutoff),fetch=True)
+    if not locked:raise ValueError('Another worker is updating these lines; saved lines retained.')
     try:
-        response = requests.get(
-            BASE + path,
-            params={
-                **params,
-                "apiKey": key,
-            },
-            timeout=60,
-        )
-
-    except requests.RequestException:
-        raise ValueError(
-            "Unable to connect to OddsPAPI."
-        ) from None
-
-    if response.status_code != 200:
-        raise ValueError(
-            f"OddsPAPI {path}: "
-            f"HTTP {response.status_code}."
-        )
-
-    try:
-        return response.json()
+        reserve_odds_request(store)
+        try:
+            response=requests.get(BASE+path,params={**params,'apiKey':key},timeout=60)
+        except requests.RequestException:
+            raise ValueError('Unable to connect to OddsPAPI.') from None
+        if response.status_code!=200:
+            if response.status_code in (401,402,403,429):
+                store.put('odds_status','provider',{'http_status':response.status_code,
+                    'resume_after':(current+pd.Timedelta(hours=1)).isoformat()})
+            raise ValueError(f'OddsPAPI {path}: HTTP {response.status_code}.')
+        try:payload=response.json()
+        except ValueError:raise ValueError('OddsPAPI returned invalid JSON.') from None
+        if not isinstance(payload,(dict,list)):
+            raise ValueError('OddsPAPI returned an invalid response structure.')
+        store.put('odds_cache',cache_key,{'path':path,'params':params,'fetched_at':now(),'payload':payload})
+        return payload
     except ValueError:
-        raise ValueError(
-            "OddsPAPI returned invalid JSON."
-        ) from None
+        store.put('odds_cache',cache_key,dict(cache,failed_at=now(),path=path,params=params))
+        raise
+    finally:
+        store.query('DELETE FROM sports_records WHERE namespace=? AND key=?',('odds_lock',cache_key))
+
+
+def odds_fixture_params(fixture_id):
+    return {'fixtureId':str(fixture_id),'bookmakers':','.join(BOOKS),'language':'en','verbosity':3}
+
+
+def line_freshness(card, reference=None, refresh_checks=None):
+    current=pd.Timestamp.now(tz='UTC') if reference is None else utc_timestamp(reference)
+    if not today_pregame(card.get('Start (UTC)'),current):return True,'Saved pregame record; game started or outside today.'
+    field='Tier Fetched At' if card.get('Tier Source')=='prizepicksapi.com' else 'Odds checked (UTC)'
+    stamp=utc_timestamp(card.get(field))
+    check=(refresh_checks or {}).get(str(card.get('Fixture ID'))) or {}
+    attempted=utc_timestamp(check.get('attempted_at'))
+    if pd.notna(attempted) and (pd.isna(stamp) or attempted>stamp):
+        if check.get('state')=='retained':
+            return False,'Required game line check did not complete; review needed.'
+        if card.get('Tier Source')=='prizepicksapi.com':
+            return False,'Native tier line predates the latest game change/check; verify PrizePicks.'
+    limit=1800 if (utc_timestamp(card.get('Start (UTC)'))-current).total_seconds()<=3600 else 7200
+    if pd.isna(stamp) or not 0 <= (current-stamp).total_seconds()<=limit:
+        return False,'Line needs an update: source timestamp missing or stale.'
+    return True,'Line source checked '+stamp.tz_convert('America/Los_Angeles').strftime('%I:%M %p PT')+'.'
+
+
+def odds_refresh_plan(board,health,previous,attempts,reference=None):
+    current=pd.Timestamp.now(tz='UTC') if reference is None else utc_timestamp(reference)
+    grouped={}
+    for c in board.get('v4_rows') or []:
+        if c.get('Fixture ID') and today_pregame(c.get('Start (UTC)'),current):
+            grouped.setdefault(str(c['Fixture ID']),[]).append(c)
+    plan=[]
+    for fixture,cards in grouped.items():
+        attempted=utc_timestamp((attempts.get(fixture) or {}).get('attempted_at'))
+        if pd.notna(attempted) and (current-attempted).total_seconds()<900:continue
+        changes=[]
+        for c in cards:
+            name=player_health_key(c);new=(health.get('players') or {}).get(name) or {}
+            old=(previous.get('players') or {}).get(name) or {}
+            if (new.get('injuries_available') and old.get('injuries_available') and
+                (sorted(new.get('statuses') or [])!=sorted(old.get('statuses') or []) or
+                 new.get('blocked')!=old.get('blocked'))):changes.append(name)
+        start=min(utc_timestamp(c['Start (UTC)']) for c in cards)
+        quote_times=[utc_timestamp(c.get('Odds checked (UTC)')) for c in cards if c.get('Tier Source')!='prizepicksapi.com']
+        last=max([v for v in quote_times if pd.notna(v)],default=pd.NaT)
+        age=(current-last).total_seconds() if pd.notna(last) else float('inf')
+        if changes or (0<(start-current).total_seconds()<=3600 and age>=900):
+            plan.append({'fixture':fixture,'reason':'Player status changed' if changes else 'Pregame line check',
+                         'start':start.isoformat(),'quote_age':age,'priority':0 if changes else 1})
+    return sorted(plan,key=lambda item:(item['priority'],item['start'],-item['quote_age'],item['fixture']))[:3]
+
+
+def refresh_saved_game_lines(wf,board,previous_health,health):
+    plan=odds_refresh_plan(board,health,previous_health,dict(wf.store.items('odds_refresh')))
+    report=[]
+    if not plan:return board,report
+    catalog=market_catalog()
+    for item in plan:
+        fixture=item['fixture'];attempt=dict(item,attempted_at=now(),state='pending')
+        wf.store.put('odds_refresh',fixture,attempt)
+        try:
+            representative=next(c for c in board['v4_rows'] if str(c.get('Fixture ID'))==fixture)
+            # Cached provider fixture metadata was captured when this game was imported.
+            game=wf.store.get('odds_fixture',fixture)
+            if not game:raise ValueError('Fixture metadata unavailable; wait for the next schedule download.')
+            rows,summaries=decode_game(game,game_odds(fixture,force=True),catalog)
+            if not rows:raise ValueError('No active lines returned; saved board retained.')
+            board['v4_rows']=merge_scan_rows(board.get('v4_rows',[]),rows,{fixture})
+            board['v4_scan_at']=now()
+            attempt.update(state='updated',lines=len(rows))
+        except (ValueError,KeyError,TypeError) as error:
+            attempt.update(state='retained',note=str(error))
+        wf.store.put('odds_refresh',fixture,attempt);report.append(attempt)
+    wf.store.put('board','board',board)
+    return board,report
+
+
+def odds_usage_panel(store,st):
+    count=store.get('request_budget',slate_day()+':oddspapi')
+    cap=min(odds_daily_cap(),int(store.get('request_budget',slate_day()+':oddspapi_cap',odds_daily_cap())))
+    st.caption('OddsPAPI shared guard: '+(str(count) if count is not None else 'not yet initialized')+
+        f' / {cap} reserved requests today · Includes manual/worker attempts and conservative prior-worker estimates; cache hits do not spend requests. This is not your provider’s remaining quota.')
+    st.caption('Response cache: game odds 15 minutes, schedule 30 minutes, market definitions 24 hours. Status changes and near-tipoff checks can request a targeted refresh; at most three games per worker pass. No generic news-to-minutes model is connected.')
+    latest=store.items('odds_refresh')
+    if latest:
+        with st.expander('Recent targeted line checks'):
+            st.dataframe(pd.DataFrame([{'Game ID':key,'Reason':value.get('reason'),
+                'Status':value.get('state'),'Checked (UTC)':value.get('attempted_at'),
+                'Note':value.get('note')} for key,value in sorted(latest,key=lambda item:item[1].get('attempted_at',''),reverse=True)[:12]]),hide_index=True,use_container_width=True)
+
 
 
 SLATE_TIMEZONE = "America/Los_Angeles"
@@ -4091,7 +4232,6 @@ def today_pregame(start_value, reference=None):
                 and start.tz_convert(SLATE_TIMEZONE).date() == current.tz_convert(SLATE_TIMEZONE).date())
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def _today_nba_fixtures(day):
     # The Pacific day is part of the cache key, so yesterday's slate cannot leak
     # across local midnight. The final filter also removes games that have begun.
@@ -4115,6 +4255,8 @@ def _today_nba_fixtures(day):
         start = pd.to_datetime(game.get("startTime"), utc=True, errors="coerce")
         if pd.notna(start) and begin <= start < end:
             games.append(game)
+    for game in games:
+        workflow_store.put('odds_fixture',str(game['fixtureId']),game)
     return sorted(games, key=lambda game: str(game.get("startTime", "")))
 
 
@@ -4156,7 +4298,6 @@ def upcoming_nba():
 
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
 def market_catalog():
     data = api_get(
         "/markets",
@@ -4183,17 +4324,8 @@ def market_catalog():
     }
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def game_odds(fixture_id):
-    return api_get(
-        "/odds",
-        {
-            "fixtureId": fixture_id,
-            "bookmakers": ",".join(BOOKS),
-            "language": "en",
-            "verbosity": 3,
-        },
-    )
+def game_odds(fixture_id, force=False):
+    return api_get('/odds',odds_fixture_params(fixture_id),force=force)
 
 
 def numeric_line(value):
@@ -4365,6 +4497,8 @@ def decode_game(game, odds, catalog):
             "Bookmaker Active Flag": book_data.get("bookmakerIsActive"),
         })
 
+    cached=workflow_store.get('odds_cache',odds_cache_key('/odds',odds_fixture_params(fixture_id))) or {}
+    for row in rows:row['Odds checked (UTC)']=cached.get('fetched_at')
     return rows, summaries
 
 
@@ -7599,7 +7733,14 @@ def render_fantasy_plays(wf, st):
     rows = board.get('v4_rows') or st.session_state.get('v4_rows', [])
     summary, saved = fantasy_saved_summary(rows, records, grades)
     upcoming_all = [item for item in saved if item['upcoming'] and item['date'] == slate_day()]
-    upcoming = [item for item in upcoming_all if pick_is_selectable(item['card'], item['frozen'].get('result') or {})]
+    current_cards={market_signature(c):c for c in rows}
+    line_checks=dict(wf.store.items('odds_refresh'))
+    upcoming=[]
+    for item in upcoming_all:
+        current_card=current_cards.get(market_signature(item['card']))
+        if (current_card and line_freshness(current_card,refresh_checks=line_checks)[0]
+                and pick_is_selectable(current_card,item['frozen'].get('result') or {})):
+            upcoming.append(dict(item,card=current_card))
     default = 'Upcoming' if upcoming_all or not saved else 'Saved forecasts'
     mode = st.segmented_control('Fantasy view', ['Upcoming', 'Saved forecasts'], default=default,
                                 key='fantasy_view_buttons', width='stretch') or default
@@ -7610,7 +7751,7 @@ def render_fantasy_plays(wf, st):
     if mode == 'Upcoming':
         visible = upcoming
         if len(upcoming_all) > len(upcoming):
-            st.caption(f'{len(upcoming_all)-len(upcoming)} saved Fantasy estimates are passes or have unverified offered sides; they are excluded from upcoming plays.')
+            st.caption(f'{len(upcoming_all)-len(upcoming)} saved Fantasy estimates are passes, stale, or have unverified offered sides; they are excluded from upcoming plays.')
         queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming_all))
         if queued: st.caption(f'{queued} imported Fantasy lines are awaiting verified projections.')
         if not visible: st.info('No selectable upcoming Fantasy plays today. Select Saved forecasts for earlier games.')
@@ -7929,24 +8070,22 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
         ledger['feed_requests'] = max(ledger.get('feed_requests', 0), int(budget))
     board = wf.store.get('board', 'board') or {}
     errors = []
-    def reserve(kind, maximum):
-        if ledger.get(kind, 0) >= maximum:
-            raise ValueError('Daily ' + kind + ' budget exhausted; saved board preserved')
-        ledger[kind] = ledger.get(kind, 0) + 1
-        wf.store.put('automation', day, ledger)
-    # At most two slate refreshes per Pacific day, including interrupted attempts.
-    if refresh and ledger.get('refreshes', 0) < 2:
-        ledger['refreshes'] = ledger.get('refreshes', 0) + 1
-        wf.store.put('automation', day, ledger)
-        reserve('odds_requests', 34)
-        games = upcoming_nba()
+    # One full import per Pacific day; later passes refresh selected games only.
+    if (refresh or ledger.get('bootstrap_pending')) and ledger.get('refreshes', 0) < 1:
+        ledger['bootstrap_pending']=True
+        wf.store.put('automation',day,ledger)
+        try:
+            games=upcoming_nba()
+        except ValueError as error:
+            games=None;errors.append(str(error))
+        if games is not None:
+            ledger.update(refreshes=1,bootstrap_pending=False)
+            wf.store.put('automation',day,ledger)
         if games:
-            reserve('odds_requests', 34)
             catalog = market_catalog()
             decoded, summaries, successful = [], [], set()
             for game in games:
                 try:
-                    reserve('odds_requests', 34)
                     rows, summary = decode_game(game, game_odds(str(game['fixtureId'])), catalog)
                     if rows:
                         decoded.extend(rows); summaries.extend(summary)
@@ -7964,6 +8103,21 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
             board['v4_rows'] = merge_scan_rows(board.get('v4_rows', []), decoded, successful)
             board.update(v4_summary=summaries, v4_errors=errors, v4_scan_at=now())
             wf.store.put('board', 'board', board)
+    known=wf.store.items('odds_fixture')
+    if refresh and not any(today_pregame(game.get('startTime')) for _,game in known):
+        try:
+            upcoming_nba()
+            known=wf.store.items('odds_fixture')
+        except ValueError as error:errors.append(str(error))
+    present={str(c.get('Fixture ID')) for c in board.get('v4_rows') or [] if today_pregame(c.get('Start (UTC)'))}
+    missing=[game for fixture,game in known if fixture not in present and today_pregame(game.get('startTime'))]
+    for game in missing[:3]:
+        try:
+            rows,_summary=decode_game(game,game_odds(str(game['fixtureId'])),market_catalog())
+            if rows:
+                board['v4_rows']=merge_scan_rows(board.get('v4_rows',[]),rows,{str(game['fixtureId'])})
+                wf.store.put('board','board',board)
+        except ValueError as error:errors.append(str(error))
     # Give Fantasy its own filtered cursor so it cannot sit behind thousands
     # of ordinary props. Both feeds share the SAME existing daily call cap.
     key = setting('PRIZEPICKS_API_KEY', '')
@@ -8013,7 +8167,14 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     checked_at = pd.to_datetime(last_check.get('checked_at'), utc=True, errors='coerce')
     if pd.isna(checked_at) or (pd.Timestamp.now(tz='UTC') - checked_at).total_seconds() >= 3600:
         refresh_input_checks(wf)
-    refresh_board_health(wf, board)
+    previous_health=wf.store.get('health',day) or {}
+    health=refresh_board_health(wf, board)
+    try:
+        board,targeted_checks=refresh_saved_game_lines(wf,board,previous_health,health)
+    except ValueError as error:
+        targeted_checks=[];errors.append(str(error))
+    ledger['targeted_checks']=targeted_checks
+    ledger['odds_requests']=wf.store.get('request_budget',day+':oddspapi',ledger.get('odds_requests',0))
     report = prepare_saved_board(wf, board, budget_seconds=budget_seconds, max_picks=10000)
     ledger['combos'] = update_combos(wf.store, generate=True)
     ledger['coverage'] = board_coverage(wf, board)
@@ -8206,6 +8367,9 @@ def ui_card(card, frozen, saved=False):
         st.warning('Unavailable for current plays: ' + health.get('note', 'Player status requires review') + '. Original prediction retained for the audit.')
     elif health.get('statuses'):
         st.caption('Latest injury status: ' + ', '.join(health['statuses']) + ' · checked ' + str(health.get('checked_at')))
+    if today_pregame(card.get('Start (UTC)')):
+        fresh,note=line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
+        st.caption(('' if fresh else '⚠ ')+note)
     if result:
         st.caption(pick_side_note(card, result))
     key = identity(card)
@@ -8524,6 +8688,7 @@ def ui_board(page):
     forecasts = forecast_index(workflow_store.items('forecast'))
     health = workflow_store.get('health', slate_day()) or {}
     coverage = workflow_store.get('coverage', slate_day()) or {}
+    line_checks=dict(workflow_store.items('odds_refresh'))
     if page == 'Plays':
         if coverage:
             st.caption(f"Saved board: {coverage['ready']}/{coverage['imported']} calculated before tipoff · {coverage['missed_start']} missed their start · checked {coverage['checked_at']}")
@@ -8598,6 +8763,7 @@ def ui_board(page):
     if view == 'Top plays':
         records = [c for c in records if identity(c) in forecasts
                    and not (health.get('players', {}).get(player_health_key(c)) or {}).get('blocked', False)
+                   and line_freshness(c,refresh_checks=line_checks)[0]
                    and pick_is_selectable(c, forecasts[identity(c)]['result'])
                    and not forecasts[identity(c)]['result'].get('tie', False)]
         records.sort(key=lambda c: ui_number(forecasts[identity(c)]['result'].get('standardized_gap'), -1), reverse=True)
@@ -8956,7 +9122,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1 · shared-odds-1")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
@@ -9016,9 +9182,8 @@ def render_app_pages():
                     st.warning('Public schedule preview unavailable. Request estimate unavailable. '
                         'A scan still uses only today’s upcoming provider games: one fixtures request, '
                         'one catalog request, and one odds request per game when uncached.')
-            st.caption('Odds, fixtures and market catalog are cached for 30 minutes. '
-                'Only the scan button below requests OddsPAPI data. '
-                'Breakdown, grading and availability do not run this scan.')
+            odds_usage_panel(workflow_store,st)
+            st.caption('This manual scan shares the worker cache and daily request guard. Grading, combo building and browsing do not request OddsPAPI data.')
 
             if st.button(
                 "🔍 SCAN AND DECODE NBA LINES",

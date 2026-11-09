@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       refresh:
-        description: 'Import current lines (uses provider credits within daily caps)'
+        description: 'Run guarded line update (saved cache + targeted checks)'
         type: boolean
         default: false
   schedule:
@@ -24,6 +24,8 @@ jobs:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       PRIZEPICKS_API_KEY: ${{ secrets.PRIZEPICKS_API_KEY }}
+      ODDSPAPI_DAILY_REQUEST_CAP: ${{ vars.ODDSPAPI_DAILY_REQUEST_CAP || '34' }}
+      PRIZEPICKS_DAILY_REQUEST_CAP: ${{ vars.PRIZEPICKS_DAILY_REQUEST_CAP || '10' }}
       REFRESH: ${{ (github.event_name == 'workflow_dispatch' && inputs.refresh) || github.event.schedule == '0 14,22 * * *' }}
     steps:
       - uses: actions/checkout@v4
