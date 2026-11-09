@@ -1334,16 +1334,17 @@ class Workflow:
 
         return outcomes
 
-    def grade(self, limit=100, time_budget=120, force_retry=False):
+    def grade(self, limit=100, time_budget=120, force_retry=False, skip_ids=None):
         """Grade pregame forecasts fairly; keep failures inspectable and retryable."""
         counts = {"graded": 0, "pending": 0, "errors": 0, "DNP": 0,
                   "ties": 0, "attempted": 0, "deferred": 0, "remaining": 0,
                   "future_start": 0, "invalid_start": 0, "late_excluded": 0,
                   "earliest_future_start": None, "latest_future_start": None,
-                  "due": 0}
+                  "due": 0, "checked_ids": []}
+        skip_ids = set(skip_ids or [])
         settled = {key for key, _ in self.store.items("grade")}
         records = [(key, frozen) for key, frozen in unique_forecasts(self.store.items("forecast"))
-                   if key not in settled]
+                   if key not in settled and key not in skip_ids]
         current = pd.Timestamp.now(tz="UTC")
         due = []
         for key, frozen in records:
@@ -1381,6 +1382,7 @@ class Workflow:
                 counts["remaining"] = len(due) - index
                 break
             counts["attempted"] += 1
+            counts["checked_ids"].append(key)
             try:
                 card = frozen["card"]
                 result = frozen["result"]
@@ -2828,7 +2830,7 @@ def storage_failure_hint(error):
     return 'Permanent storage could not connect. Check Neon status, Usage and DATABASE_URL in Streamlit secrets.'
 
 
-def run_grading_pass(wf, time_budget=15):
+def run_grading_pass(wf, time_budget=15, checked_ids=None, force_retry=False):
     """Visit every eligible saved forecast, resuming automatically if time expires."""
     forecasts = unique_forecasts(wf.store.items('forecast'))
     wf.store.items('audit_error')  # Reuse one cached list rather than N remote reads.
@@ -2837,6 +2839,8 @@ def run_grading_pass(wf, time_budget=15):
     fetch = original_engine['saved_fetch']
     summaries = {}
     def fetch_once(url, params=None, **kwargs):
+        if force_retry:
+            kwargs['ttl_seconds'] = 0
         key = encode([url, params, kwargs])
         if key not in summaries:
             try:
@@ -2850,7 +2854,8 @@ def run_grading_pass(wf, time_budget=15):
     engine['saved_fetch'] = fetch_once
     wf.e = engine
     try:
-        counts = wf.grade(limit=max(1, len(forecasts)), time_budget=time_budget)
+        counts = wf.grade(limit=max(1, len(forecasts)), time_budget=time_budget,
+                          force_retry=force_retry, skip_ids=checked_ids)
     finally:
         wf.e = original_engine
     grades = dict(wf.store.items('grade'))
@@ -3006,9 +3011,11 @@ def render_results_dashboard(wf, st):
     render_audit_status(wf, st)
     active = bool(st.session_state.get('_audit_active'))
     if st.button('Grade all completed games', type='primary', disabled=active, key='grade_all_once'):
+        st.session_state['_audit_checked_ids'] = []
+        st.session_state['_audit_force_retry'] = True
         st.session_state['_audit_active'] = True
         st.rerun()
-    st.caption('One click checks all saved picks. If interrupted by a time limit, grading continues automatically while this page stays open. No paid odds scan.')
+    st.caption('One click rechecks unresolved picks immediately, bypassing previous retry delays and refreshing game data. Each pick is checked once per pass; grading resumes while this page stays open. No paid odds scan.')
     report = wf.store.get('grade_run', 'last') or {}
     if active:
         st.info(f"Grading all completed games… {report.get('resolved', 0)}/{report.get('total', 0)} resolved.")
@@ -3149,6 +3156,8 @@ def render_workflow(wf, st, rows, mode="settings"):
         else:
             st.caption("No unresolved grading errors recorded.")
         if st.button("Recheck all completed games", key="audit_retry_now"):
+            st.session_state['_audit_checked_ids'] = []
+            st.session_state['_audit_force_retry'] = True
             st.session_state['_audit_active'] = True
             st.rerun()
 
@@ -8152,7 +8161,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-2")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
@@ -8485,13 +8494,20 @@ def _resume_grading_fragment():
         return
     try:
         with st.spinner('Grading all completed games…'):
-            report = run_grading_pass(workflow, time_budget=15)
+            report = run_grading_pass(workflow, time_budget=15,
+                checked_ids=st.session_state.get('_audit_checked_ids', []),
+                force_retry=st.session_state.get('_audit_force_retry', False))
+            checked = st.session_state.get('_audit_checked_ids', [])
+            st.session_state['_audit_checked_ids'] = list(dict.fromkeys(
+                checked + report.get('grading', {}).get('checked_ids', [])))
     except Exception as error:
         st.session_state['_audit_active'] = False
         st.error('Grading paused: ' + type(error).__name__ + '. Saved grades are preserved; check app logs.')
         return
     if report['state'] == 'complete':
         st.session_state['_audit_active'] = False
+        st.session_state.pop('_audit_checked_ids', None)
+        st.session_state.pop('_audit_force_retry', None)
     st.rerun()
 
 _resume_grading_fragment()
