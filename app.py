@@ -3462,6 +3462,10 @@ st.set_page_config(
 
 # Keep native controls readable even when the browser selected a light theme.
 st.markdown("""<style id="sports-lab-readable-controls">
+[data-baseweb="popover"] [role="listbox"] {background:#102234!important;border:1px solid #45647c;border-radius:10px;color:#f1f6fc!important;}
+[data-baseweb="popover"] [role="option"] {background:#102234!important;color:#f1f6fc!important;font-size:14px;}
+[data-baseweb="popover"] [role="option"]:hover,[data-baseweb="popover"] [role="option"][aria-selected="true"] {background:#24465b!important;color:#fff!important;}
+
 [data-testid="stHeader"] {background:#07121f !important;color:#f3f8ff !important;}
 [data-testid="stToolbar"] button, [data-testid="stMainMenu"] button {
  color:#f3f8ff !important;background:#142536 !important;}
@@ -7036,9 +7040,61 @@ def fantasy_saved_summary(rows, records, grades, reference=None):
             'Saved pregame Fantasy forecasts, all dates':len(saved)}, saved
 
 
+def fantasy_date_label(value, reference=None):
+    stamp = pd.Timestamp(str(value))
+    today = pd.Timestamp(slate_day(reference)).date()
+    prefix = 'Today · ' if stamp.date() == today else 'Yesterday · ' if (today-stamp.date()).days == 1 else ''
+    return prefix + stamp.strftime('%b ') + str(stamp.day) + (f', {stamp.year}' if stamp.year != today.year else '')
+
+
+def compact_fantasy_card_html(item, status=None):
+    from html import escape
+    card = item['card']
+    result = item['frozen'].get('result') or {}
+    text = lambda value: escape(str(value if value is not None else ''))
+    direction = result.get('direction')
+    side = '↑ MORE' if direction == 'MORE' else '↓ LESS' if direction == 'LESS' else 'Unavailable'
+    side_class = 'fc-more' if direction == 'MORE' else 'fc-less' if direction == 'LESS' else ''
+    outcome = item.get('outcome', 'PENDING')
+    label = {'WIN':'✓ WIN', 'LOSS':'✕ LOSS', 'TIE':'Tie', 'DNP':'DNP', 'PENDING':'Pending'}.get(outcome,outcome)
+    outcome_class = 'fc-more' if outcome == 'WIN' else 'fc-less' if outcome == 'LOSS' else ''
+    actual = '—' if item.get('actual') is None else f"{item['actual']:.2f}"
+    phase = 'Upcoming' if item.get('upcoming') else 'Saved pregame'
+    status = status or {}
+    note = ''
+    if item.get('upcoming') and status.get('blocked'):
+        phase = 'Unavailable'
+        note = '<div class="fc-note">' + text(status.get('note','Player status needs review')) + '</div>'
+    if not result.get('selection_allowed', True):
+        note += '<div class="fc-note">Direction not offered on this saved tier</div>'
+    marker = ui_tier_marker(card)
+    tier = card.get('Line Type') or 'Unverified'
+    return f'''<div class="fc-card">
+      <div class="fc-name">{text(ui_name(card.get('Player','')))} {text(marker)}</div>
+      <div class="fc-game">{text(card.get('Game',''))}</div>
+      <div class="fc-meta">PP · Fantasy · {text(tier)} <span>{text(phase)}</span></div>
+      <div class="fc-line"><b class="{side_class}">{text(side)}</b><span>Line <b>{float(card['Line']):g}</b></span></div>
+      <div class="fc-values"><span>Projection <b>{item['projection']:.2f}</b></span><span>Actual <b>{actual}</b></span><span class="{outcome_class}">{text(label)}</span></div>
+      {note}</div>'''
+
+
 def render_fantasy_plays(wf, st):
     st.subheader('Fantasy plays')
-    st.caption('PrizePicks NBA · Original saved pregame projections · PTS + 1.2 REB + 1.5 AST + 3 STL + 3 BLK − TO')
+    st.caption('PrizePicks NBA · Original saved pregame projections')
+    st.markdown('''<style>
+    .fc-card{background:#102234;border:1px solid #39566d;border-radius:11px;padding:11px 12px 9px;margin:5px 0 2px;color:#f1f6fc;}
+    .fc-name{font-size:15px;font-weight:750;line-height:1.25;overflow-wrap:anywhere;}
+    .fc-game{font-size:11px;color:#42c9e9;margin:4px 0;line-height:1.3;}
+    .fc-meta{font-size:10px;color:#aabccd;display:flex;justify-content:space-between;gap:5px;}
+    .fc-line{display:flex;justify-content:space-between;align-items:center;border-top:1px solid #294157;padding-top:8px;margin-top:7px;font-size:13px;}
+    .fc-values{display:flex;justify-content:space-between;gap:7px;margin-top:7px;font-size:10px;color:#b8c8d8;}
+    .fc-values b{font-size:15px;color:#f1f6fc;display:block;margin-top:2px;}
+    .fc-more{color:#67e7ad!important;font-weight:700;}.fc-less{color:#ff939c!important;font-weight:700;}
+    .fc-note{color:#f3c477;font-size:10px;margin-top:6px;line-height:1.3;}
+    [data-baseweb="popover"] [role="listbox"]{background:#102234!important;border:1px solid #45647c;border-radius:10px;color:#f1f6fc!important;}
+    [data-baseweb="popover"] [role="option"]{background:#102234!important;color:#f1f6fc!important;font-size:14px;}
+    [data-baseweb="popover"] [role="option"]:hover,[data-baseweb="popover"] [role="option"][aria-selected="true"]{background:#24465b!important;color:#fff!important;}
+    </style>''', unsafe_allow_html=True)
     records = wf.store.items('forecast')
     grades = dict(wf.store.items('grade'))
     board = wf.store.get('board', 'board') or {}
@@ -7046,79 +7102,64 @@ def render_fantasy_plays(wf, st):
     summary, saved = fantasy_saved_summary(rows, records, grades)
     upcoming = [item for item in saved if item['upcoming'] and item['date'] == slate_day()]
     default = 'Upcoming' if upcoming or not saved else 'Saved forecasts'
-    mode = st.radio('Fantasy view', ['Upcoming', 'Saved forecasts'], index=0 if default == 'Upcoming' else 1,
-                    horizontal=True, key='fantasy_view_mode')
+    mode = st.segmented_control('Fantasy view', ['Upcoming', 'Saved forecasts'], default=default,
+                                key='fantasy_view_buttons', width='stretch') or default
     auto = wf.store.get('automation', slate_day()) or {}
     if auto.get('fantasy_partial') or auto.get('feed_partial'):
-        st.warning('The saved provider feed is incomplete. This page shows only imported lines with saved projections; it does not confirm full Fantasy coverage.')
+        st.caption('⚠ Feed incomplete · Saved projections shown; full Fantasy coverage is not confirmed.')
+    date = None
     if mode == 'Upcoming':
         visible = upcoming
         queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming))
-        if queued:
-            st.caption(f'{queued} imported Fantasy lines are awaiting a verified projection. No MORE/LESS pick is invented for them.')
-        if not visible:
-            st.info('No calculated upcoming Fantasy plays for today. Choose Saved forecasts to see earlier Fantasy projections and results.')
+        if queued: st.caption(f'{queued} imported Fantasy lines are awaiting verified projections.')
+        if not visible: st.info('No calculated upcoming Fantasy plays today. Select Saved forecasts for earlier games.')
     else:
         dates = sorted({item['date'] for item in saved}, reverse=True)
         if not dates:
-            st.info('No saved pregame Fantasy projections were found. Feed records alone are not model predictions; completed games will not be backfilled with new forecasts.')
+            st.info('No saved pregame Fantasy projections were found. Expired feed quotes are not backfilled into new predictions.')
             return
-        date = st.selectbox('Fantasy game date (Pacific)', dates, key='fantasy_saved_date')
+        recent = dates[:7]
+        options = recent + (['Older dates'] if len(dates) > 7 else [])
+        previous = st.session_state.get('fantasy_day_pills')
+        if previous is not None and previous not in options:
+            st.session_state.pop('fantasy_day_pills', None)
+        date = st.pills('Game day · Pacific', options, default=recent[0],
+            format_func=lambda value: value if value == 'Older dates' else fantasy_date_label(value), key='fantasy_day_pills') or recent[0]
+        if date == 'Older dates':
+            date = st.date_input('Choose an older game day', value=pd.Timestamp(dates[7]).date(),
+                min_value=pd.Timestamp(dates[-1]).date(), max_value=pd.Timestamp(dates[7]).date(),
+                format='MM/DD/YYYY', key='fantasy_older_day').isoformat()
         visible = [item for item in saved if item['date'] == date]
-        st.caption('These are original pregame records. Started and completed games stay visible here; they are not new live picks.')
-    search = st.text_input('Find Fantasy player', placeholder='Search by name…', key='fantasy_find_player')
+    search = st.text_input('Find Fantasy player', placeholder='Search player…', key='fantasy_find_player',label_visibility='collapsed')
     visible = [item for item in visible if search.strip().lower() in ui_name(item['card'].get('Player','')).lower()]
-    st.caption(f'{len(visible)} saved Fantasy lines · {sum(item["outcome"] in ("WIN","LOSS","TIE","DNP") for item in visible)} settled')
-    pages = max(1, math.ceil(len(visible)/10))
-    filters = (mode, st.session_state.get('fantasy_saved_date'), search)
+    st.caption(f'{len(visible)} lines · {sum(item["outcome"] in ("WIN","LOSS","TIE","DNP") for item in visible)} settled · Started games show saved pregame forecasts')
+    page_size = 12
+    pages = max(1, math.ceil(len(visible)/page_size))
+    filters = (mode, date, search)
     if st.session_state.get('_fantasy_filters') != filters or st.session_state.get('fantasy_cards_page',1) > pages:
         st.session_state.pop('fantasy_cards_page',None)
         st.session_state['_fantasy_filters'] = filters
-    page = int(st.number_input('Fantasy page', min_value=1, max_value=pages, value=1, step=1, key='fantasy_cards_page')) if visible else 1
+    page = int(st.number_input('Page', min_value=1, max_value=pages, value=1, step=1, key='fantasy_cards_page')) if pages > 1 else 1
     health = (wf.store.get('health', slate_day()) or {}).get('players') or {}
-    columns = st.columns(2)
-    for i, item in enumerate(visible[(page-1)*10:page*10]):
+    columns = st.columns(3)
+    for i, item in enumerate(visible[(page-1)*page_size:page*page_size]):
         card, result = item['card'], item['frozen'].get('result') or {}
-        with columns[i % 2]:
-            with st.container(border=True):
-                st.markdown('#### ' + ui_name(card.get('Player','')) + ' ' + ui_tier_marker(card))
-                st.caption(str(card.get('Game','')))
-                tier = card.get('Line Type') or 'Unverified'
-                st.caption('Fantasy Score · PrizePicks · ' + str(tier))
-                direction = result.get('direction')
-                if item['upcoming']:
-                    status = health.get(player_health_key(card)) or {}
-                    if status.get('blocked'):
-                        st.warning('Unavailable: ' + str(status.get('note','Current player status needs review')))
-                    else:
-                        st.caption('Upcoming · Saved before tipoff')
-                else:
-                    st.caption('Game started · Saved pregame projection')
-                if direction in ('MORE','LESS'):
-                    st.markdown(('🟢 ↑ MORE' if direction == 'MORE' else '🔴 ↓ LESS') + f" · Line {float(card['Line']):g}")
-                else:
-                    st.caption('Direction unavailable')
-                left, right = st.columns(2)
-                left.metric('Projected Fantasy', f"{item['projection']:.2f}")
-                right.metric('Actual Fantasy', '—' if item['actual'] is None else f"{item['actual']:.2f}")
-                label = {'WIN':'✓ WIN', 'LOSS':'✕ LOSS', 'TIE':'Tie', 'DNP':'DNP', 'PENDING':'Awaiting result'}.get(item['outcome'],item['outcome'])
-                st.caption('Result: ' + label)
-                if not result.get('selection_allowed', True):
-                    st.caption('The forecast direction is not offered on this saved tier.')
-                with st.expander('Saved six-stat breakdown'):
-                    weights = fantasy_weights(card)
-                    breakdown = []
-                    for component in result.get('components') or []:
-                        estimate = ui_number(component.get('Projection'))
-                        stat = component.get('Stat')
-                        if estimate is not None and stat in weights:
-                            breakdown.append({'Stat':stat, 'Stat estimate':estimate,
-                                'Weight':weights[stat], 'Fantasy contribution':estimate * weights[stat]})
-                    if breakdown:
-                        st.dataframe(pd.DataFrame(breakdown), hide_index=True, use_container_width=True)
-                        st.caption('Original component estimates before any saved learning adjustment. No new calculation is run here.')
-                    else:
-                        st.caption('This older forecast has no saved component breakdown.')
+        with columns[i % 3]:
+            st.markdown(compact_fantasy_card_html(item, health.get(player_health_key(card))),unsafe_allow_html=True)
+            with st.expander('Breakdown'):
+                weights = fantasy_weights(card)
+                breakdown = []
+                for component in result.get('components') or []:
+                    estimate = ui_number(component.get('Projection'))
+                    stat = component.get('Stat')
+                    if estimate is not None and stat in weights:
+                        breakdown.append({'Stat':stat, 'Estimate':estimate, 'Weight':weights[stat], 'FP':estimate * weights[stat]})
+                if breakdown:
+                    st.dataframe(pd.DataFrame(breakdown),hide_index=True,use_container_width=True)
+                    st.caption('Saved component estimates before any learning adjustment. PTS + 1.2 REB + 1.5 AST + 3 STL + 3 BLK − TO.')
+                else: st.caption('This older forecast has no saved six-stat breakdown.')
+
+
 
 
 def pp_fantasy_check(rows, payload):
@@ -8402,7 +8443,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
