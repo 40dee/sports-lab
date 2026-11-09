@@ -40,7 +40,7 @@ jobs:
           if [ "$REFRESH" = "true" ]; then
             python app.py --auto-board --refresh
           else
-            python app.py --auto-board
+            python app.py --auto-board --scheduled
           fi
       - name: Grade completed games
         if: ${{ !cancelled() }}
