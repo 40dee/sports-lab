@@ -7,8 +7,8 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '0 14,22 * * *'
-    - cron: '15,45 * * * *'
+    # Every 30 minutes; the app decides whether a game-window run is due.
+    - cron: '0,30 * * * *'
 permissions:
   contents: read
 concurrency:
@@ -27,7 +27,7 @@ jobs:
       ODDSPAPI_DAILY_REQUEST_CAP: ${{ vars.ODDSPAPI_DAILY_REQUEST_CAP || '34' }}
       ODDSPAPI_MONTHLY_REQUEST_CAP: ${{ vars.ODDSPAPI_MONTHLY_REQUEST_CAP || '' }}
       PRIZEPICKS_DAILY_REQUEST_CAP: ${{ vars.PRIZEPICKS_DAILY_REQUEST_CAP || '10' }}
-      REFRESH: ${{ (github.event_name == 'workflow_dispatch' && inputs.refresh) || github.event.schedule == '0 14,22 * * *' }}
+      REFRESH: ${{ github.event_name == 'workflow_dispatch' && inputs.refresh }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
