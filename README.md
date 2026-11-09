@@ -25,3 +25,12 @@ using a league ID already saved by the NBA scanner. It stores counts and a resul
 in diagnostics, without exposing account credentials. The batch endpoint is not
 yet substituted for production scans: named-player, tier, Fantasy, and offered-side
 coverage must be verified first. This probe may use one paid request when allowed.
+
+
+Browser forecast lists now use database-side compact projections with 200-record
+keyset pages. Bulky roster snapshots and game-market context are fetched for one
+pick when its research screen opens. The original full records remain in the
+database, backups, and grading/learning worker. On the supplied 2,354-forecast
+backup, payload size fell from 39.17 MB to 8.11 MB and Python decode peak from
+148.66 MB to 30.48 MB; these measurements exclude the rest of the app and do not
+guarantee a hosting memory limit will never be reached.

@@ -79,6 +79,23 @@ def identity(card):
     return hashlib.sha256(encode(values).encode()).hexdigest()
 
 
+def compact_forecast(value):
+    record={k:v for k,v in value.items() if k!='snapshot'}
+    record['result']={k:v for k,v in (value.get('result') or {}).items() if k not in ('game_context','roster')}
+    record['portrait']=((value.get('result') or {}).get('roster') or {}).get('athlete',{}).get('headshot') or ((value.get('snapshot') or {}).get('roster') or {}).get('headshot')
+    return record
+
+
+class CompactViewStore:
+    """UI-only read projection. Writes and individual reads use the full store."""
+    def __init__(self,store):self._store=store
+    def __getattr__(self,name):return getattr(self._store,name)
+    def items(self,namespace):
+        if namespace!='forecast':return self._store.items(namespace)
+        if hasattr(self._store,'forecast_items'):return self._store.forecast_items()
+        return [(key,compact_forecast(value)) for key,value in self._store.items(namespace)]
+
+
 class Store:
     """Use PostgreSQL when configured; otherwise use local SQLite."""
 
@@ -95,7 +112,8 @@ class Store:
         self._read_cache = None
         if self.remote:
             try:
-                self._read_cache = st.session_state.setdefault("_neon_read_cache_v1", {})
+                st.session_state.pop("_neon_read_cache_v1",None)
+                self._read_cache = st.session_state.setdefault("_neon_read_cache_v2", {})
             except Exception:
                 pass
 
@@ -173,6 +191,8 @@ class Store:
             "ON CONFLICT(namespace,key) " + suffix + " RETURNING key",
             (namespace, key, encode(value), now()), fetch=True,
         )
+        if namespace=='forecast' and self._read_cache is not None:
+            self._read_cache.pop(('compact_forecast','forecast',None),None)
         # Update this record in cached lists. A single new forecast must not
         # force a download of every historic forecast on the next render.
         if self._read_cache is not None:
@@ -235,6 +255,29 @@ class Store:
             )
             return [(key, json.loads(payload)) for key, payload in rows]
         return self._cached_read("items", namespace, None, load)
+
+    def forecast_items(self):
+        def load():
+            # Strip bulky evidence inside the database, before network transfer.
+            # Keyset pagination bounds each libSQL HTTP response in memory.
+            postgres=self.remote and not getattr(self,'endpoint',None)
+            expression=("(payload::jsonb - 'snapshot' #- '{result,game_context}' #- '{result,roster}')::text" if postgres
+                else "json_remove(payload,'$.snapshot','$.result.game_context','$.result.roster')")
+            portrait=("COALESCE(payload::jsonb#>'{result,roster,athlete,headshot}',payload::jsonb#>'{snapshot,roster,headshot}')::text" if postgres
+                else "COALESCE(json_extract(payload,'$.result.roster.athlete.headshot'),json_extract(payload,'$.snapshot.roster.headshot'))")
+            result=[];after=''
+            while True:
+                page=self.query('SELECT key,'+expression+','+portrait+' FROM sports_records '
+                    'WHERE namespace=? AND key>? ORDER BY key LIMIT 200',('forecast',after),True)
+                for key,payload,photo in page:
+                    record=json.loads(payload)
+                    if photo:
+                        try:record['portrait']=json.loads(photo)
+                        except (ValueError,TypeError):record['portrait']=photo
+                    result.append((key,record))
+                if len(page)<200:return result
+                after=page[-1][0]
+        return self._cached_read('compact_forecast','forecast',None,load)
 
     def export(self):
         rows = self.query(
@@ -3067,7 +3110,8 @@ class TursoStore(Store):
         self.token = str(token).strip()
         self.http = requests.Session()
         self.remote = True
-        self._read_cache = st.session_state.setdefault('_turso_read_cache_v1', {})
+        st.session_state.pop('_turso_read_cache_v1',None)
+        self._read_cache = st.session_state.setdefault('_turso_read_cache_v2', {})
         self.query('CREATE TABLE IF NOT EXISTS sports_records (namespace TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(namespace,key))')
 
     def restore(self, value):
@@ -8559,6 +8603,11 @@ if "--maintenance" in sys.argv:
     raise SystemExit(0)
 
 
+# Worker commands exit above. Browser lists use compact read projections only;
+# original forecast evidence is fetched individually when opening a pick.
+workflow_store=CompactViewStore(workflow_store)
+workflow.store=workflow_store
+
 # Optional password for this shared personal workspace.
 
 import hmac
@@ -8612,7 +8661,7 @@ def ui_photo(frozen):
     athlete = result.get('roster', {}).get('athlete', {})
     if not athlete:
         athlete = (frozen or {}).get('snapshot', {}).get('roster', {})
-    photo = athlete.get('headshot', {})
+    photo = athlete.get('headshot', {}) or (frozen or {}).get('portrait') or {}
     href = photo.get('href', '') if isinstance(photo, dict) else str(photo or '')
     # Only use source-provided HTTPS images; no name-based guesses or new requests.
     return href if href.startswith('https://') else ''
@@ -8926,6 +8975,7 @@ def ui_detail(card, forecasts):
         st.session_state.pop('selected_prop_card', None)
         st.rerun()
     frozen = forecasts.get(identity(card))
+    if frozen:frozen=workflow_store.get('forecast',frozen.get('id') or identity(card)) or frozen
     result = (frozen or {}).get('result') or {}
     name = ui_name(card.get('Player', ''))
     photo = ui_photo(frozen)
@@ -9466,7 +9516,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1 · shared-odds-1 · saved-board-review-1 · monthly-budget-1 · manual-lines-1")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1 · shared-odds-1 · saved-board-review-1 · monthly-budget-1 · manual-lines-1 · compact-reads-1")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
