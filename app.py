@@ -690,6 +690,52 @@ def roster_name_key(name):
     return re.sub(r'[^a-z0-9]', '', name)
 
 
+def pick_offered_sides(card):
+    if 'Available Sides' in card:
+        raw = card.get('Available Sides')
+        if not isinstance(raw, (list, tuple, set)):
+            return None
+        sides = {str(value).strip().upper() for value in raw}
+        if sides - {'MORE','LESS'}:
+            return None
+        return tuple(sorted(sides))
+    if str(card.get('Platform','')).strip().lower() != 'prizepicks':
+        return ('MORE','LESS')
+    # Do not infer two-sided availability for a special or unknown line.
+    if str(card.get('Line Type','')).strip().lower() in ('standard','regular'):
+        return ('MORE','LESS')
+    return None
+
+
+def pick_is_selectable(card, result):
+    if not result or result.get('tie') or result.get('selection_allowed') is False:
+        return False
+    sides = pick_offered_sides(card)
+    return sides is not None and str(result.get('direction','')).upper() in sides
+
+
+def pick_side_note(card, result):
+    if pick_is_selectable(card, result):
+        sides = pick_offered_sides(card)
+        return sides[0] + ' only' if len(sides) == 1 else 'MORE and LESS offered'
+    if result.get('tie'):
+        return 'Projection equals the line. Pass.'
+    sides = pick_offered_sides(card)
+    if sides is None:
+        return 'Offered sides are unverified. No selectable pick.'
+    direction = str(result.get('direction','')).upper()
+    if direction and direction not in sides:
+        offered = ' and '.join(sides) + ' only' if sides else 'No offered side'
+        return offered + ' · Model estimate: ' + direction + '. Pass; the direction is not flipped.'
+    return 'Original forecast was not entry-eligible. Retained for the model audit only.'
+
+
+def pick_display_label(card, result):
+    if not pick_is_selectable(card, result):
+        return 'VERIFY SIDES' if pick_offered_sides(card) is None else 'PASS'
+    return '↑ MORE' if str(result.get('direction')).upper() == 'MORE' else '↓ LESS'
+
+
 class Workflow:
     def __init__(self, engine, store):
         self.e = engine
@@ -1086,21 +1132,11 @@ class Workflow:
             "minutes restrictions require verified inputs."
         )
 
-        offered = card.get("Available Sides")
-        if card.get("Platform") == "prizepicks" and offered is not None:
-            result["selection_allowed"] = result["direction"] in offered
-        else:
-            result["selection_allowed"] = not (
-                card.get("Platform") == "prizepicks"
-                and card.get("Line Type") in ("Goblin", "Demon")
-                and result["direction"] == "LESS"
-            )
+        result["selection_allowed"] = pick_is_selectable(card, result)
 
         if not result["selection_allowed"]:
             result["warnings"].append(
-                "LESS is not selectable on this PrizePicks "
-                "tier. This is a directional forecast, "
-                "not an eligible entry."
+                pick_side_note(card, result)
             )
 
         return result
@@ -7053,8 +7089,8 @@ def compact_fantasy_card_html(item, status=None):
     result = item['frozen'].get('result') or {}
     text = lambda value: escape(str(value if value is not None else ''))
     direction = result.get('direction')
-    side = '↑ MORE' if direction == 'MORE' else '↓ LESS' if direction == 'LESS' else 'Unavailable'
-    side_class = 'fc-more' if direction == 'MORE' else 'fc-less' if direction == 'LESS' else ''
+    side = pick_display_label(card, result)
+    side_class = ('fc-more' if direction == 'MORE' else 'fc-less') if pick_is_selectable(card, result) else ''
     outcome = item.get('outcome', 'PENDING')
     label = {'WIN':'✓ WIN', 'LOSS':'✕ LOSS', 'TIE':'Tie', 'DNP':'DNP', 'PENDING':'Pending'}.get(outcome,outcome)
     outcome_class = 'fc-more' if outcome == 'WIN' else 'fc-less' if outcome == 'LOSS' else ''
@@ -7065,8 +7101,8 @@ def compact_fantasy_card_html(item, status=None):
     if item.get('upcoming') and status.get('blocked'):
         phase = 'Unavailable'
         note = '<div class="fc-note">' + text(status.get('note','Player status needs review')) + '</div>'
-    if not result.get('selection_allowed', True):
-        note += '<div class="fc-note">Direction not offered on this saved tier</div>'
+    if not pick_is_selectable(card, result):
+        note += '<div class="fc-note">' + text(pick_side_note(card, result)) + '</div>'
     marker = ui_tier_marker(card)
     tier = card.get('Line Type') or 'Unverified'
     return f'''<div class="fc-card">
@@ -7100,8 +7136,9 @@ def render_fantasy_plays(wf, st):
     board = wf.store.get('board', 'board') or {}
     rows = board.get('v4_rows') or st.session_state.get('v4_rows', [])
     summary, saved = fantasy_saved_summary(rows, records, grades)
-    upcoming = [item for item in saved if item['upcoming'] and item['date'] == slate_day()]
-    default = 'Upcoming' if upcoming or not saved else 'Saved forecasts'
+    upcoming_all = [item for item in saved if item['upcoming'] and item['date'] == slate_day()]
+    upcoming = [item for item in upcoming_all if pick_is_selectable(item['card'], item['frozen'].get('result') or {})]
+    default = 'Upcoming' if upcoming_all or not saved else 'Saved forecasts'
     mode = st.segmented_control('Fantasy view', ['Upcoming', 'Saved forecasts'], default=default,
                                 key='fantasy_view_buttons', width='stretch') or default
     auto = wf.store.get('automation', slate_day()) or {}
@@ -7110,9 +7147,11 @@ def render_fantasy_plays(wf, st):
     date = None
     if mode == 'Upcoming':
         visible = upcoming
-        queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming))
+        if len(upcoming_all) > len(upcoming):
+            st.caption(f'{len(upcoming_all)-len(upcoming)} saved Fantasy estimates are passes or have unverified offered sides; they are excluded from upcoming plays.')
+        queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming_all))
         if queued: st.caption(f'{queued} imported Fantasy lines are awaiting verified projections.')
-        if not visible: st.info('No calculated upcoming Fantasy plays today. Select Saved forecasts for earlier games.')
+        if not visible: st.info('No selectable upcoming Fantasy plays today. Select Saved forecasts for earlier games.')
     else:
         dates = sorted({item['date'] for item in saved}, reverse=True)
         if not dates:
@@ -7639,6 +7678,9 @@ def ui_save_pick(card, frozen):
         old['active'] = False
         workflow_store.put('watchlist', key, old)
     else:
+        if not frozen or not pick_is_selectable(card, frozen.get('result') or {}):
+            st.info(pick_side_note(card, (frozen or {}).get('result') or {}))
+            return False
         workflow_store.put('watchlist', key, {
             'active': True, 'saved_at': now(), 'card': json_safe(dict(card)),
             'forecast_id': key if frozen else None,
@@ -7671,6 +7713,10 @@ def ui_card(card, frozen, saved=False):
     is_more = direction == 'MORE'
     direction_class = 'more' if is_more else 'less' if direction == 'LESS' else 'pending'
     direction_text = ('↑ MORE' if is_more else '↓ LESS' if direction == 'LESS' else (workflow_store.get('calculation_status', identity(card)) or {}).get('Status', 'Queued'))
+    if result and not pick_is_selectable(card, result):
+        direction_class = 'pending'
+        direction_text = pick_display_label(card, result)
+        probability = None
     platform = str(card.get('Platform', '')).upper()
     tier = str(card.get('Line Type', '')).strip() if platform == 'PRIZEPICKS' else ''
     marker = ui_tier_marker(card)
@@ -7697,14 +7743,14 @@ def ui_card(card, frozen, saved=False):
         st.warning('Unavailable for current plays: ' + health.get('note', 'Player status requires review') + '. Original prediction retained for the audit.')
     elif health.get('statuses'):
         st.caption('Latest injury status: ' + ', '.join(health['statuses']) + ' · checked ' + str(health.get('checked_at')))
-    if result and not result.get('selection_allowed', True):
-        st.caption('This direction is not offered for the selected platform/tier.')
+    if result:
+        st.caption(pick_side_note(card, result))
     key = identity(card)
     left, right = st.columns([3, 1])
     if left.button('Research  ›', key='detail_' + key, use_container_width=True):
         st.session_state['selected_prop_card'] = dict(card)
         st.rerun()
-    if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, use_container_width=True):
+    if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, disabled=not saved and not pick_is_selectable(card, result), use_container_width=True):
         ui_save_pick(card, frozen)
         st.rerun()
 
@@ -7931,14 +7977,18 @@ def ui_detail(card, forecasts):
         direction = str(result.get('direction', '')).upper()
         side = ('↑ MORE' if direction == 'MORE' else '↓ LESS' if direction == 'LESS' else 'Not calculated')
         side_class = 'more' if direction == 'MORE' else 'less' if direction == 'LESS' else 'pending'
+        if not pick_is_selectable(card, result):
+            side = pick_display_label(card, result)
+            side_class = 'pending'
         projection = ui_number(result.get('projection'))
         probability = ui_number(result.get('estimated_hit_probability'))
+        if not pick_is_selectable(card, result): probability = None
         st.markdown(f'''<div class="sl-hero"><div class="sl-side {side_class}">{ui_text(side)} {line_text}</div>
         <div class="sl-proj"><small>Model projection</small><b>{f'{projection:.2f}' if projection is not None else '—'}</b></div>
         <div class="sl-proj"><small>Estimated hit</small><b>{f'{probability:.0%}' if probability is not None else '—'}</b></div></div>''', unsafe_allow_html=True)
         st.caption('Frozen pregame forecast · Experimental probability estimate')
-        if not result.get('selection_allowed', True):
-            st.warning('This direction is not offered on the selected platform/tier.')
+        if not pick_is_selectable(card, result):
+            st.warning(pick_side_note(card, result))
     else:
         st.info('No frozen forecast yet. Use Calculate board in Settings; no sample projection is substituted.')
     ui_pick_context_strip(card, result)
@@ -8085,7 +8135,7 @@ def ui_board(page):
     if view == 'Top plays':
         records = [c for c in records if identity(c) in forecasts
                    and not (health.get('players', {}).get(player_health_key(c)) or {}).get('blocked', False)
-                   and forecasts[identity(c)]['result'].get('selection_allowed', True)
+                   and pick_is_selectable(c, forecasts[identity(c)]['result'])
                    and not forecasts[identity(c)]['result'].get('tie', False)]
         records.sort(key=lambda c: ui_number(forecasts[identity(c)]['result'].get('standardized_gap'), -1), reverse=True)
         st.caption('Ranked by projected gap relative to recent variability. This is not a proven probability or profit ranking. All props remains available.')
@@ -8125,7 +8175,7 @@ def ui_board(page):
                     if not frozen:
                         return (0, -1.0, -1.0)
                     result = frozen.get('result', {})
-                    if not result.get('selection_allowed', True) or result.get('tie'):
+                    if not pick_is_selectable(candidate, result):
                         return (1, -1.0, -1.0)
                     score = ui_number(result.get('standardized_gap'), -1)
                     gap = abs(ui_number(result.get('gap'), 0))
@@ -8443,7 +8493,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
