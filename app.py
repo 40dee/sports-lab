@@ -4241,8 +4241,17 @@ def api_get(path, params, force=False):
     cache=store.get('odds_cache',cache_key) or {}
     stamp=utc_timestamp(cache.get('fetched_at'))
     current=pd.Timestamp.now(tz='UTC')
-    ttl={'/markets':86400,'/fixtures':1800,'/odds':900}.get(path,900)
-    if not force and pd.notna(stamp) and 0 <= (current-stamp).total_seconds()<ttl and 'payload' in cache:
+    # Reuse each successful paid response for the whole Pacific slate day.
+    # The source timestamp remains unchanged: consumers must still distinguish
+    # a cached line from a verified current offer. An explicit force refresh
+    # is allowed only through the existing shared quota reservation.
+    paid_slate_cache = path not in ('/markets', '/fixtures')
+    same_slate = (pd.notna(stamp) and
+        stamp.tz_convert(SLATE_TIMEZONE).date() == current.tz_convert(SLATE_TIMEZONE).date())
+    ttl={'/markets':86400,'/fixtures':1800}.get(path,900)
+    if not force and 'payload' in cache and pd.notna(stamp) and (
+        (paid_slate_cache and same_slate) or
+        (not paid_slate_cache and 0 <= (current-stamp).total_seconds()<ttl)):
         return cache['payload']
     paused=store.get('odds_status','provider') or {}
     resume=utc_timestamp(paused.get('resume_after'))
