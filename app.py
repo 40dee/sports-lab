@@ -5797,10 +5797,10 @@ def render_card_history(card):
         ):
             h2h_games = sample[
                 sample["OPPONENT_ID"] == opponents[0]
-            ]
+            ].head(15)
             summaries.append(
                 window_summary(
-                    h2h_games, float(card["Line"]), "H2H (two seasons)"
+                    h2h_games, float(card["Line"]), "H2H (up to 15 available)"
                 )
             )
         else:
@@ -5811,10 +5811,20 @@ def render_card_history(card):
     except Exception:
         st.caption("H2H unavailable: ESPN team mapping did not load.")
 
-    st.markdown("#### Detailed game log")
-    st.dataframe(sample[["GAME_DATE", "MATCHUP", "MIN", "VALUE"]].rename(
-        columns={"VALUE": ui_stat(card)}), hide_index=True, use_container_width=True)
-    st.markdown("#### History and splits for this prop")
+    st.markdown("#### Recent form & splits")
+    summary_columns = st.columns(3)
+    for column, label, frame in zip(summary_columns, ['Last 5 average','Last 15 average','H2H average'],
+                                    [sample.head(5), sample.head(15), h2h_games]):
+        value = None if frame is None or frame.empty else float(frame['VALUE'].mean())
+        column.metric(label, f'{value:.2f}' if value is not None else '—')
+    with st.expander("Game log · recent appearances"):
+        limit = st.selectbox('Games to show', [15, 5, 10, 20, 50], key='detail_log_count_' + identity(card))
+        log = sample.head(limit)[['GAME_DATE', 'MATCHUP', 'MIN', 'VALUE']].copy()
+        log['GAME_DATE'] = pd.to_datetime(log['GAME_DATE'], utc=True).dt.tz_convert('America/Los_Angeles').dt.strftime('%b %d, %Y')
+        log = log.rename(columns={'GAME_DATE':'Date (Pacific)','MATCHUP':'Opponent','MIN':'Minutes','VALUE':ui_stat(card)})
+        st.dataframe(log, hide_index=True, use_container_width=True, height=350)
+        st.caption(f'{len(log)} displayed · {len(sample)} verified appearances loaded across the selected seasons.')
+    st.markdown("#### Window averages & home/away")
     st.dataframe(
         pd.DataFrame(summaries),
         hide_index=True,
@@ -7347,7 +7357,9 @@ def pick_history_sample(history, card, window='L15', location='All', reference=N
             raise ValueError('Opponent identity could not be verified for H2H.')
         games = games[games['OPPONENT_ID'].astype(str) == str(opponent_id)]
     games = games.sort_values('GAME_DATE', ascending=False)
-    if window.startswith('L'):
+    if window == 'H2H':
+        games = games.head(15)
+    elif window.startswith('L'):
         games = games.head(int(window[1:]))
     return games
 
@@ -7435,6 +7447,39 @@ def ui_recent_chart(card, history):
 
 
 
+def ui_pick_context_strip(card, result):
+    """Display saved context only; never refresh a quote or revise a forecast."""
+    context = result.get('game_context') or {}
+    available = context.get('available') is True
+    minutes = ui_number(result.get('minutes'))
+    spread = ui_number(context.get('home_spread')) if available else None
+    risk = str(context.get('risk') or 'Unavailable') if available else 'Unavailable'
+    if risk not in ('Lower', 'Moderate', 'Higher'):
+        risk = 'Unavailable'
+    colors = {'Lower':'#53dfab','Moderate':'#f0ca78','Higher':'#ff8e99','Unavailable':'#a3b6ca'}
+    spread_text = (str(context.get('home', 'Home')) + f' {spread:+g}') if spread is not None else 'Unavailable'
+    st.markdown('''<style>
+    .sl-context-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:16px 0 6px}
+    .sl-context-tile{background:#102234;border:1px solid #30485e;border-radius:12px;padding:12px 14px;min-width:0}
+    .sl-context-tile small{display:block;color:#a5b8cb;font-size:.74rem;margin-bottom:6px}
+    .sl-context-tile strong{display:block;color:#f1f6fc;font-size:1.05rem;overflow-wrap:anywhere}
+    @media(max-width:600px){.sl-context-grid{gap:6px}.sl-context-tile{padding:10px 8px}.sl-context-tile strong{font-size:.86rem}}
+    </style>''', unsafe_allow_html=True)
+    st.markdown('<div class="sl-context-grid">'
+        + '<div class="sl-context-tile"><small>Projected minutes</small><strong>'+ (f'{minutes:.1f}' if minutes is not None else 'Unavailable') + '</strong></div>'
+        + '<div class="sl-context-tile"><small>Saved game spread</small><strong>'+ui_text(spread_text)+'</strong></div>'
+        + '<div class="sl-context-tile"><small>Blowout context</small><strong style="color:'+colors[risk]+'">'+ui_text(risk)+'</strong></div></div>', unsafe_allow_html=True)
+    st.caption('Saved with the forecast · Spread-based blowout context, not a calibrated probability or an automatic minutes deduction.')
+
+
+def ui_frozen_sources(result):
+    with st.expander('Calculation & saved data sources'):
+        if not result:
+            st.info('No saved calculation for this pick.')
+            return
+        st.json({key: result[key] for key in ('minutes','components','learning_model','probability_method','probability_note','availability','warnings') if key in result})
+
+
 def ui_detail(card, forecasts):
     if st.button('‹  Plays', key='back_to_plays'):
         st.session_state.pop('selected_prop_card', None)
@@ -7466,42 +7511,27 @@ def ui_detail(card, forecasts):
             st.warning('This direction is not offered on the selected platform/tier.')
     else:
         st.info('No frozen forecast yet. Use Calculate board in Settings; no sample projection is substituted.')
-    tab = st.radio('Pick research', ['Overview', 'Matchup', 'Market', 'History'], horizontal=True,
-                   key='pick_research_' + identity(card))
+    ui_pick_context_strip(card, result)
+    tab = st.segmented_control('Pick research', ['Overview', 'Matchup', 'Market', 'History'],
+                               default='Overview', key='pick_sections_' + identity(card),
+                               label_visibility='collapsed', width='stretch') or 'Overview'
+    history = None
     try:
         if tab == 'Overview':
             history = ui_history(card)
-            ui_recent_chart(card, history)
             if fantasy_weights(card) and history is not None:
                 ui_fantasy_rates(card, history, result)
-            st.markdown('#### What drives this pick')
-            minutes = ui_number(result.get('minutes'))
-            if minutes is not None:
-                st.metric('Minutes outlook', f'{minutes:.1f}')
-            else:
-                st.caption('Minutes outlook: not available in frozen forecast.')
-            with st.expander('Blowout indicator · spread & minutes'):
-                render_game_context(engine_game_context(card))
-                st.caption('A numerical blowout probability is not displayed unless a validated estimate exists.')
-            with st.expander('Starting status and availability'):
-                render_player_availability(card)
-            with st.expander('Market prices & fees'):
-                if card.get('Platform') == 'kalshi':
-                    render_kalshi(card)
-                else:
-                    st.caption('Only verified available quotes are displayed in Market.')
-            st.caption('Full game log, home/away splits and H2H tables are in History.')
-            with st.expander('Calculation & data sources'):
-                if history is not None:
-                    render_calculated_pick(history, card, current_season())
+            availability = result.get('availability') or {}
+            statuses = [str(entry.get('status', 'Unknown')) for entry in availability.get('entries', [])]
+            st.caption('Availability at forecast: ' + (', '.join(statuses) if statuses else 'No confirmed playing or starting status in the saved report.'))
+            ui_frozen_sources(result)
         elif tab == 'Matchup':
             render_player_availability(card)
             render_team_advanced(card)
             render_position_defense(card)
-            with st.expander('Team scoring context'):
-                render_team_scoring(card)
-            with st.expander('Spread, total & blowout context'):
-                render_game_context(engine_game_context(card))
+            with st.expander('Additional team scoring context'):
+                if st.button('Load team scoring context', key='detail_team_scoring_' + identity(card)):
+                    render_team_scoring(card)
         elif tab == 'Market':
             if card.get('Platform') == 'kalshi':
                 render_kalshi(card)
@@ -7510,13 +7540,21 @@ def ui_detail(card, forecasts):
                 st.write(f"Matching sportsbook no-vig MORE: **{market['more']:.1%}** · LESS: **{market['less']:.1%}**")
             else:
                 st.caption('No unique matching sportsbook over/under pair available.')
-            render_game_context(engine_game_context(card))
+            context = result.get('game_context') or {'available': False, 'reason': 'No game market context saved with this forecast.'}
+            if st.button('Refresh game market context', key='detail_context_refresh_' + identity(card)):
+                st.session_state['detail_context_' + identity(card)] = engine_game_context(card)
+            refreshed = st.session_state.get('detail_context_' + identity(card))
+            if refreshed is not None:
+                st.caption('Refreshed display context; the original forecast is retained.')
+            render_game_context(refreshed if refreshed is not None else context)
         else:
-            history = ui_history(card)
             render_card_history(card)
-            with st.expander('Full projection calculation & sources'):
-                if history is not None:
-                    render_calculated_pick(history, card, current_season())
+            history = ui_history(card)
+            ui_frozen_sources(result)
+        if history is not None:
+            st.divider()
+            st.markdown('#### Recent performance')
+            ui_recent_chart(card, history)
     except Exception:
         st.warning('This research section could not load. Your frozen forecast remains unchanged.')
 
@@ -7942,11 +7980,13 @@ def render_app_pages():
     # Replace the previous page body before doing any page-specific reads.
     page_body = st.empty()
     page_body.empty()
-    with page_body.container():
+    with page_body.container(key="sports_lab_page_body_" + app_page.lower()):
+        loading = st.empty()
+        loading.caption("Opening " + app_page + "…")
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-2")
+            st.caption("App build: navigation-3 · detail-layout-1")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
@@ -7987,7 +8027,7 @@ def render_app_pages():
             if scan_scope == 'Limit game count':
                 max_games = int(st.number_input('Maximum games this scan', min_value=1,
                     value=3, step=1, key='nba_scan_limit'))
-            if st.checkbox('Load scan estimate and schedule preview', key='show_scan_preview'):
+            if st.button('Load scan estimate and schedule preview', key='load_scan_preview_once'):
                 try:
                     preview = scan_schedule_preview(slate_day(), saved_fetch)
                     estimated_games = len(preview) if max_games is None else min(len(preview), max_games)
@@ -8226,14 +8266,19 @@ def render_app_pages():
 
 
             if HISTORY_DB.exists():
-                st.download_button(
-                    "Back up historical response cache",
-                    data=HISTORY_DB.read_bytes(),
-                    file_name="sports_lab_history.sqlite3",
-                    mime="application/vnd.sqlite3",
-                )
+                if st.button("Prepare historical cache backup", key="prepare_history_cache_backup"):
+                    # Read only when requested, not on every visit to Settings.
+                    st.session_state["_prepared_history_cache_backup"] = HISTORY_DB.read_bytes()
+                cache_backup = st.session_state.get("_prepared_history_cache_backup")
+                if cache_backup is not None:
+                    st.download_button(
+                        "Back up historical response cache",
+                        data=cache_backup,
+                        file_name="sports_lab_history.sqlite3",
+                        mime="application/vnd.sqlite3",
+                    )
 
-
+        loading.empty()
 
 
 render_app_pages()
