@@ -74,7 +74,7 @@ class RequestTests(unittest.TestCase):
   self.assertEqual(self.calls.call_count,1)
  def test_provider_error_keeps_old_fetch_timestamp_and_avoids_immediate_retry(self):
   params={'fixtureId':'1'};key=env['odds_cache_key']('/odds',params)
-  old=(pd.Timestamp.now(tz='UTC')-pd.Timedelta(hours=1)).isoformat()
+  old=(pd.Timestamp.now(tz='UTC').tz_convert('America/Los_Angeles').normalize()-pd.Timedelta(minutes=1)).tz_convert('UTC').isoformat()
   self.store.put('odds_cache',key,{'payload':{'value':'old'},'fetched_at':old})
   self.calls.side_effect=requests.RequestException('secret-credential in external error')
   with self.assertRaisesRegex(ValueError,'Unable to connect'):env['api_get']('/odds',params)
