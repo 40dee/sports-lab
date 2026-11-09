@@ -277,6 +277,8 @@ class Store:
             "coverage",
             "input_health",
             "request_budget",
+            "combo", "combo_grade", "combo_suggestions", "combo_actual",
+            "combo_cohort", "combo_model", "combo_review",
         }
 
         checked = []
@@ -734,6 +736,463 @@ def pick_display_label(card, result):
     if not pick_is_selectable(card, result):
         return 'VERIFY SIDES' if pick_offered_sides(card) is None else 'PASS'
     return '↑ MORE' if str(result.get('direction')).upper() == 'MORE' else '↓ LESS'
+
+
+# Combo snapshots are paper research, never platform orders or inferred payouts.
+COMBO_POLICIES = ('balanced-v1', 'diverse-v1')
+COMBO_RULES_URL = 'https://www.prizepicks.com/help-center/payouts'
+
+
+def combo_clock(reference=None):
+    return pd.Timestamp.now(tz='UTC') if reference is None else pd.to_datetime(reference, utc=True)
+
+
+def combo_pool(store, reference=None):
+    current = combo_clock(reference)
+    board = store.get('board', 'board') or {}
+    health = (store.get('health', slate_day(current)) or {}).get('players') or {}
+    index = forecast_index(store.items('forecast'))
+    pool, excluded, seen = [], {}, set()
+    def reject(reason): excluded[reason] = excluded.get(reason, 0) + 1
+    for card in board.get('v4_rows') or []:
+        if str(card.get('Platform', '')).lower() != 'prizepicks': continue
+        signature = market_signature(card)
+        if signature in seen: continue
+        seen.add(signature)
+        if not today_pregame(card.get('Start (UTC)'), current): continue
+        frozen = saved_prediction(index, card)
+        result = (frozen or {}).get('result') or {}
+        start = utc_timestamp(card.get('Start (UTC)'))
+        created = utc_timestamp((frozen or {}).get('created_at'))
+        if not frozen or pd.isna(created) or created > current or created >= start:
+            reject('No valid frozen pregame projection'); continue
+        if (start-current).total_seconds() < 300:
+            reject('Within five minutes of recorded start'); continue
+        if not pick_is_selectable(card, result):
+            reject('Direction unavailable or unverified'); continue
+        if str(card.get('Line Type', '')).lower() not in ('standard','regular','goblin','demon'):
+            reject('Line tier unverified'); continue
+        h = health.get(player_health_key(card)) or {}
+        checked = utc_timestamp(h.get('checked_at'))
+        if (pd.isna(checked) or not 0 <= (current-checked).total_seconds() <= 3600
+                or not h.get('injuries_available') or not h.get('player_id') or not h.get('team_id')):
+            reject('Roster or injury check missing/stale'); continue
+        statuses = {str(v).lower().strip() for v in h.get('statuses') or []}
+        if h.get('blocked') or statuses & {'out','suspended','doubtful','questionable','day-to-day','day to day'}:
+            reject('Player status needs review'); continue
+        if str(h['player_id']) != str(result.get('player_id')):
+            reject('Player identity changed'); continue
+        try:
+            score = float(result['standardized_gap'])
+            projection = float(result['projection'])
+            games = int(result.get('ranking_games') or 0)
+            line = float(card['Line'])
+            if not all(math.isfinite(v) for v in (score,projection,line)) or score < .25 or games < 5:
+                raise ValueError('weak or insufficient history')
+        except (KeyError,ValueError,TypeError,OverflowError):
+            reject('Insufficient history or projected separation'); continue
+        pool.append({'forecast_id': frozen['id'], 'card': dict(card),
+            'player_id': str(h['player_id']), 'team_id': str(h['team_id']),
+            'event_id': str(frozen['event_id']), 'direction': result['direction'],
+            'projection': projection, 'score': score, 'games': games,
+            'stat_group': result.get('stat_group') or str(card.get('Stat Key')),
+            'health_checked_at': h['checked_at'], 'forecast_created_at': frozen['created_at']})
+    pool.sort(key=lambda x:(-min(x['score'],1.5),-x['games'],x['forecast_id']))
+    # One exact line per player. Huge raw gaps cannot dominate all candidates.
+    players, kept = set(), []
+    for leg in pool:
+        if leg['player_id'] in players: continue
+        players.add(leg['player_id']); kept.append(leg)
+    return kept[:24], excluded
+
+
+def combo_rank(legs, policy):
+    scores = [min(1.5, x['score']) for x in legs]
+    same_game = len(legs)-len({x['event_id'] for x in legs})
+    same_stat = len(legs)-len({x['stat_group'] for x in legs})
+    return .65 * min(scores) + .35 * sum(scores)/len(scores) - (
+        .16 if policy == 'diverse-v1' else .08)*same_game - .02*same_stat
+
+
+def combo_candidates(pool, size, policy):
+    # Bounded beam search, not an exhaustive optimizer or a probability model.
+    beam = [()]
+    for _ in range(size):
+        next_beam = []
+        for chosen in beam:
+            for i in range(chosen[-1]+1 if chosen else 0, len(pool)):
+                legs = [pool[j] for j in chosen+(i,)]
+                if sum(x['event_id']==pool[i]['event_id'] for x in legs) > 2: continue
+                next_beam.append(chosen+(i,))
+        next_beam.sort(key=lambda indexes:(-combo_rank([pool[j] for j in indexes],policy),indexes))
+        beam = next_beam[:128]
+    eligible = [indexes for indexes in beam if len({pool[j]['team_id'] for j in indexes}) >= 2]
+    selected = []
+    for indexes in eligible:
+        # Alternatives must replace at least one player in a two-pick entry,
+        # and at least two for larger entries when the pool permits it.
+        if any(len(set(indexes)&set(old)) > max(1,size-2) for old in selected): continue
+        selected.append(indexes)
+        if len(selected)==3: break
+    return [[pool[j] for j in indexes] for indexes in selected]
+
+
+def combo_snapshot(legs, policy, reference=None):
+    stamp = combo_clock(reference)
+    if not 2 <= len(legs) <= 6 or len({x['player_id'] for x in legs}) != len(legs):
+        raise ValueError('A combo needs 2–6 different players.')
+    if len({x['team_id'] for x in legs}) < 2:
+        raise ValueError('At least two teams are required.')
+    for leg in legs:
+        start = utc_timestamp(leg['card'].get('Start (UTC)'))
+        if pd.isna(start) or stamp >= start or not utc_timestamp(leg['forecast_created_at']) <= stamp < start:
+            raise ValueError('Combo snapshots must be saved before every leg starts.')
+        if sum(x['event_id']==leg['event_id'] for x in legs)>2:
+            raise ValueError('At most two players per game in this builder.')
+    key = hashlib.sha256(encode([slate_day(stamp),policy,
+        sorted([x['forecast_id'],identity(x['card']),x['direction']] for x in legs)]).encode()).hexdigest()
+    return {'id': key, 'created_at': stamp.isoformat(), 'day': slate_day(stamp),
+        'size': len(legs), 'policy':policy, 'platform':'prizepicks', 'kind':'paper',
+        'legs':json_safe(legs), 'ranking_score':combo_rank(legs,policy),
+        'rules_version':'combos-1', 'payout_terms':None,
+        'note':'Directional paper result. No entry submitted. No multiplied hit probabilities.'}
+
+
+def combo_directional_grade(combo, grades, reference=None):
+    outcomes = []
+    for leg in combo['legs']:
+        grade = grades.get(leg['forecast_id']) or {}
+        outcome = grade.get('outcome','PENDING')
+        # Never turn unresolved data into a loss or guess a platform reboot.
+        if outcome not in ('WIN','LOSS','TIE','DNP'): outcome = 'PENDING'
+        outcomes.append({'forecast_id':leg['forecast_id'],'outcome':outcome,
+            'actual':grade.get('actual') if outcome in ('WIN','LOSS','TIE') else None})
+    pending = sum(x['outcome']=='PENDING' for x in outcomes)
+    voids = sum(x['outcome'] in ('DNP','TIE') for x in outcomes)
+    losses = sum(x['outcome']=='LOSS' for x in outcomes)
+    state = 'PENDING' if pending else 'VOID_REVIEW' if voids else 'ALL_HIT' if not losses else 'MISSED'
+    return {'state':state,'wins':sum(x['outcome']=='WIN' for x in outcomes),
+        'losses':losses,'pending':pending,'voids':voids,'legs':outcomes,
+        'graded_at':combo_clock(reference).isoformat(),
+        'note':'Model direction results; PrizePicks DNP, reboot and payout settlement can differ.'}
+
+
+def combo_live_check(store, combo, reference=None):
+    current = combo_clock(reference)
+    board = store.get('board','board') or {}
+    cards = {identity(c):c for c in board.get('v4_rows') or []}
+    health = (store.get('health',slate_day(current)) or {}).get('players') or {}
+    for leg in combo['legs']:
+        old = leg['card']
+        start = utc_timestamp(old.get('Start (UTC)'))
+        if pd.isna(start) or (start-current).total_seconds() < 300:
+            return False, 'Locked: a recorded game has started or is within five minutes.'
+        card = cards.get(identity(old))
+        if card is None or card.get('Start (UTC)') != old.get('Start (UTC)'):
+            return False, 'Review needed: line, tier, schedule or board presence changed.'
+        if not pick_is_selectable(card, {'direction':leg['direction']}):
+            return False, 'Review needed: the selected direction is no longer verified.'
+        h = health.get(player_health_key(card)) or {}
+        checked = utc_timestamp(h.get('checked_at'))
+        if (pd.isna(checked) or not 0 <= (current-checked).total_seconds()<=3600
+                or not h.get('injuries_available') or h.get('blocked')
+                or str(h.get('player_id')) != leg['player_id']
+                or str(h.get('team_id')) != leg['team_id']
+                or any(str(s).lower() in ('out','suspended','doubtful','questionable','day-to-day','day to day') for s in h.get('statuses') or [])):
+            return False, 'Review needed: player availability check changed or expired.'
+    return True, 'Saved board and recent roster/injury checks match. Confirm the live entry in PrizePicks.'
+
+
+def combo_learning(store, reference=None):
+    """Paired daily paper cohorts; never add repeated legs to singles training."""
+    from collections import defaultdict
+    settled = dict(store.items('combo_grade'))
+    combos = dict(store.items('combo'))
+    cohorts = store.items('combo_cohort')
+    models, reports = dict(store.items('combo_model')), []
+    for size in range(2,7):
+        days = {}
+        for _, cohort in cohorts:
+            if cohort.get('size') != size: continue
+            values = {}
+            for policy in COMBO_POLICIES:
+                keys = cohort.get('policies',{}).get(policy,[])
+                usable = [settled.get(k,{}) for k in keys]
+                if len(keys)!=3 or any(g.get('state') not in ('ALL_HIT','MISSED') for g in usable): break
+                values[policy]=sum(g['state']=='ALL_HIT' for g in usable)/3
+            if len(values)==2: days[cohort['day']]=(values,cohort)
+        ordered = sorted(days)
+        active = models.get(str(size)) or {'policy':'balanced-v1','version':'initial-v1'}
+        report = {'size':size,'active_policy':active['policy'],'paired_days':len(ordered),
+                  'required_days':14,'status':'Collecting paired settled days','reviewed_at':combo_clock(reference).isoformat()}
+        previous = [v for _,v in store.items('combo_review') if v.get('size')==size and v.get('holdout_end')]
+        fresh = [d for d in ordered if not previous or d>max(v['holdout_end'] for v in previous)]
+        if len(ordered)>=14 and (not previous or len(fresh)>=4):
+            split = fresh[0] if previous else ordered[-4]
+            train,test = [d for d in ordered if d<split],[d for d in ordered if d>=split]
+            legs = {leg['forecast_id']:leg for d in ordered for keys in days[d][1]['policies'].values()
+                    for key in keys for leg in combos[key]['legs']}
+            report.update(unique_legs=len(legs), unique_games=len({v['event_id'] for v in legs.values()}))
+            if len(train)>=10 and len(test)>=4 and len(legs)>=120 and report['unique_games']>=40:
+                mean=lambda dates,p:sum(days[d][0][p] for d in dates)/len(dates)
+                candidate=max(COMBO_POLICIES,key=lambda p:(mean(train,p),p==active['policy']))
+                old,new=mean(test,active['policy']),mean(test,candidate)
+                promoted=candidate!=active['policy'] and new>=old+.02
+                report.update(status='Activated for future combos' if promoted else 'Reviewed; current policy retained',
+                    candidate=candidate,train_days=len(train),holdout_days=len(test),
+                    holdout_start=split,holdout_end=ordered[-1],candidate_accuracy=new,
+                    incumbent_accuracy=old,promoted=promoted,
+                    method='Equal-weight daily all-hit rate; paired paper cohorts, not independent legs or payout optimization.')
+                review_key=str(size)+':'+ordered[-1]
+                if not store.get('combo_review',review_key):
+                    store.put('combo_review',review_key,report,immutable=True)
+                    if promoted:
+                        store.put('combo_model',str(size),{'policy':candidate,'version':review_key,'activated_at':report['reviewed_at']})
+        reports.append(report)
+    return reports
+
+
+def update_combos(store, generate=False, reference=None):
+    current=combo_clock(reference)
+    generated=0
+    if generate:
+        pool, excluded=combo_pool(store,current)
+        suggestions={'created_at':current.isoformat(),'day':slate_day(current),
+                     'eligible_players':len(pool),'excluded':excluded,'sizes':{}}
+        for size in range(2,7):
+            models=store.get('combo_model',str(size)) or {'policy':'balanced-v1'}
+            policies={}
+            for policy in COMBO_POLICIES:
+                snapshots=[combo_snapshot(legs,policy,current) for legs in combo_candidates(pool,size,policy)]
+                for snapshot in snapshots:
+                    store.put('combo',snapshot['id'],snapshot,immutable=True)
+                    generated+=1
+                policies[policy]=[s['id'] for s in snapshots]
+            suggestions['sizes'][str(size)]=policies[models['policy']]
+            # First complete paired daily cohort is frozen, never cherry-picked later.
+            if all(len(v)==3 for v in policies.values()):
+                store.put('combo_cohort',slate_day(current)+':'+str(size),
+                    {'day':slate_day(current),'size':size,'created_at':current.isoformat(),'policies':policies},immutable=True)
+        store.put('combo_suggestions',slate_day(current),suggestions)
+    grades=dict(store.items('grade'))
+    prior=dict(store.items('combo_grade'))
+    for key,combo in store.items('combo'):
+        grade=combo_directional_grade(combo,grades,current)
+        if {k:v for k,v in grade.items() if k!='graded_at'} != {k:v for k,v in prior.get(key,{}).items() if k!='graded_at'}:
+            store.put('combo_grade',key,grade)
+    reviews=combo_learning(store,current)
+    return {'generated':generated,'reviewed_at':current.isoformat(),'learning':reviews}
+
+
+def combo_results_rows(store):
+    combos,grades=dict(store.items('combo')),dict(store.items('combo_grade'))
+    cohorts=store.items('combo_cohort')
+    rows=[]
+    for _,cohort in cohorts:
+        for policy,keys in cohort['policies'].items():
+            for key in keys:
+                c=combos.get(key); g=grades.get(key,{})
+                if c: rows.append({'Day':c['day'],'Size':c['size'],'Policy':policy,
+                    'Result':g.get('state','PENDING'),'Wins':g.get('wins',0),
+                    'Legs':len(c['legs']),'Combo ID':key})
+    return rows
+
+
+def render_combos(wf, st):
+    st.subheader('Combos')
+    st.caption('PrizePicks · 2–6 different players · Saved paper suggestions, not submitted entries')
+    mode=st.segmented_control('Combo view',['Suggestions','Results & learning','Played entries'],default='Suggestions',key='combo_mode') or 'Suggestions'
+    if mode=='Suggestions':
+        size=st.segmented_control('Players',[2,3,4,5,6],default=2,key='combo_size') or 2
+        snapshot=wf.store.get('combo_suggestions',slate_day()) or {}
+        st.caption('The scheduled board worker prepares these. Browsing makes no odds requests. Ranking is an experimental heuristic, not a combined win probability.')
+        if st.button('Build from saved board',key='combo_build'):
+            update_combos(wf.store,generate=True)
+            st.rerun()
+        if not snapshot:
+            st.info('No saved combo suggestions yet. Build from the saved board or wait for the board worker.')
+            return
+        st.caption(f"Prepared {snapshot['created_at']} UTC · {snapshot['eligible_players']} eligible players")
+        with st.expander('Selection checks'):
+            st.write('At least five history games; projected separation ≥0.25 recent-game standard deviations; checks within one hour; at least two teams; at most two players per game. These thresholds are not calibrated probabilities. No matching injury entry does not confirm starting.')
+            if snapshot.get('excluded'):st.dataframe(pd.DataFrame([{'Reason':k,'Lines excluded':v} for k,v in snapshot['excluded'].items()]),hide_index=True,use_container_width=True)
+        keys=(snapshot.get('sizes') or {}).get(str(size),[])
+        if not keys:st.info(f'Not enough qualifying players or team diversity for a {size}-player combo. No filler picks added.')
+        for number,key in enumerate(keys,1):
+            combo=wf.store.get('combo',key)
+            if not combo:continue
+            valid,note=combo_live_check(wf.store,combo)
+            with st.container(border=True):
+                st.markdown(f'**Option {number} · {size} players**')
+                st.caption(('Ready for platform review · ' if valid else 'Needs review · ')+note)
+                games=len({leg['event_id'] for leg in combo['legs']})
+                st.caption(f'{games} games · {size-games} extra same-game legs · Related outcomes may move together. Special tiers may change payouts.')
+                st.dataframe(pd.DataFrame([{'Player':ui_name(l['card']['Player']),'Stat':ui_stat(l['card']),
+                    'Pick':l['direction'],'Line':l['card']['Line'],'Projection':round(l['projection'],2),
+                    'Tier':l['card'].get('Line Type'),'Games':l['games']} for l in combo['legs']]),hide_index=True,use_container_width=True,height=38+35*size)
+                st.caption('Selection: balances the weakest and average projected separation, with penalties for repeated games and stat groups. Original model forecasts are unchanged.')
+                with st.expander('Record this as an entry you played'):
+                    st.caption('Only record after submitting in PrizePicks and before the first game. Copy the entry’s actual payout schedule; no standard rates are assumed.')
+                    with st.form('played_'+key):
+                        entry_id=st.text_input('PrizePicks entry ID',key='entryid_'+key)
+                        entry_type=st.segmented_control('Entry type',['Power','Flex'],default='Power',key='entrytype_'+key)
+                        stake=st.number_input('Stake ($)',min_value=0.0,step=1.0,key='stake_'+key)
+                        st.caption('Total-return multipliers from your entry. Enter 0 for outcomes with no payout.')
+                        payout_columns=st.columns(min(size+1,4))
+                        terms={str(hits):payout_columns[hits % len(payout_columns)].number_input(
+                            f'{hits} of {size} correct · × return',min_value=0.0,step=.1,
+                            key=f'terms_{key}_{hits}') for hits in range(size+1)}
+                        confirmed=st.checkbox('I submitted these exact lines and directions; payout terms match my entry.',key='confirm_'+key)
+                        submit=st.form_submit_button('Record played entry',disabled=not valid)
+                    if submit:
+                        try:
+                            record_combo_actual(wf.store,combo,entry_id,entry_type,stake,terms,confirmed)
+                            st.success('Played entry recorded separately from paper suggestions.')
+                        except (ValueError,TypeError,json.JSONDecodeError) as error:st.error(str(error))
+    elif mode=='Results & learning':
+        st.caption('Learning uses the first complete daily paper cohort for both policies. Later rebuilds cannot replace that cohort. Repeated legs do not add samples to single-pick learning.')
+        rows=combo_results_rows(wf.store)
+        if rows:
+            df=pd.DataFrame(rows)
+            settled=df[df['Result'].isin(['ALL_HIT','MISSED'])]
+            summary=[]
+            for (size,policy),group in df.groupby(['Size','Policy']):
+                final=group[group['Result'].isin(['ALL_HIT','MISSED'])]
+                summary.append({'Players':int(size),'Policy':policy,'All hit':int((final['Result']=='ALL_HIT').sum()),
+                    'Missed':int((final['Result']=='MISSED').sum()),'Pending / void review':len(group)-len(final),
+                    'All-hit rate':None if final.empty else float((final['Result']=='ALL_HIT').mean()),'Days':group['Day'].nunique()})
+            st.dataframe(pd.DataFrame(summary),hide_index=True,use_container_width=True)
+            if not settled.empty:
+                chart=settled.assign(hit=settled['Result'].eq('ALL_HIT').astype(float)).groupby(['Size','Policy'],as_index=False)['hit'].mean()
+                st.bar_chart(chart,x='Size',y='hit',color='Policy',height=220)
+            with st.expander('Patterns: direction, stat, tier and shared-game exposure'):
+                st.dataframe(pd.DataFrame(combo_pattern_rows(wf.store,rows)),hide_index=True,use_container_width=True)
+            with st.expander('Frozen paper entry history and individual legs'):
+                history=df.sort_values('Day',ascending=False).head(100)
+                st.dataframe(history,hide_index=True,use_container_width=True)
+                labels={row['Combo ID']:f"{row['Day']} · {row['Size']} players · {row['Policy']} · {row['Result']} · {row['Combo ID'][:7]}" for row in history.to_dict('records')}
+                selected=st.selectbox('Inspect a frozen combo',list(labels),format_func=lambda key:labels[key],key='combo_history_detail')
+                combo=wf.store.get('combo',selected)
+                grade=wf.store.get('combo_grade',selected) or {}
+                leg_grades={item['forecast_id']:item for item in grade.get('legs',[])}
+                st.dataframe(pd.DataFrame([{'Player':ui_name(leg['card']['Player']),
+                    'Stat':ui_stat(leg['card']),'Line':leg['card']['Line'],'Pick':leg['direction'],
+                    'Projection':leg['projection'],'Actual':leg_grades.get(leg['forecast_id'],{}).get('actual'),
+                    'Result':leg_grades.get(leg['forecast_id'],{}).get('outcome','PENDING')}
+                    for leg in combo['legs']]),hide_index=True,use_container_width=True)
+                st.caption('Frozen '+combo['created_at']+' UTC · Research outcomes do not establish platform payout or reboot settlement.')
+        else:st.info('No complete daily learning cohorts yet. Historical singles are not backfilled into successful combos.')
+        with st.expander('All saved suggestions — graded legs'):
+            all_combos=dict(wf.store.items('combo'))
+            all_grades=dict(wf.store.items('combo_grade'))
+            ordered=sorted(all_combos,key=lambda key:all_combos[key]['created_at'],reverse=True)[:100]
+            if ordered:
+                chosen=st.selectbox('Saved paper combo',ordered,format_func=lambda key:
+                    f"{all_combos[key]['day']} · {all_combos[key]['size']} players · {all_grades.get(key,{}).get('state','PENDING')} · {key[:7]}",key='combo_all_history')
+                combo=all_combos[chosen];grade=all_grades.get(chosen,{})
+                results={leg['forecast_id']:leg for leg in grade.get('legs',[])}
+                st.dataframe(pd.DataFrame([{'Player':ui_name(leg['card']['Player']),
+                    'Stat':ui_stat(leg['card']),'Line':leg['card']['Line'],'Pick':leg['direction'],
+                    'Projection':leg['projection'],'Actual':results.get(leg['forecast_id'],{}).get('actual'),
+                    'Result':results.get(leg['forecast_id'],{}).get('outcome','PENDING')}
+                    for leg in combo['legs']]),hide_index=True,use_container_width=True)
+                st.caption('Frozen '+combo['created_at']+' UTC · '+grade.get('state','PENDING')+' · Paper direction results; no payout assumed.')
+            else:st.caption('No saved suggestions yet.')
+        st.markdown('**Learning status**')
+        # Display-only: browsing does not promote a model or grade games.
+        reviews=wf.store.items('combo_review')
+        for size in range(2,7):
+            model=wf.store.get('combo_model',str(size)) or {'policy':'balanced-v1'}
+            latest=sorted([v for _,v in reviews if v.get('size')==size],key=lambda v:v.get('reviewed_at',''))
+            if latest:
+                r=latest[-1]
+                st.caption(f"{size} players · {model['policy']} · {r['status']} · test {r['candidate_accuracy']:.1%} versus prior {r['incumbent_accuracy']:.1%} across {r['holdout_days']} later days")
+            else:
+                days={}
+                for row in rows:
+                    if row['Size']==size:
+                        days.setdefault(row['Day'],{}).setdefault(row['Policy'],[]).append(row['Result'])
+                paired=sum(all(len(values.get(p,[]))==3 and all(v in ('ALL_HIT','MISSED') for v in values[p])
+                    for p in COMBO_POLICIES) for values in days.values())
+                st.caption(f'{size} players · {model["policy"]} · {paired}/14 paired settled days · No completed policy comparison yet.')
+        st.caption('Activation requires ≥14 paired settled days (10 earlier +4 later), ≥120 distinct legs and ≥40 games; challenger must improve later-day all-hit rate by ≥2 percentage points. Overlapping combos are not independent. This learns selection diversity, not profitability or calibrated probabilities.')
+    else:
+        entries=wf.store.items('combo_actual')
+        if not entries:st.info('No played entries recorded. Paper suggestions are not real-money results.')
+        for key,entry in entries:
+            combo=wf.store.get('combo',entry['combo_id'])
+            grade=wf.store.get('combo_grade',entry['combo_id']) or combo_directional_grade(combo,dict(wf.store.items('grade')))
+            result=combo_money_result(entry,grade)
+            with st.container(border=True):
+                st.markdown(f"**{entry['entry_id']} · {combo['size']} players · {entry['entry_type']}**")
+                st.write(result)
+                with st.expander('Confirm platform settlement / reboot / revised payout'):
+                    st.caption('Use the platform’s settled return for ties, DNPs, reboots or other adjustments. This confirmation never rewrites the original picks or model grades.')
+                    with st.form('settlement_'+key):
+                        amount=st.number_input('Total returned ($), including returned stake',min_value=0.0,step=.01,key='return_'+key)
+                        reason=st.text_input('Platform settlement note',key='settlenote_'+key)
+                        confirm=st.checkbox('This entry is fully settled in PrizePicks.',key='settleconfirm_'+key)
+                        clicked=st.form_submit_button('Confirm platform return')
+                    if clicked:
+                        if not confirm or not reason.strip():st.error('Confirm settlement and enter a note.')
+                        else:
+                            updated=dict(entry,platform_return=float(amount),platform_note=reason.strip(),platform_confirmed_at=now())
+                            wf.store.put('combo_actual',key,updated)
+                            st.rerun()
+    st.caption('Entry-specific payouts and platform rules: '+COMBO_RULES_URL)
+
+
+def record_combo_actual(store,combo,entry_id,entry_type,stake,terms,confirmed,reference=None):
+    valid,note=combo_live_check(store,combo,reference)
+    if not valid:raise ValueError(note)
+    if not confirmed or not str(entry_id).strip():raise ValueError('Confirm the submitted entry and provide its entry ID.')
+    if entry_type not in ('Power','Flex') or not math.isfinite(float(stake)) or float(stake)<=0:
+        raise ValueError('Entry type and positive stake are required.')
+    if not isinstance(terms,dict) or set(terms)!={str(i) for i in range(combo['size']+1)}:
+        raise ValueError('Provide a multiplier for every correct-pick count, including zero-return counts.')
+    if any(type(v) not in (float,int) or not math.isfinite(v) or v<0 for v in terms.values()):
+        raise ValueError('Every return multiplier must be a finite nonnegative number.')
+    if terms[str(combo['size'])]<=0:raise ValueError('Record the positive all-correct payout shown on your entry.')
+    key=hashlib.sha256(str(entry_id).strip().encode()).hexdigest()
+    if store.get('combo_actual',key):raise ValueError('This platform entry ID is already recorded.')
+    store.put('combo_actual',key,{'entry_id':str(entry_id).strip(),'combo_id':combo['id'],
+        'entry_type':entry_type,'stake':float(stake),'terms':terms,'recorded_at':combo_clock(reference).isoformat()},immutable=True)
+
+
+def combo_money_result(entry,grade):
+    if entry.get('platform_confirmed_at'):
+        amount=float(entry['platform_return'])
+        return {'Status':'Platform-confirmed','Stake':entry['stake'],'Return':amount,'Profit':round(amount-entry['stake'],2)}
+    if grade['state'] in ('PENDING','VOID_REVIEW'):
+        return {'Status':'Pending games' if grade['state']=='PENDING' else 'Platform settlement required: tie / DNP',
+                'Return':None,'Profit':None}
+    multiplier=entry['terms'][str(grade['wins'])]
+    amount=round(entry['stake']*multiplier,2)
+    return {'Status':'Calculated from recorded terms; confirm any platform reboots or adjustments',
+            'Stake':entry['stake'],'Return':amount,'Profit':round(amount-entry['stake'],2)}
+
+
+def combo_pattern_rows(store,cohort_rows):
+    from collections import defaultdict
+    buckets=defaultdict(dict)
+    grades=dict(store.items('grade'))
+    combos=dict(store.items('combo'))
+    for row in cohort_rows:
+        combo=combos[row['Combo ID']]
+        for leg in combo['legs']:
+            outcome=(grades.get(leg['forecast_id']) or {}).get('outcome')
+            if outcome not in ('WIN','LOSS'):continue
+            key=leg['forecast_id']
+            for label in ('Direction: '+leg['direction'],'Stat: '+leg['stat_group'],
+                          'Tier: '+str(leg['card'].get('Line Type'))):
+                buckets[label][key]=outcome
+        if row['Result'] in ('ALL_HIT','MISSED'):
+            games=len({leg['event_id'] for leg in combo['legs']})
+            label='Combo exposure: '+('Separate games' if games==combo['size'] else 'Shared game')
+            buckets[label][combo['id']]=row['Result']
+    return [{'Pattern':label,'Unique records':len(values),
+             'Hit / all-hit rate':sum(v in ('WIN','ALL_HIT') for v in values.values())/len(values)}
+            for label,values in sorted(buckets.items())]
 
 
 class Workflow:
@@ -2430,6 +2889,7 @@ class Workflow:
         )
 
         reports = self.learn()
+        combo_report = update_combos(self.store, generate=False)
         self.model_roi_rows()
         settled_tickets = self.settle_kalshi_tickets()
 
@@ -2437,6 +2897,7 @@ class Workflow:
             "run_at": now(),
             "grading": count,
             "learning": reports,
+            "combos": combo_report,
             "kalshi_tickets_settled": settled_tickets,
         }
 
@@ -2894,10 +3355,11 @@ def run_grading_pass(wf, time_budget=15, checked_ids=None, force_retry=False):
                           force_retry=force_retry, skip_ids=checked_ids)
     finally:
         wf.e = original_engine
+    combo_report = update_combos(wf.store, generate=False)
     grades = dict(wf.store.items('grade'))
     resolved = sum(key in grades for key, _ in forecasts)
     report = {'run_at': now(), 'total': len(forecasts), 'resolved': resolved,
-              'unresolved': len(forecasts) - resolved, 'grading': counts,
+              'unresolved': len(forecasts) - resolved, 'grading': counts, 'combos': combo_report,
               'state': 'running' if counts.get('remaining', 0) else 'complete'}
     if report['state'] == 'complete':
         reviews = wf.learn()
@@ -7553,6 +8015,7 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
         refresh_input_checks(wf)
     refresh_board_health(wf, board)
     report = prepare_saved_board(wf, board, budget_seconds=budget_seconds, max_picks=10000)
+    ledger['combos'] = update_combos(wf.store, generate=True)
     ledger['coverage'] = board_coverage(wf, board)
     ledger.update(last_run=now(), errors=errors, preparation=report)
     wf.store.put('automation', day, ledger)
@@ -8479,7 +8942,7 @@ def render_native_kalshi_refresh():
 def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
     st.caption("Model picks · Research · Results")
-    app_page = (st.segmented_control("Navigation", ["Plays", "Fantasy", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
+    app_page = (st.segmented_control("Navigation", ["Plays", "Fantasy", "Combos", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
     st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
         st.session_state.pop("selected_prop_card", None)
@@ -8493,7 +8956,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
@@ -8627,7 +9090,9 @@ def render_app_pages():
 
 
         # ---------------- RESULTS AND PLAYER LINES ----------------
-        if app_page == 'Fantasy':
+        if app_page == 'Combos':
+            render_combos(workflow, st)
+        elif app_page == 'Fantasy':
             render_fantasy_plays(workflow, st)
         elif app_page in ("Plays", "Saved"):
             ui_board(app_page)
