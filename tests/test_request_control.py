@@ -14,8 +14,8 @@ import requests
 
 SOURCE=Path(__file__).resolve().parents[1]/'app.py'
 tree=ast.parse(SOURCE.read_text())
-names={'Store','now','json_safe','encode','identity','utc_timestamp','slate_day','today_pregame',
- 'odds_account_snapshot','odds_monthly_budget','batch_fixture_objects','odds_cache_key','odds_daily_cap','reserve_odds_request','api_get','odds_fixture_params',
+names={'compact_forecast','CompactViewStore','Store','now','json_safe','encode','identity','utc_timestamp','slate_day','today_pregame',
+ 'odds_account_snapshot','odds_monthly_budget','batch_fixture_objects','batch_verified_games','odds_cache_key','odds_daily_cap','reserve_odds_request','api_get','odds_fixture_params',
  'line_freshness','odds_refresh_plan','player_health_key','merge_scan_rows','decode_game',
  'numeric_line','outcome_direction','explicit_tier','automatic_board_run'}
 env=dict(globals(),st=SimpleNamespace(session_state={}),SLATE_TIMEZONE='America/Los_Angeles',
@@ -221,3 +221,41 @@ class MonthlyBudgetTests(unittest.TestCase):
   for value in ([fixture],{'events':[fixture]},fixture,{'one':fixture}):
    self.assertEqual(env['batch_fixture_objects'](value),[fixture])
   with self.assertRaises(ValueError):env['batch_fixture_objects']({'data':[{'price':3}]})
+
+
+class BatchIdentityTests(unittest.TestCase):
+ def test_only_current_espn_matched_games_supply_league_ids(self):
+  games=[('one',{'tournamentId':1,'startTime':'2026-11-10T02:00:00Z',
+                 'participant1Name':'Team A','participant2Name':'Team B'}),
+         ('other',{'tournamentId':2,'startTime':'2026-11-10T02:00:00Z',
+                   'participant1Name':'Not NBA','participant2Name':'Other'}),
+         ('old',{'tournamentId':3,'startTime':'2026-11-08T02:00:00Z'})]
+  def match(card):
+   if card['Game']=='Team A vs Team B':return {'id':'espn','status':{'type':{'state':'pre'}}},{}
+   raise ValueError('No unique match')
+  wf=SimpleNamespace(store=SimpleNamespace(items=lambda _:games),event_for=match)
+  self.assertEqual([g['tournamentId'] for g in env['batch_verified_games'](wf,'2026-11-09T18:00Z')],[1])
+
+
+class CompactReadTests(unittest.TestCase):
+ setUp=RequestTests.setUp
+ tearDown=RequestTests.tearDown
+ def test_compact_list_excludes_bulk_but_preserves_original_and_photo(self):
+  large={'id':'1','card':{'Player':'A'},'result':{'projection':22.5,'direction':'MORE',
+    'game_context':{'large':'x'*200000}},'snapshot':{'roster':{'headshot':{'href':'https://example.com/photo.png'},'large':'x'*200000}}}
+  self.store.put('forecast','1',large)
+  self.store.put('forecast','2',dict(large,id='2'))
+  view=env['CompactViewStore'](self.store)
+  summary=dict(view.items('forecast'))['1']
+  self.assertNotIn('snapshot',summary);self.assertNotIn('game_context',summary['result'])
+  self.assertEqual(summary['portrait']['href'],'https://example.com/photo.png')
+  self.assertLess(len(json.dumps(summary)),1000)
+  self.assertEqual(view.get('forecast','1'),large)
+  self.assertEqual(view.export(),self.store.export())
+ def test_keyset_pagination_and_compact_cache_invalidation(self):
+  for i in range(205):self.store.put('forecast',str(i),{'id':str(i),'result':{'projection':float(i)}})
+  self.assertEqual(len(self.store.forecast_items()),205)
+  self.store._read_cache={}
+  self.assertEqual(len(self.store.forecast_items()),205)
+  self.store.put('forecast','new',{'id':'new','result':{'projection':12.}})
+  self.assertEqual(len(self.store.forecast_items()),206)
