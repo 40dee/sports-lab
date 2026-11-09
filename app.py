@@ -1063,8 +1063,32 @@ def render_combos(wf, st):
         snapshot=wf.store.get('combo_suggestions',slate_day()) or {}
         st.caption('The scheduled board worker prepares these. Browsing makes no odds requests. Ranking is an experimental heuristic, not a combined win probability.')
         if st.button('Build from saved board',key='combo_build'):
-            update_combos(wf.store,generate=True)
-            st.rerun()
+            try:
+                update_combos(wf.store,generate=True)
+                st.rerun()
+            except Exception as error:
+                st.error('Combo build failed: '+type(error).__name__+'. Saved projections were not deleted.')
+        if st.button('Recheck eligible players with ESPN (no odds requests)',key='combo_health_refresh'):
+            try:
+                saved_board=wf.store.get('board','board') or {}
+                candidates=[c for c in saved_board.get('v4_rows') or []
+                    if str(c.get('Platform','')).lower()=='prizepicks'
+                    and today_pregame(c.get('Start (UTC)'))]
+                if not candidates:
+                    st.warning('No upcoming PrizePicks lines are saved for today. ESPN cannot supply PrizePicks prices or tiers.')
+                else:
+                    # Keep checks limited to current PrizePicks players, not every
+                    # historical or other-platform line in the saved board.
+                    current_health=wf.store.get('health',slate_day()) or {}
+                    subset=refresh_board_health(wf,{'v4_rows':candidates})
+                    merged=dict(current_health.get('players') or {})
+                    merged.update(subset.get('players') or {})
+                    subset['players']=merged
+                    wf.store.put('health',slate_day(),subset)
+                    update_combos(wf.store,generate=True)
+                    st.rerun()
+            except Exception as error:
+                st.error('ESPN eligibility recheck failed: '+type(error).__name__+'. No paid odds refresh was requested.')
         if not snapshot:
             st.info('No saved combo suggestions yet. Build from the saved board or wait for the board worker.')
             return
