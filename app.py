@@ -1349,6 +1349,8 @@ class Workflow:
                                     for c in summary.get("header", {}).get("competitions", []))
                     if completed:
                         raise ValueError("Final boxscore missing supported player statistics")
+                    self.store.put('grade_run', 'pending:' + key,
+                                   {'reason': 'not_final', 'checked_at': now()})
                     counts["pending"] += 1
                     continue
                 weights = self.e.get("fantasy_weights", lambda record: None)(card)
@@ -1973,6 +1975,7 @@ class Workflow:
 
             rows.append({
                 "ID": key,
+                "Start (UTC)": card.get("Start (UTC)"),
                 "Player": card["Player"],
                 "Platform": card["Platform"],
                 "Stat": card["Stat"],
@@ -2867,8 +2870,75 @@ def compact_audit_table(records, columns):
     return ''.join(parts)
 
 
+def audit_pending_detail(row, errors, checks, current=None):
+    """Describe saved evidence only; never fetch a boxscore while browsing."""
+    if row.get('Outcome') != 'PENDING':
+        return '', ''
+    current = pd.Timestamp.now(tz='UTC') if current is None else current
+    start = pd.to_datetime(row.get('Start (UTC)'), utc=True, errors='coerce')
+    if pd.isna(start):
+        return 'Missing or invalid game start — needs review', ''
+    if start > current:
+        return 'Game has not started', ''
+    key = str(row.get('ID', ''))
+    error = errors.get(key) or {}
+    if error and not error.get('resolved'):
+        reason = str(error.get('reason') or 'Statistics could not be retrieved')
+        return 'Data unavailable: ' + reason, str(error.get('retry_after') or '')
+    check = checks.get('pending:' + key) or {}
+    if check.get('reason') == 'not_final':
+        return 'Game not final at last check', ''
+    return 'Awaiting a recorded game-status check', ''
+
+
+def render_audit_status(wf, st):
+    attempt = wf.store.get('grade_run', 'worker_latest') or {}
+    success = wf.store.get('grade_run', 'worker_last_success') or {}
+    st.markdown('#### Automatic audit')
+    def local_time(value):
+        stamp = pd.to_datetime(value, utc=True, errors='coerce')
+        return stamp.tz_convert('America/Los_Angeles').strftime('%b %d, %Y · %I:%M %p %Z') if pd.notna(stamp) else 'Unknown time'
+    if not attempt:
+        st.info('No verified automatic audit worker run recorded yet. Older grades and manual checks do not confirm scheduled auditing.')
+    else:
+        state = attempt.get('state', 'unknown')
+        labels = {'running': 'Started — completion not yet recorded',
+                  'complete': 'Pass completed', 'partial': 'More picks remain to check',
+                  'error': 'Worker failed — saved grades preserved'}
+        st.caption('Last automatic audit: ' + local_time(attempt.get('finished_at') or attempt.get('started_at')))
+        st.write('Status: ' + labels.get(state, 'Unknown'))
+        if state == 'error':
+            st.warning('Worker error: ' + str(attempt.get('error_type', 'Unknown error')) + '. Review worker logs; no credentials are shown here.')
+        counts = attempt.get('grading') or {}
+        if counts:
+            st.caption(f"This pass: {counts.get('graded', 0)} newly graded · {counts.get('errors', 0)} data errors · {counts.get('remaining', 0)} not yet checked · {counts.get('deferred', 0)} awaiting retry.")
+        if success:
+            st.caption('Last completed worker pass: ' + local_time(success.get('finished_at')))
+        st.caption('Records come from the maintenance worker command. They do not verify that its external schedule is enabled. A completed pass can still contain pending games or data errors.')
+
+
+def run_audit_worker(wf):
+    """Persist worker-only provenance separately from browser grading."""
+    attempt = {'started_at': now(), 'state': 'running', 'source': 'maintenance_worker'}
+    wf.store.put('grade_run', 'worker_latest', attempt)
+    try:
+        report = wf.maintenance()
+    except Exception as error:
+        attempt.update(state='error', finished_at=now(), error_type=type(error).__name__)
+        wf.store.put('grade_run', 'worker_latest', attempt)
+        raise
+    counts = report.get('grading') or {}
+    attempt.update(state='partial' if counts.get('remaining', 0) else 'complete',
+                   finished_at=now(), grading=counts)
+    wf.store.put('grade_run', 'worker_latest', attempt)
+    if attempt['state'] == 'complete':
+        wf.store.put('grade_run', 'worker_last_success', attempt)
+    return report
+
+
 def render_results_dashboard(wf, st):
     st.markdown('### Results')
+    render_audit_status(wf, st)
     active = bool(st.session_state.get('_audit_active'))
     if st.button('Grade all completed games', type='primary', disabled=active, key='grade_all_once'):
         st.session_state['_audit_active'] = True
@@ -2885,6 +2955,12 @@ def render_results_dashboard(wf, st):
         st.info('No saved forecasts loaded. Restore a full workspace backup in Settings.')
         return
     frame = pd.DataFrame(research)
+    errors = dict(wf.store.items('audit_error'))
+    checks = dict(wf.store.items('grade_run'))
+    current = pd.Timestamp.now(tz='UTC')
+    details = [audit_pending_detail(row, errors, checks, current) for row in research]
+    frame['Pending reason'] = [item[0] for item in details]
+    frame['Retry after (UTC)'] = [item[1] for item in details]
     dates = ['All dates'] + sorted(frame['Game date'].dropna().unique().tolist(), reverse=True)
     left, center, right = st.columns(3)
     date = left.selectbox('Game date (Pacific)', dates, key='results_date')
@@ -2910,6 +2986,12 @@ def render_results_dashboard(wf, st):
         misses = int((selected['Outcome'] == 'LOSS').sum())
         more_less.append(f'{side}: {hits}W–{misses}L')
     st.caption(' · '.join(more_less))
+    if pending:
+        with st.expander('Why picks are pending', expanded=(outcome == 'PENDING')):
+            pending_rows = visible[visible['Outcome'] == 'PENDING']
+            st.dataframe(pending_rows[['Player', 'Stat', 'Platform', 'Pending reason', 'Retry after (UTC)']],
+                         hide_index=True, width='stretch')
+            st.caption('Reasons reflect saved checks. Retry times are earliest eligibility, not a guaranteed scheduled run. This view does not request new statistics.')
     st.markdown('''<style>
     .sl-results-scroll {overflow-x:auto;border:1px solid #395268;border-radius:12px;}
     .sl-results {width:100%;border-collapse:collapse;background:#102234;color:#f3f8ff;font-size:.9rem;}
@@ -7131,7 +7213,7 @@ if "--maintenance" in sys.argv:
     if not _database_online:
         raise SystemExit("Permanent database unavailable; maintenance skipped without changing saved data.")
 
-    _report = workflow.maintenance()
+    _report = run_audit_worker(workflow)
     print({
         "run_at": _report["run_at"],
         "grading": _report["grading"],
@@ -8005,7 +8087,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-1")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
