@@ -1,5 +1,10 @@
 name: Sports Lab automatic audit
 on:
+  push:
+    branches: [main]
+    paths:
+      - app.py
+      - .github/workflows/sports_lab_audit_schedule.yml
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
@@ -13,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
     steps:
       - uses: actions/checkout@v4
@@ -26,5 +33,11 @@ jobs:
           pip install numpy pandas requests streamlit 'psycopg[binary]'
       - name: Grade saved forecasts and update models
         run: |
-          test -n "$DATABASE_URL" || { echo 'Missing DATABASE_URL repository secret'; exit 1; }
+          if [ -n "$TURSO_DATABASE_URL" ] && [ -n "$TURSO_AUTH_TOKEN" ]; then
+            :
+          elif [ -n "$DATABASE_URL" ]; then
+            :
+          else
+            echo 'Missing permanent database configuration'; exit 1
+          fi
           python app.py --maintenance
