@@ -2410,6 +2410,17 @@ def save_ticket(store, ticket, settle=False):
     return ticket
 
 
+def utc_timestamp(value):
+    """Fast scalar timestamp parsing for saved rows; invalid values stay missing."""
+    try:
+        stamp = pd.Timestamp(value)
+        if pd.isna(stamp):
+            return pd.NaT
+        return stamp.tz_localize('UTC') if stamp.tzinfo is None else stamp.tz_convert('UTC')
+    except (TypeError, ValueError, OverflowError):
+        return pd.NaT
+
+
 def market_signature(card, event_id=None, across_platforms=False):
     """Stable market identity; scan IDs and tier-label corrections are metadata."""
     import re
@@ -2421,7 +2432,7 @@ def market_signature(card, event_id=None, across_platforms=False):
     if ',' in player:
         last, first = player.split(',', 1)
         player = first + ' ' + last
-    start = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
+    start = utc_timestamp(card.get('Start (UTC)'))
     game = clean(card.get('Game'))
     # Refuse to merge unknown events or unknown players on weak metadata.
     if not player or (not event_id and (not game or pd.isna(start))):
@@ -2444,7 +2455,7 @@ def market_signature(card, event_id=None, across_platforms=False):
 def unique_forecasts(records, across_platforms=False):
     """Earliest original forecast wins; source records remain untouched."""
     def created(item):
-        stamp = pd.to_datetime(item[1].get('created_at'), utc=True, errors='coerce')
+        stamp = utc_timestamp(item[1].get('created_at'))
         return (pd.isna(stamp), stamp.value if pd.notna(stamp) else 0, str(item[0]))
     kept = {}
     for key, frozen in sorted(records, key=created):
@@ -2920,18 +2931,23 @@ def render_results_dashboard(wf, st):
         st.caption(f'{len(visible)} matching picks · up to 50 per page')
     else:
         st.info('No results match these filters.')
-    combined = wf.research_rows(across_platforms=True)
-    decided = [r for r in combined if r['Outcome'] in ('WIN', 'LOSS')]
-    combined_wins = sum(r['Outcome'] == 'WIN' for r in decided)
     with st.expander('Audit details and learning'):
-        raw_count = len(wf.store.items('forecast'))
-        st.caption(f'{raw_count - len(research)} duplicate records excluded from platform totals; originals retained.')
-        st.caption(f'Combined model record across all dates: {combined_wins}W–{len(decided) - combined_wins}L. Identical cross-platform markets counted once.')
-        st.caption(f"{len(wf.store.items('model'))} learned stat models active. Updates require a chronological holdout; a successful grading run alone does not promote a model.")
+        if st.checkbox('Load audit details and learning', key='load_results_learning'):
+            combined = wf.research_rows(across_platforms=True)
+            decided = [r for r in combined if r['Outcome'] in ('WIN', 'LOSS')]
+            combined_wins = sum(r['Outcome'] == 'WIN' for r in decided)
+            raw_count = len(wf.store.items('forecast'))
+            st.caption(f'{raw_count - len(research)} duplicate records excluded from platform totals; originals retained.')
+            st.caption(f'Combined model record across all dates: {combined_wins}W–{len(decided) - combined_wins}L. Identical cross-platform markets counted once.')
+            st.caption(f"{len(wf.store.items('model'))} learned stat models active. Updates require a chronological holdout; a successful grading run alone does not promote a model.")
     st.download_button('Download full audit CSV', frame.to_csv(index=False), 'nba_audit.csv', 'text/csv')
 
 
 def render_workflow(wf, st, rows, mode="settings"):
+    if mode == 'results':
+        render_results_dashboard(wf, st)
+        if not st.checkbox('Show detailed accuracy, ROI and unresolved records', key='load_detailed_results'):
+            return
     st.subheader("NBA workflow")
 
     st.caption(
@@ -3082,8 +3098,6 @@ def render_workflow(wf, st, rows, mode="settings"):
 
     if mode == "settings":
         return
-
-    render_results_dashboard(wf, st)
 
     with st.expander("PrizePicks estimate accuracy", expanded=False):
         st.caption("Compare saved pregame estimates with actual results. Line types stay separate; Unverified means the original tier was not confirmed. These estimates are experimental.")
@@ -3313,7 +3327,7 @@ def slate_day(reference=None):
 def today_pregame(start_value, reference=None):
     """A future tipoff on the user's Pacific calendar date, never a UTC-date guess."""
     current = pd.Timestamp.now(tz="UTC") if reference is None else pd.to_datetime(reference, utc=True)
-    start = pd.to_datetime(start_value, utc=True, errors="coerce")
+    start = utc_timestamp(start_value)
     return bool(pd.notna(start) and start > current
                 and start.tz_convert(SLATE_TIMEZONE).date() == current.tz_convert(SLATE_TIMEZONE).date())
 
@@ -7554,7 +7568,6 @@ def ui_board(page):
         if not card.get('Decoded') or not market_columns(card):
             continue
         if page != 'Saved':
-            start = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
             if not today_pregame(card.get('Start (UTC)')):
                 continue
         if platform != 'All' and str(card.get('Platform')).lower() != platform.lower():
@@ -7728,31 +7741,6 @@ st.markdown("""<style>
  .sl-compact .sl-pickline {padding:5px 7px;margin-top:6px;}
 }
 </style>""", unsafe_allow_html=True)
-st.markdown("## ▥ SPORTS :green[LAB]")
-st.caption("Model picks · Research · Results")
-app_page = st.radio("Navigation", ["Plays", "Saved", "Results", "Settings"], horizontal=True, key="sports_lab_page")
-if st.session_state.get("last_ui_page") != app_page:
-    st.session_state.pop("selected_prop_card", None)
-    st.session_state["last_ui_page"] = app_page
-render_saved_workspace(controls=(app_page == "Settings"))
-if app_page == "Settings":
-    st.subheader("NBA data and board setup")
-    st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
-    st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
-
-# ---------------- NBA SCANNER ----------------
-
-
-# Grading runs in the scheduled worker or the explicit Results refresh control.
-# Board browsing never waits for a whole maintenance pass.
-
-if app_page in ("Results", "Settings"):
-    render_workflow(workflow, st,
-                    [row for row in st.session_state.get("v4_rows", [])
-                     if today_pregame(row.get("Start (UTC)"))] if app_page == "Settings" else [],
-                    mode="results" if app_page == "Results" else "settings")
-
-# PrizePicks tier feed: explicit refresh only.
 def render_pp_tier_refresh():
     rows = [row for row in st.session_state.get('v4_rows',[]) if today_pregame(row.get('Start (UTC)'))]
     with st.expander('PrizePicks Regular / Goblin / Demon feed'):
@@ -7820,9 +7808,6 @@ def render_pp_tier_refresh():
             st.caption('No automatic retry or additional refresh is performed. Check Fantasy feed can inspect saved pages without API calls.')
 
 
-
-
-# Import native Kalshi contracts for the games already on the saved board.
 def import_native_kalshi_rows(rows, fetch, teams, stamp):
     series_map = {
         "KXNBAPTS": {"PTS"}, "KXNBAREB": {"REB"},
@@ -7945,266 +7930,313 @@ def render_native_kalshi_refresh():
             st.error(str(error))
 
 
-if app_page == "Settings":
-    render_native_kalshi_refresh()
-    if st.session_state.get("native_kalshi_notice"):
-        st.info(st.session_state["native_kalshi_notice"])
+# Navigation widgets rerun only this fragment, avoiding database startup.
+@st.fragment
+def render_app_pages():
+    st.markdown("## ▥ SPORTS :green[LAB]")
+    st.caption("Model picks · Research · Results")
+    app_page = st.radio("Navigation", ["Plays", "Saved", "Results", "Settings"], horizontal=True, key="sports_lab_page")
+    if st.session_state.get("last_ui_page") != app_page:
+        st.session_state.pop("selected_prop_card", None)
+        st.session_state["last_ui_page"] = app_page
+    # Replace the previous page body before doing any page-specific reads.
+    page_body = st.empty()
+    page_body.empty()
+    with page_body.container():
+        render_saved_workspace(controls=(app_page == "Settings"))
+        if app_page == "Settings":
+            st.subheader("NBA data and board setup")
+            st.caption("App build: navigation-2")
+            st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
+            st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
-    render_pp_tier_refresh()
-    if st.session_state.get("pp_tier_notice"):
-        st.info(st.session_state["pp_tier_notice"])
-
-    scan_scope = st.radio('Today’s games to scan (Pacific time)',
-        ['All today’s games', 'Limit game count'], horizontal=True, key='nba_scan_scope')
-    max_games = None
-    if scan_scope == 'Limit game count':
-        max_games = int(st.number_input('Maximum games this scan', min_value=1,
-            value=3, step=1, key='nba_scan_limit'))
-    try:
-        preview = scan_schedule_preview(slate_day(), saved_fetch)
-        estimated_games = len(preview) if max_games is None else min(len(preview), max_games)
-        st.info(f'Estimated scan: {estimated_games} upcoming games today · '
-            f'up to {estimated_games + 2} OddsPAPI HTTP requests if all data is uncached '
-            '(fixtures + market catalog + one odds request per game).')
-        st.caption('Estimate uses the public ESPN schedule, with no OddsPAPI call. '
-            'Provider coverage may differ. HTTP requests are not a guaranteed credit count; '
-            'your provider determines credit charges. Started games are excluded.')
-        with st.expander('Preview today’s upcoming games'):
-            if preview:
-                st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
-            else:
-                st.info('No upcoming games found for today in Pacific time.')
-    except Exception:
-        st.warning('Public schedule preview unavailable. Request estimate unavailable. '
-            'A scan still uses only today’s upcoming provider games: one fixtures request, '
-            'one catalog request, and one odds request per game when uncached.')
-    st.caption('Odds, fixtures and market catalog are cached for 30 minutes. '
-        'Only the scan button below requests OddsPAPI data. '
-        'Breakdown, grading and availability do not run this scan.')
-
-    if st.button(
-        "🔍 SCAN AND DECODE NBA LINES",
-        use_container_width=True,
-    ):
-        try:
-            with st.spinner("Loading NBA fixtures and market lines..."):
-                games = upcoming_nba()
-                if max_games is not None:
-                    games = games[:max_games]
-                all_rows, summaries, errors = [], [], []
-                successful_fixtures = set()
-
-                if not games:
-                    st.warning(
-                        "No upcoming NBA games returned "
-                        "for today in Pacific time. Tomorrow's games are not included."
-                    )
-
-                else:
-                    catalog = market_catalog()
-
-                    for game in games:
-                        try:
-                            decoded_rows, summary = decode_game(
-                                game,
-                                game_odds(str(game["fixtureId"])),
-                                catalog,
-                            )
-
-                            if not decoded_rows:
-                                raise ValueError('No decoded lines returned; saved lines retained.')
-                            all_rows.extend(decoded_rows)
-                            summaries.extend(summary)
-                            successful_fixtures.add(str(game['fixtureId']))
-
-                        except ValueError as error:
-                            errors.append(
-                                f"{game.get('participant1Name', '?')} vs "
-                                f"{game.get('participant2Name', '?')}: "
-                                f"{error}"
-                            )
-
-                st.session_state["v4_rows"] = merge_scan_rows(
-                    st.session_state.get('v4_rows', []), all_rows, successful_fixtures)
-                st.session_state.pop('calculated_board', None)
-                st.session_state.pop('selected_prop_card', None)
-                st.session_state["v4_summary"] = summaries
-                st.session_state["v4_errors"] = errors
-                st.session_state["v4_scan_at"] = (
-                    datetime.now(timezone.utc).isoformat()
-                )
-
-                workspace_store(
-                    "board",
-                    {
-                        key: st.session_state[key]
-                        for key in BOARD_FIELDS
-                    },
-                )
-
-                st.success(f'Scanned {len(successful_fixtures)} of {len(games)} upcoming games. '
-                    'Saved Fantasy lines and frozen forecasts preserved. '
-                    'Rebuild from the saved PrizePicks feed to match Fantasy lines to newly scanned games, '
-                    'then calculate and freeze the board. Neither step runs an OddsPAPI scan.')
-
-        except ValueError as error:
-            st.error(str(error))
+        # ---------------- NBA SCANNER ----------------
 
 
-# ---------------- RESULTS AND PLAYER LINES ----------------
-if app_page in ("Plays", "Saved"):
-    ui_board(app_page)
+        # Grading runs in the scheduled worker or the explicit Results refresh control.
+        # Board browsing never waits for a whole maintenance pass.
 
-if app_page == "Settings":
-    # ---------------- OPTIONAL DISCOVERY PREVIEW ----------------
+        if app_page in ("Results", "Settings"):
+            render_workflow(workflow, st,
+                            [row for row in st.session_state.get("v4_rows", [])
+                             if today_pregame(row.get("Start (UTC)"))] if app_page == "Settings" else [],
+                            mode="results" if app_page == "Results" else "settings")
 
-    st.divider()
+        # PrizePicks tier feed: explicit refresh only.
 
-    with st.expander(
-        "Optional NBA historical discovery preview"
-    ):
-        st.info(
-            "Player breakdowns resolve current roster identities "
-            "automatically. This optional discovery batch provides "
-            "a league preview. Saved ESPN responses use a local cache. "
-            "The main board and forecasts use permanent storage "
-            "when DATABASE_URL is configured."
-        )
 
-        _season_year = int(
-            current_season().split("-")[0]
-        )
 
-        _previous_season = (
-            f"{_season_year - 1}-{str(_season_year)[-2:]}"
-        )
 
-        history_season = st.selectbox(
-            "Historical season",
-            [
-                current_season(),
-                _previous_season,
-            ],
-            key="history_season",
-        )
+        # Import native Kalshi contracts for the games already on the saved board.
 
-        if st.button("LOAD NBA DISCOVERY BATCH"):
-            try:
-                with st.spinner(
-                    "Requesting real NBA player game logs..."
-                ):
-                    history = load_nba_player_logs(
-                        history_season
-                    )
 
-                st.session_state["nba_history"] = history
-                st.session_state["nba_history_season"] = (
-                    history_season
-                )
 
-            except Exception as error:
-                st.session_state.pop(
-                    "nba_history",
-                    None,
-                )
 
-                st.session_state.pop(
-                    "nba_history_season",
-                    None,
-                )
+        if app_page == "Settings":
+            render_native_kalshi_refresh()
+            if st.session_state.get("native_kalshi_notice"):
+                st.info(st.session_state["native_kalshi_notice"])
 
-                st.error(
-                    "NBA historical connection failed."
-                )
+            render_pp_tier_refresh()
+            if st.session_state.get("pp_tier_notice"):
+                st.info(st.session_state["pp_tier_notice"])
 
-                st.code(
-                    f"{type(error).__name__}: {error}",
-                    language="text",
-                )
+            scan_scope = st.radio('Today’s games to scan (Pacific time)',
+                ['All today’s games', 'Limit game count'], horizontal=True, key='nba_scan_scope')
+            max_games = None
+            if scan_scope == 'Limit game count':
+                max_games = int(st.number_input('Maximum games this scan', min_value=1,
+                    value=3, step=1, key='nba_scan_limit'))
+            if st.checkbox('Load scan estimate and schedule preview', key='show_scan_preview'):
+                try:
+                    preview = scan_schedule_preview(slate_day(), saved_fetch)
+                    estimated_games = len(preview) if max_games is None else min(len(preview), max_games)
+                    st.info(f'Estimated scan: {estimated_games} upcoming games today · '
+                        f'up to {estimated_games + 2} OddsPAPI HTTP requests if all data is uncached '
+                        '(fixtures + market catalog + one odds request per game).')
+                    st.caption('Estimate uses the public ESPN schedule, with no OddsPAPI call. '
+                        'Provider coverage may differ. HTTP requests are not a guaranteed credit count; '
+                        'your provider determines credit charges. Started games are excluded.')
+                    with st.expander('Preview today’s upcoming games'):
+                        if preview:
+                            st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
+                        else:
+                            st.info('No upcoming games found for today in Pacific time.')
+                except Exception:
+                    st.warning('Public schedule preview unavailable. Request estimate unavailable. '
+                        'A scan still uses only today’s upcoming provider games: one fixtures request, '
+                        'one catalog request, and one odds request per game when uncached.')
+            st.caption('Odds, fixtures and market catalog are cached for 30 minutes. '
+                'Only the scan button below requests OddsPAPI data. '
+                'Breakdown, grading and availability do not run this scan.')
 
-                st.caption(
-                    "No sample data was substituted."
-                )
-
-        if (
-            "nba_history" in st.session_state
-            and st.session_state.get(
-                "nba_history_season"
-            ) == history_season
-        ):
-            history = st.session_state["nba_history"]
-            logs = history["logs"]
-
-            st.success(
-                f"Loaded {len(logs):,} player-game records "
-                f"for {history_season}."
-            )
-
-            st.caption(
-                "Source: ESPN · Seven-calendar-day discovery batch · "
-                f"Regular season · Latest game returned: "
-                f"{logs['GAME_DATE'].max():%Y-%m-%d} · "
-                f"Retrieved at (UTC): {history['retrieved_at']} · "
-                "Cache: 1 hour"
-            )
-
-            st.dataframe(
-                logs[
-                    [
-                        "PLAYER_NAME",
-                        "GAME_DATE",
-                        "MATCHUP",
-                        "MIN",
-                        "PTS",
-                        "REB",
-                        "AST",
-                        "STL",
-                        "BLK",
-                        "TOV",
-                        "FG3M",
-                    ]
-                ].head(30),
+            if st.button(
+                "🔍 SCAN AND DECODE NBA LINES",
                 use_container_width=True,
-                hide_index=True,
-            )
+            ):
+                try:
+                    with st.spinner("Loading NBA fixtures and market lines..."):
+                        games = upcoming_nba()
+                        if max_games is not None:
+                            games = games[:max_games]
+                        all_rows, summaries, errors = [], [], []
+                        successful_fixtures = set()
+
+                        if not games:
+                            st.warning(
+                                "No upcoming NBA games returned "
+                                "for today in Pacific time. Tomorrow's games are not included."
+                            )
+
+                        else:
+                            catalog = market_catalog()
+
+                            for game in games:
+                                try:
+                                    decoded_rows, summary = decode_game(
+                                        game,
+                                        game_odds(str(game["fixtureId"])),
+                                        catalog,
+                                    )
+
+                                    if not decoded_rows:
+                                        raise ValueError('No decoded lines returned; saved lines retained.')
+                                    all_rows.extend(decoded_rows)
+                                    summaries.extend(summary)
+                                    successful_fixtures.add(str(game['fixtureId']))
+
+                                except ValueError as error:
+                                    errors.append(
+                                        f"{game.get('participant1Name', '?')} vs "
+                                        f"{game.get('participant2Name', '?')}: "
+                                        f"{error}"
+                                    )
+
+                        st.session_state["v4_rows"] = merge_scan_rows(
+                            st.session_state.get('v4_rows', []), all_rows, successful_fixtures)
+                        st.session_state.pop('calculated_board', None)
+                        st.session_state.pop('selected_prop_card', None)
+                        st.session_state["v4_summary"] = summaries
+                        st.session_state["v4_errors"] = errors
+                        st.session_state["v4_scan_at"] = (
+                            datetime.now(timezone.utc).isoformat()
+                        )
+
+                        workspace_store(
+                            "board",
+                            {
+                                key: st.session_state[key]
+                                for key in BOARD_FIELDS
+                            },
+                        )
+
+                        st.success(f'Scanned {len(successful_fixtures)} of {len(games)} upcoming games. '
+                            'Saved Fantasy lines and frozen forecasts preserved. '
+                            'Rebuild from the saved PrizePicks feed to match Fantasy lines to newly scanned games, '
+                            'then calculate and freeze the board. Neither step runs an OddsPAPI scan.')
+
+                except ValueError as error:
+                    st.error(str(error))
 
 
-    with st.expander(
-        "What is connected and what remains"
-    ):
-        st.write(
-            "Connected: NBA odds scanner, market decoding, compact "
-            "player lines, historical research, rolling windows, H2H, "
-            "static charts, team efficiency, position defense, "
-            "roster/depth-chart matching, injury checks, projections, "
-            "game-market context, matching prop pricing, frozen forecasts, "
-            "automatic research grading, guarded learning reviews, "
-            "model paper ROI and percentage tracking by PrizePicks tier."
-        )
+        # ---------------- RESULTS AND PLAYER LINES ----------------
+        if app_page in ("Plays", "Saved"):
+            ui_board(app_page)
 
-        st.write(
-            "Unmatched players and unsupported markets remain unavailable. "
-            "Depth charts and active roster status are not confirmed "
-            "starting lineups. Initial percentage estimates are "
-            "experimental and are audited against real outcomes."
-        )
+        if app_page == "Settings":
+            # ---------------- OPTIONAL DISCOVERY PREVIEW ----------------
 
-        st.write(
-            "Outside this NBA release: other sports, salary-cap lineup "
-            "builders, additional fantasy scoring systems and verified "
-            "starting-lineup feeds. Permanent storage and scheduled "
-            "maintenance require DATABASE_URL."
-        )
+            st.divider()
+
+            with st.expander(
+                "Optional NBA historical discovery preview"
+            ):
+                st.info(
+                    "Player breakdowns resolve current roster identities "
+                    "automatically. This optional discovery batch provides "
+                    "a league preview. Saved ESPN responses use a local cache. "
+                    "The main board and forecasts use permanent storage "
+                    "when DATABASE_URL is configured."
+                )
+
+                _season_year = int(
+                    current_season().split("-")[0]
+                )
+
+                _previous_season = (
+                    f"{_season_year - 1}-{str(_season_year)[-2:]}"
+                )
+
+                history_season = st.selectbox(
+                    "Historical season",
+                    [
+                        current_season(),
+                        _previous_season,
+                    ],
+                    key="history_season",
+                )
+
+                if st.button("LOAD NBA DISCOVERY BATCH"):
+                    try:
+                        with st.spinner(
+                            "Requesting real NBA player game logs..."
+                        ):
+                            history = load_nba_player_logs(
+                                history_season
+                            )
+
+                        st.session_state["nba_history"] = history
+                        st.session_state["nba_history_season"] = (
+                            history_season
+                        )
+
+                    except Exception as error:
+                        st.session_state.pop(
+                            "nba_history",
+                            None,
+                        )
+
+                        st.session_state.pop(
+                            "nba_history_season",
+                            None,
+                        )
+
+                        st.error(
+                            "NBA historical connection failed."
+                        )
+
+                        st.code(
+                            f"{type(error).__name__}: {error}",
+                            language="text",
+                        )
+
+                        st.caption(
+                            "No sample data was substituted."
+                        )
+
+                if (
+                    "nba_history" in st.session_state
+                    and st.session_state.get(
+                        "nba_history_season"
+                    ) == history_season
+                ):
+                    history = st.session_state["nba_history"]
+                    logs = history["logs"]
+
+                    st.success(
+                        f"Loaded {len(logs):,} player-game records "
+                        f"for {history_season}."
+                    )
+
+                    st.caption(
+                        "Source: ESPN · Seven-calendar-day discovery batch · "
+                        f"Regular season · Latest game returned: "
+                        f"{logs['GAME_DATE'].max():%Y-%m-%d} · "
+                        f"Retrieved at (UTC): {history['retrieved_at']} · "
+                        "Cache: 1 hour"
+                    )
+
+                    st.dataframe(
+                        logs[
+                            [
+                                "PLAYER_NAME",
+                                "GAME_DATE",
+                                "MATCHUP",
+                                "MIN",
+                                "PTS",
+                                "REB",
+                                "AST",
+                                "STL",
+                                "BLK",
+                                "TOV",
+                                "FG3M",
+                            ]
+                        ].head(30),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
 
-    if HISTORY_DB.exists():
-        st.download_button(
-            "Back up historical response cache",
-            data=HISTORY_DB.read_bytes(),
-            file_name="sports_lab_history.sqlite3",
-            mime="application/vnd.sqlite3",
-        )
+            with st.expander(
+                "What is connected and what remains"
+            ):
+                st.write(
+                    "Connected: NBA odds scanner, market decoding, compact "
+                    "player lines, historical research, rolling windows, H2H, "
+                    "static charts, team efficiency, position defense, "
+                    "roster/depth-chart matching, injury checks, projections, "
+                    "game-market context, matching prop pricing, frozen forecasts, "
+                    "automatic research grading, guarded learning reviews, "
+                    "model paper ROI and percentage tracking by PrizePicks tier."
+                )
 
+                st.write(
+                    "Unmatched players and unsupported markets remain unavailable. "
+                    "Depth charts and active roster status are not confirmed "
+                    "starting lineups. Initial percentage estimates are "
+                    "experimental and are audited against real outcomes."
+                )
+
+                st.write(
+                    "Outside this NBA release: other sports, salary-cap lineup "
+                    "builders, additional fantasy scoring systems and verified "
+                    "starting-lineup feeds. Permanent storage and scheduled "
+                    "maintenance require DATABASE_URL."
+                )
+
+
+            if HISTORY_DB.exists():
+                st.download_button(
+                    "Back up historical response cache",
+                    data=HISTORY_DB.read_bytes(),
+                    file_name="sports_lab_history.sqlite3",
+                    mime="application/vnd.sqlite3",
+                )
+
+
+
+
+render_app_pages()
 
 # ================= END OF APP.PY =================
 
@@ -8238,7 +8270,7 @@ _resume_preparation_fragment()
 
 @st.fragment(run_every="4s" if st.session_state.get("_audit_active") else None)
 def _resume_grading_fragment():
-    if not st.session_state.get('_audit_active'):
+    if not st.session_state.get('_audit_active') or st.session_state.get('sports_lab_page') != 'Results':
         return
     try:
         with st.spinner('Grading all completed games…'):
