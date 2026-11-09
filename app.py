@@ -494,6 +494,61 @@ def kalshi_fee_metadata(fetch, ticker):
     }
 
 
+def confirmed_recap_dnp(summary, player_id):
+    """Accept only a same-game recap explicitly stating this exact ID did not play."""
+    import re
+    article = summary.get('article') or {}
+    event_id = str(summary.get('header', {}).get('id', ''))
+    if not event_id or str(article.get('gameId', '')) != event_id or article.get('type') != 'Recap':
+        return None
+    listed_out = any(str(injury.get('athlete', {}).get('id', '')) == str(player_id)
+                     and str(injury.get('status', '')).lower() == 'out'
+                     for group in summary.get('injuries', [])
+                     for injury in group.get('injuries', []))
+    if not listed_out:
+        return None
+    # Restrict to an explicit subject immediately followed by 'did not play'.
+    # Out/questionable injury entries or mere absence are not enough.
+    pattern = (r'<a\b[^>]*href=["\'][^"\']*/player/_/id/' + re.escape(str(player_id)) +
+               r'(?:/[^"\']*)?["\'][^>]*>[^<]+</a>\s+did not play(?: for the [A-Za-z ]+)? (?:due to|because of|with)\b')
+    if not re.search(pattern, str(article.get('story', '')), flags=re.I):
+        return None
+    return {'status': 'DNP', 'actual': None,
+            'verification': 'Same-game ESPN recap explicitly states this player did not play.',
+            'source': 'ESPN game recap', 'source_event_id': event_id,
+            'source_article_id': str(article.get('id', ''))}
+
+
+def missing_actual_reason(summary, player_id, columns):
+    """Distinguish identity/appearance gaps from incomplete statistic fields."""
+    rows = [(section.get('labels', []), athlete)
+            for group in summary.get('boxscore', {}).get('players', [])
+            for section in group.get('statistics', [])
+            for athlete in section.get('athletes', [])
+            if str(athlete.get('athlete', {}).get('id', '')) == str(player_id)]
+    if not rows:
+        statuses = {str(injury.get('status', ''))
+                    for group in summary.get('injuries', [])
+                    for injury in group.get('injuries', [])
+                    if str(injury.get('athlete', {}).get('id', '')) == str(player_id)}
+        if 'Out' in statuses:
+            return 'Final game: player listed Out, absent from boxscore; DNP not explicitly confirmed'
+        return 'Final game: exact player ID absent from boxscore; appearance or identity needs verification'
+    missing = set()
+    for labels, athlete in rows:
+        values = athlete.get('stats', [])
+        if len(labels) != len(values):
+            return 'Final game: player boxscore labels and values are incomplete'
+        stats = dict(zip(labels, values))
+        for column in ['MIN'] + list(columns or []):
+            label = {'TOV': 'TO', 'FG3M': '3PT'}.get(column, column)
+            if stats.get(label) in (None, '', '--', '-'):
+                missing.add(label)
+    if missing:
+        return 'Final game: player row missing fields: ' + ', '.join(sorted(missing))
+    return 'Final game: conflicting or invalid player boxscore values; review required'
+
+
 def completed_actual(summary, player_id, columns):
     header = summary.get("header", {})
     competitions = header.get("competitions", [])
@@ -583,6 +638,15 @@ def completed_actual(summary, player_id, columns):
 
                 except (ValueError, TypeError):
                     continue
+
+    matching_rows = any(str(athlete.get('athlete', {}).get('id', '')) == str(player_id)
+                        for group in summary.get('boxscore', {}).get('players', [])
+                        for section in group.get('statistics', [])
+                        for athlete in section.get('athletes', []))
+    if not matching_rows:
+        verified = confirmed_recap_dnp(summary, player_id)
+        if verified:
+            return verified
 
     unique = {
         encode(appearance): appearance
@@ -1348,7 +1412,7 @@ class Workflow:
                     completed = any(c.get("status", {}).get("type", {}).get("completed")
                                     for c in summary.get("header", {}).get("competitions", []))
                     if completed:
-                        raise ValueError("Final boxscore missing supported player statistics")
+                        raise ValueError(missing_actual_reason(summary, result["player_id"], self.e["market_columns"](card)))
                     self.store.put('grade_run', 'pending:' + key,
                                    {'reason': 'not_final', 'checked_at': now()})
                     counts["pending"] += 1
@@ -2884,7 +2948,8 @@ def audit_pending_detail(row, errors, checks, current=None):
     error = errors.get(key) or {}
     if error and not error.get('resolved'):
         reason = str(error.get('reason') or 'Statistics could not be retrieved')
-        return 'Data unavailable: ' + reason, str(error.get('retry_after') or '')
+        label = reason if reason.startswith('Final game: ') else 'Data unavailable: ' + reason
+        return label, str(error.get('retry_after') or '')
     check = checks.get('pending:' + key) or {}
     if check.get('reason') == 'not_final':
         return 'Game not final at last check', ''
@@ -8087,7 +8152,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-1")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-2")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
