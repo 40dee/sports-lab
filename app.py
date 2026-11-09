@@ -805,9 +805,10 @@ def combo_pool(store, reference=None):
         if str(card.get('Platform', '')).lower() != 'prizepicks':
             reject('Not a PrizePicks line'); continue
         signature = market_signature(card)
+        # Only a qualifying row may claim a market. A stale duplicate must not
+        # hide a later fresh, verified row for the same player/stat/line.
         if signature in seen:
-            reject('Duplicate market'); continue
-        seen.add(signature)
+            reject('Duplicate eligible market'); continue
         if not today_pregame(card.get('Start (UTC)'), current):
             reject('Game not upcoming today (Pacific time)'); continue
         frozen = saved_prediction(index, card)
@@ -843,6 +844,7 @@ def combo_pool(store, reference=None):
                 raise ValueError('weak or insufficient history')
         except (KeyError,ValueError,TypeError,OverflowError):
             reject('Insufficient history or projected separation'); continue
+        seen.add(signature)
         pool.append({'forecast_id': frozen['id'], 'card': dict(card),
             'player_id': str(h['player_id']), 'team_id': str(h['team_id']),
             'event_id': str(frozen['event_id']), 'direction': result['direction'],
