@@ -272,6 +272,11 @@ class Store:
             "calculation_status",
             "grade_run",
             "automation",
+            "audit_error",
+            "health",
+            "coverage",
+            "input_health",
+            "request_budget",
         }
 
         checked = []
@@ -294,7 +299,9 @@ class Store:
 
             parsed = json.loads(payload)
 
-            if not isinstance(parsed, dict):
+            if not isinstance(parsed, dict) and not (
+                namespace == 'request_budget' and type(parsed) is int and parsed >= 0
+            ):
                 raise ValueError("Invalid record payload.")
 
             pd.to_datetime(
@@ -606,6 +613,19 @@ def espn_injury_player_id(athlete):
     return next(iter(ids)) if len(ids) == 1 else None
 
 
+def roster_name_key(name):
+    """Allow missing generational suffixes only inside a verified matchup."""
+    import re
+    import unicodedata
+    name = str(name or '').strip()
+    if ',' in name:
+        last, first = name.split(',', 1)
+        name = first.strip() + ' ' + last.strip()
+    name = re.sub(r'\s+(?:jr\.?|sr\.?|ii|iii|iv)\s*$', '', name, flags=re.I)
+    name = unicodedata.normalize('NFKD', name).encode('ascii', 'ignore').decode().lower()
+    return re.sub(r'[^a-z0-9]', '', name)
+
+
 class Workflow:
     def __init__(self, engine, store):
         self.e = engine
@@ -700,6 +720,7 @@ class Workflow:
             )
 
         matches = []
+        suffix_matches = []
 
         for team in teams:
             url = (
@@ -714,6 +735,8 @@ class Workflow:
             )
 
             for athlete in roster.get("athletes", []):
+                if roster_name_key(athlete.get('displayName', '')) == roster_name_key(card['Player']):
+                    suffix_matches.append((team, athlete, self.e['cached_response_time'](url, {})))
                 if normalize(
                     athlete.get("displayName", "")
                 ) == normalize(card["Player"]):
@@ -726,6 +749,8 @@ class Workflow:
                         ),
                     ))
 
+        if not matches:
+            matches = suffix_matches
         if len(matches) != 1:
             raise ValueError(
                 "Player does not uniquely match "
@@ -1142,6 +1167,7 @@ class Workflow:
             position,
             *optional,
         )
+        result.setdefault('warnings', []).extend(history.attrs.get('history_warnings', []))
 
         context = self.e["engine_game_context"](card)
 
@@ -2516,6 +2542,8 @@ def calculation_failure_details(error):
         'A verified positive prop line is required.',
         'At least 3 current-season appearances are needed.',
         'No regular-season appearances returned for these two seasons.',
+        'ESPN game-log fields are missing. No averages were substituted.',
+        'ESPN returned a game without matchup metadata.',
         'Incomplete player game-log row.',
         'Unknown home/away marker.',
         'Depth-chart team did not match.',
@@ -2555,6 +2583,10 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
     # Work on an isolated environment mapping; do not patch process-wide globals.
     engine = wf.e
     wf.e = dict(engine)
+    # CLI workers have no browser session. Price context must come from the
+    # exact saved board being prepared, rather than an empty session_state.
+    if 'engine_no_vig' in engine:
+        wf.e['engine_no_vig'] = lambda card: engine['engine_no_vig'](card, board.get('v4_rows') or [])
     original_player, original_event = wf.player, wf.event_for
     original_availability = getattr(wf, 'availability', None)
     player_cache, event_cache, history_cache, availability_cache, shared_cache = {}, {}, {}, {}, {}
@@ -2629,13 +2661,35 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
 
 def preparation_panel(wf, st, rows):
     st.markdown("#### Prepare today's board")
+    with st.expander('Input checks and coverage'):
+        inputs = wf.store.get('input_health', 'latest') or {}
+        if inputs:
+            st.caption('Input checks (UTC): ' + str(inputs.get('checked_at')))
+            checks = [{'Input': name, 'Available': value.get('available', False),
+                'Rows': value.get('rows'), 'Reason': value.get('reason', ''),
+                'Fetched or checked (UTC)': value.get('fetched_at') or value.get('checked_at')}
+                for name, value in inputs.get('sources', {}).items()]
+            st.dataframe(pd.DataFrame(checks), hide_index=True, use_container_width=True)
+            for limitation in inputs.get('limitations', []):
+                st.warning(limitation)
+            news = (inputs.get('sources', {}).get('news') or {}).get('articles') or []
+            if news:
+                st.caption('Recent ESPN NBA headlines. League news is context, not confirmed player availability.')
+                st.dataframe(pd.DataFrame([{'Headline': a['headline'], 'Published (UTC)': a['published']} for a in news]), hide_index=True, use_container_width=True)
+        else:
+            st.info('The worker has not recorded input checks with this version yet.')
+        coverage = wf.store.get('coverage', slate_day()) or {}
+        if coverage:
+            st.write({key: value for key, value in coverage.items() if key != 'checked_at'})
+            st.caption('Missed starts remain counted. Provider completeness is reported separately below.')
     st.caption('The scheduled worker imports today’s lines and calculates them automatically when configured. This button resumes calculations using saved lines without a paid refresh.')
     auto = wf.store.get('automation', slate_day()) or {}
     if auto:
-        st.caption(f"Automatic worker last run (UTC): {auto.get('last_run', 'Import started')} · Odds request reservations: {auto.get('odds_requests', 0)}/34 · Tier feed: {auto.get('feed_requests', 0)}/10")
+        cap = auto.get('feed_cap', 10)
+        st.caption(f"Automatic worker last run (UTC): {auto.get('last_run', 'Import started')} · Odds request reservations: {auto.get('odds_requests', 0)}/34 · Tier feed: {auto.get('feed_requests', 0)}/{cap}")
         if auto.get('feed_partial'):
-            if auto.get('feed_requests', 0) >= 10:
-                st.warning('PrizePicks download is incomplete and the app’s daily 10-request cap is reached. Automatic downloads cannot continue today under this cap. Saved props can still calculate; missing lines are not included in the ready count.')
+            if auto.get('feed_requests', 0) >= cap:
+                st.warning(f'PrizePicks download is incomplete and the app’s daily {cap}-request cap is reached. Downloads cannot continue today under this cap. Missing lines are excluded from the ready count. PRIZEPICKS_DAILY_REQUEST_CAP controls this limit; increasing it can use more provider credits.')
             else:
                 st.warning('PrizePicks download is incomplete. The background worker can continue saved pagination within the remaining daily request budget. Ready counts cover saved lines only.')
         if auto.get('fantasy_partial'):
@@ -3860,6 +3914,7 @@ def parse_player_log(data, player_id, player_name, season):
 def fetch_player_history(player_id, player_name, season):
     year = int(season.split("-")[0])
     rows = []
+    warnings = []
     for start in (year, year - 1):
         label = f"{start}-{str(start + 1)[-2:]}"
         url = (
@@ -3867,10 +3922,17 @@ def fetch_player_history(player_id, player_name, season):
             "sports/basketball/nba/athletes/"
             f"{player_id}/gamelog"
         )
-        data = saved_fetch(url, {"season": start + 1})
-        rows.extend(
-            parse_player_log(data, player_id, player_name, label)
-        )
+        try:
+            data = saved_fetch(url, {"season": start + 1})
+            parsed = parse_player_log(data, player_id, player_name, label)
+        except Exception:
+            if start == year:
+                # Current-season data is required. Never replace it with old
+                # averages after an error, and never accept malformed rows.
+                raise
+            warnings.append('Prior-season history unavailable; verified current-season data retained.')
+            continue
+        rows.extend(parsed)
 
     if not rows:
         raise ValueError(
@@ -3883,7 +3945,9 @@ def fetch_player_history(player_id, player_name, season):
     frame["GAME_DATE"] = pd.to_datetime(
         frame["GAME_DATE"], utc=True, errors="raise"
     )
-    return frame.sort_values("GAME_DATE", ascending=False)
+    frame = frame.sort_values("GAME_DATE", ascending=False)
+    frame.attrs['history_warnings'] = warnings
+    return frame
 
 
 def market_columns(card):
@@ -5082,13 +5146,13 @@ def engine_position(team, athlete, season):
     return roster_position, evidence
 
 
-def engine_no_vig(card):
+def engine_no_vig(card, rows=None):
     fields = (
         "Fixture ID", "Market ID", "Period", "Line", "Line Type",
     )
     pairs = {}
 
-    for row in st.session_state.get("v4_rows", []):
+    for row in (st.session_state.get("v4_rows", []) if rows is None else rows):
         if row.get("Platform") != "draftkings":
             continue
 
@@ -6759,11 +6823,157 @@ def pp_cached_combined():
 import sys
 
 
+def player_health_key(card):
+    # Names only group queries; Workflow.player still verifies the ESPN ID
+    # against both current matchup rosters before any status is accepted.
+    return str(card.get('Game')) + '|' + str(card.get('Player'))
+
+
+def feed_request_cap():
+    try:
+        value = int(setting('PRIZEPICKS_DAILY_REQUEST_CAP', '10'))
+        if not 1 <= value <= 100:
+            raise ValueError('Invalid cap')
+        return value
+    except (ValueError, TypeError):
+        return 10
+
+
+def reserve_prizepicks_request(store):
+    """One atomic counter shared by manual refreshes and scheduled workers."""
+    if not store.remote:
+        raise ValueError('Permanent storage is required before requesting provider pages.')
+    day, cap = slate_day(), feed_request_cap()
+    previous = store.get('automation', day) or {}
+    # Initialize from the old ledger during upgrades; never reset today's use.
+    initial = int(previous.get('feed_requests', 0))
+    budget = store.query('SELECT payload FROM sports_records WHERE namespace=? AND key=?',
+                         ('request_budget', day + ':prizepicks'), fetch=True)
+    if budget:
+        initial = int(budget[0][0])
+    if initial >= cap:
+        raise ValueError('Daily PrizePicks request cap reached; saved pages retained.')
+    rows = store.query('INSERT INTO sports_records VALUES (?,?,?,?) '
+        'ON CONFLICT(namespace,key) DO UPDATE SET '
+        'payload=CAST(CAST(sports_records.payload AS INTEGER)+1 AS TEXT), updated=excluded.updated '
+        'WHERE CAST(sports_records.payload AS INTEGER)<? RETURNING payload',
+        ('request_budget', day + ':prizepicks', str(initial + 1), now(), cap), fetch=True)
+    if not rows:
+        raise ValueError('Daily PrizePicks request cap reached; saved pages retained.')
+    return int(rows[0][0])
+
+
+def refresh_input_checks(wf):
+    """Exercise the same parsers used by the engine; never substitute zeros."""
+    report = {'checked_at': now(), 'sources': {}}
+    for name, args, expected in [('load_team_advanced', (wf.e['current_season'](),), 30),
+                                  ('load_position_defense', (), 150)]:
+        try:
+            value = wf.e[name](*args)
+            count = len(value['data'])
+            if count != expected:
+                raise ValueError('Unexpected source row count')
+            report['sources'][name] = {'available': True, 'rows': count,
+                'fetched_at': value.get('fetched_at'), 'checked_at': now()}
+        except Exception as error:
+            report['sources'][name] = {'available': False,
+                'reason': type(error).__name__ + ': source validation failed', 'checked_at': now()}
+    # News is displayed as attributed research context, not converted into
+    # unverified numerical minute/usage adjustments.
+    try:
+        data = wf.e['saved_fetch'](wf.e['ESPN_BASE'] + 'news', {}, ttl_seconds=900)
+        if not isinstance(data.get('articles'), list):
+            raise ValueError('Invalid news feed')
+        articles = []
+        for item in data['articles']:
+            published = pd.to_datetime(item.get('published'), utc=True, errors='coerce')
+            if pd.isna(published) or not 0 <= (pd.Timestamp.now(tz='UTC') - published).total_seconds() <= 172800:
+                continue
+            articles.append({'headline': str(item.get('headline') or ''),
+                'published': published.isoformat(), 'categories': item.get('categories') or [],
+                'url': ((item.get('links') or {}).get('web') or {}).get('href')})
+        report['sources']['news'] = {'available': True, 'articles': articles, 'checked_at': now()}
+    except Exception as error:
+        report['sources']['news'] = {'available': False,
+            'reason': type(error).__name__ + ': news feed unavailable', 'checked_at': now()}
+    report['limitations'] = ['Confirmed starting lineups are not connected.',
+        'News is research context; injury-driven role changes and minutes restrictions are not modeled.']
+    wf.store.put('input_health', 'latest', report)
+    return report
+
+
+def refresh_board_health(wf, board):
+    """Check saved players without changing original forecasts or odds."""
+    previous = wf.store.get('health', slate_day()) or {}
+    players = {}
+    for card in preparation_rows(board.get('v4_rows') or []):
+        key = player_health_key(card)
+        if key in players:
+            continue
+        try:
+            team, player, roster_time = wf.player(card)
+            availability = wf.availability(str(player['id']), str(team['id']))
+            entries = availability.get('entries') or []
+            statuses = sorted({str(x.get('status') or 'Unknown').strip() for x in entries})
+            blocked = any(x.lower() in ('out', 'suspended') for x in statuses)
+            old = (previous.get('players') or {}).get(key) or {}
+            if not availability.get('available'):
+                statuses = old.get('statuses') or []
+            players[key] = {'player_id': str(player['id']), 'team_id': str(team['id']),
+                'roster_checked_at': roster_time, 'checked_at': now(),
+                'injuries_available': bool(availability.get('available')),
+                'statuses': statuses, 'blocked': blocked if availability.get('available') else old.get('blocked', False),
+                'note': ('Injury report unavailable; previous status: ' + ', '.join(statuses)) if not availability.get('available') else
+                    (', '.join(statuses) if statuses else 'No matching injury entry; playing and starting are not confirmed.')}
+        except Exception as error:
+            players[key] = {'checked_at': now(), 'injuries_available': False,
+                'blocked': True, 'note': calculation_failure_details(error)['reason']}
+    report = {'checked_at': now(), 'players': players,
+              'roster_matched': sum('player_id' in v for v in players.values()),
+              'injury_checked': sum(v.get('injuries_available', False) for v in players.values()),
+              'blocked': sum(v.get('blocked', False) for v in players.values()),
+              'limitations': ['Confirmed starting lineups are not connected.',
+                  'Injury-driven role changes and minutes restrictions are not modeled.']}
+    wf.store.put('health', slate_day(), report)
+    return report
+
+
+def board_coverage(wf, board):
+    """Count missed deadlines separately so a shrinking slate cannot look complete."""
+    index = forecast_index(wf.store.items('forecast'))
+    statuses = dict(wf.store.items('calculation_status'))
+    cards = {}
+    for card in board.get('v4_rows') or []:
+        start = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
+        if card.get('Decoded') and market_columns(card) and pd.notna(start) and slate_day(start) == slate_day():
+            cards.setdefault(market_signature(card), card)
+    report = {'checked_at': now(), 'imported': len(cards), 'ready': 0,
+              'upcoming_pending': 0, 'upcoming_unavailable': 0, 'missed_start': 0}
+    for card in cards.values():
+        frozen = saved_prediction(index, card)
+        created = pd.to_datetime((frozen or {}).get('created_at'), utc=True, errors='coerce')
+        start = pd.to_datetime(card['Start (UTC)'], utc=True)
+        if frozen and pd.notna(created) and created < start:
+            report['ready'] += 1
+        elif not today_pregame(card['Start (UTC)']):
+            report['missed_start'] += 1
+        elif (statuses.get(identity(card)) or {}).get('Status') == 'Unavailable':
+            report['upcoming_unavailable'] += 1
+        else:
+            report['upcoming_pending'] += 1
+    wf.store.put('coverage', slate_day(), report)
+    return report
+
+
 def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     if not wf.store.remote:
         raise RuntimeError('Permanent database required for automatic preparation')
     day = slate_day()
     ledger = wf.store.get('automation', day) or {'odds_requests': 0, 'feed_requests': 0}
+    ledger['feed_cap'] = feed_request_cap()
+    budget = wf.store.get('request_budget', day + ':prizepicks')
+    if budget is not None:
+        ledger['feed_requests'] = max(ledger.get('feed_requests', 0), int(budget))
     board = wf.store.get('board', 'board') or {}
     errors = []
     def reserve(kind, maximum):
@@ -6806,7 +7016,8 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     key = setting('PRIZEPICKS_API_KEY', '')
     if key and preparation_rows(board.get('v4_rows', [])):
         def fetch_page(params):
-            reserve('feed_requests', 10)
+            ledger['feed_requests'] = reserve_prizepicks_request(wf.store)
+            wf.store.put('automation', day, ledger)
             response = requests.get('https://prizepicksapi.com/api/v1/projections',
                 headers={'Authorization': 'Bearer ' + key}, params=params, timeout=25)
             if response.status_code != 200:
@@ -6821,7 +7032,7 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
             saved_feed = wf.store.get('source', cache_key) or {}
             same_day = saved_feed.get('slate_day') == day and saved_feed.get('filters') == filters
             needs_download = not same_day or saved_feed.get('partial', True) or refresh
-            remaining = 10 - ledger.get('feed_requests', 0)
+            remaining = ledger['feed_cap'] - ledger.get('feed_requests', 0)
             if needs_download and remaining > 0:
                 try:
                     saved_feed, calls = pp_download_pages(wf.store, cache_key, fetch_page,
@@ -6844,17 +7055,38 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
             except (ValueError, TypeError, KeyError):
                 errors.append('Saved PrizePicks pages could not be matched to upcoming games; existing board retained.')
         wf.store.put('board', 'board', board)
+    # Both checks operate on saved lines and free ESPN inputs, never new odds.
+    last_check = wf.store.get('input_health', 'latest') or {}
+    checked_at = pd.to_datetime(last_check.get('checked_at'), utc=True, errors='coerce')
+    if pd.isna(checked_at) or (pd.Timestamp.now(tz='UTC') - checked_at).total_seconds() >= 3600:
+        refresh_input_checks(wf)
+    refresh_board_health(wf, board)
     report = prepare_saved_board(wf, board, budget_seconds=budget_seconds, max_picks=10000)
+    ledger['coverage'] = board_coverage(wf, board)
     ledger.update(last_run=now(), errors=errors, preparation=report)
     wf.store.put('automation', day, ledger)
     return ledger
+
+
+if '--check-inputs' in sys.argv:
+    if not _database_online:
+        raise SystemExit('Permanent database unavailable; input checks were not saved.')
+    report = refresh_input_checks(workflow)
+    print(encode(report))
+    raise SystemExit(0 if all(item.get('available') for item in report['sources'].values()) else 1)
 
 
 if '--auto-board' in sys.argv:
     if not _database_online:
         raise SystemExit('Permanent database unavailable; no feed or odds requests made.')
     try:
-        print(encode(automatic_board_run(workflow, refresh='--refresh' in sys.argv)))
+        report = automatic_board_run(workflow, refresh='--refresh' in sys.argv)
+        print(encode(report))
+        coverage = report.get('coverage') or {}
+        if report.get('feed_partial') or report.get('fantasy_partial'):
+            print('::warning::Provider feed is incomplete. A successful worker run does not confirm full slate coverage.', flush=True)
+        if coverage.get('missed_start') or coverage.get('upcoming_unavailable'):
+            print('::warning::Some imported lines missed tipoff or remain unavailable. See saved coverage and calculation reasons.', flush=True)
     except Exception as error:
         raise SystemExit('Automatic board paused: ' + type(error).__name__ + '. Saved records preserved.') from None
     raise SystemExit(0)
@@ -6873,7 +7105,7 @@ if "--prepare-saved" in sys.argv:
 
 if "--maintenance" in sys.argv:
     if not _database_online:
-        raise SystemExit("Neon unavailable; maintenance skipped without changing saved data.")
+        raise SystemExit("Permanent database unavailable; maintenance skipped without changing saved data.")
 
     _report = workflow.maintenance()
     print({
@@ -6974,6 +7206,7 @@ def ui_tier_marker(card):
 def ui_card(card, frozen, saved=False):
     """Mobile-first pick card. Only frozen model values are displayed."""
     result = (frozen or {}).get('result') or {}
+    health = ((workflow_store.get('health', slate_day()) or {}).get('players') or {}).get(player_health_key(card)) or {}
     direction = str(result.get('direction') or '').upper()
     projection = ui_number(result.get('projection'))
     probability = ui_number(result.get('estimated_hit_probability'))
@@ -7008,6 +7241,10 @@ def ui_card(card, frozen, saved=False):
         state = workflow_store.get('calculation_status', identity(card)) or {}
         if state.get('reason'):
             st.caption(state['reason'])
+    if health.get('blocked'):
+        st.warning('Unavailable for current plays: ' + health.get('note', 'Player status requires review') + '. Original prediction retained for the audit.')
+    elif health.get('statuses'):
+        st.caption('Latest injury status: ' + ', '.join(health['statuses']) + ' · checked ' + str(health.get('checked_at')))
     if result and not result.get('selection_allowed', True):
         st.caption('This direction is not offered for the selected platform/tier.')
     key = identity(card)
@@ -7274,6 +7511,16 @@ def ui_board(page):
     # Browsing renders saved forecasts only; worker controls live in Settings.
     rows = st.session_state.get('v4_rows', [])
     forecasts = forecast_index(workflow_store.items('forecast'))
+    health = workflow_store.get('health', slate_day()) or {}
+    coverage = workflow_store.get('coverage', slate_day()) or {}
+    if page == 'Plays':
+        if coverage:
+            st.caption(f"Saved board: {coverage['ready']}/{coverage['imported']} calculated before tipoff · {coverage['missed_start']} missed their start · checked {coverage['checked_at']}")
+        if health:
+            st.caption(f"Player checks: {health['roster_matched']}/{len(health['players'])} roster matches · {health['injury_checked']} injury checks · {health['blocked']} unavailable · checked {health['checked_at']}")
+        auto = workflow_store.get('automation', slate_day()) or {}
+        if auto.get('feed_partial') or auto.get('fantasy_partial'):
+            st.warning('The imported board is incomplete. Missing provider pages are excluded from these counts; see Settings for feed status.')
     for card in rows:
         frozen = saved_prediction(forecasts, card)
         if frozen:
@@ -7334,6 +7581,7 @@ def ui_board(page):
                and (tier == 'All' or (c.get('Platform') == 'prizepicks' and c.get('Line Type') == tier))]
     if view == 'Top plays':
         records = [c for c in records if identity(c) in forecasts
+                   and not (health.get('players', {}).get(player_health_key(c)) or {}).get('blocked', False)
                    and forecasts[identity(c)]['result'].get('selection_allowed', True)
                    and not forecasts[identity(c)]['result'].get('tie', False)]
         records.sort(key=lambda c: ui_number(forecasts[identity(c)]['result'].get('standardized_gap'), -1), reverse=True)
@@ -7537,6 +7785,7 @@ def render_pp_tier_refresh():
                 if fantasy_refresh:
                     filters['stat'] = 'Fantasy Score'
                 def fetch_page(params):
+                    reserve_prizepicks_request(workflow_store)
                     try:
                         response = requests.get('https://prizepicksapi.com/api/v1/projections',
                             headers={'Authorization':'Bearer '+key,'X-User-Request':'Refresh my NBA Fantasy Score lines' if fantasy_refresh else 'Refresh my NBA tier-labelled board'},
@@ -7554,6 +7803,7 @@ def render_pp_tier_refresh():
             if not items:
                 raise ValueError(f'The provider returned no {"Fantasy Score " if fantasy_refresh else ""}records for this request. Downloaded data saved; existing board preserved. Requests made: {calls}.')
             merged,count = pp_merge_tiers(rows,items,payload['fetched_at'],fantasy_only=fantasy_refresh)
+            merged = [r for r in st.session_state.get('v4_rows', []) if not today_pregame(r.get('Start (UTC)'))] + merged
             st.session_state['v4_rows'] = merged
             st.session_state.pop('calculated_board',None)
             st.session_state.pop('selected_prop_card',None)
