@@ -81,4 +81,20 @@ class NavigationTests(unittest.TestCase):
         self.assertTrue(any('REVIEW' in card and 'Saved model direction: MORE' in card for card in cards))
         self.assertFalse(any('No selectable upcoming Fantasy plays' in item.value for item in app.info))
 
-if __name__=='__main__':unittest.main()
+
+
+
+    def test_manual_entry_table_renders_with_roster_and_no_odds_credentials(self):
+        import pandas as pd
+        app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
+        current=pd.Timestamp.now(tz='UTC')
+        start=current.tz_convert('America/Los_Angeles').normalize()+pd.DateOffset(days=1)-pd.Timedelta(seconds=1)
+        game={'id':'123','game':'Team A vs Team B','start':start.isoformat(),
+              'teams':[{'id':'1','displayName':'Team A'},{'id':'2','displayName':'Team B'}]}
+        app.session_state['_manual_games']=[game]
+        app.session_state['_manual_roster']={'event':'123','names':['Player A','Player B']}
+        app.session_state['sports_lab_page_buttons']='Settings'
+        app.run()
+        self.assertFalse(app.exception,list(app.exception))
+        self.assertTrue(any(b.label=='Import and calculate these lines' for b in app.button))
+        self.assertTrue(any(b.label=='Check account usage — no quota cost' for b in app.button))
