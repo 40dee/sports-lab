@@ -802,11 +802,14 @@ def combo_pool(store, reference=None):
     pool, excluded, seen = [], {}, set()
     def reject(reason): excluded[reason] = excluded.get(reason, 0) + 1
     for card in board.get('v4_rows') or []:
-        if str(card.get('Platform', '')).lower() != 'prizepicks': continue
+        if str(card.get('Platform', '')).lower() != 'prizepicks':
+            reject('Not a PrizePicks line'); continue
         signature = market_signature(card)
-        if signature in seen: continue
+        if signature in seen:
+            reject('Duplicate market'); continue
         seen.add(signature)
-        if not today_pregame(card.get('Start (UTC)'), current): continue
+        if not today_pregame(card.get('Start (UTC)'), current):
+            reject('Game not upcoming today (Pacific time)'); continue
         frozen = saved_prediction(index, card)
         result = (frozen or {}).get('result') or {}
         start = utc_timestamp(card.get('Start (UTC)'))
@@ -1064,9 +1067,14 @@ def render_combos(wf, st):
             st.info('No saved combo suggestions yet. Build from the saved board or wait for the board worker.')
             return
         st.caption(f"Prepared {snapshot['created_at']} UTC · {snapshot['eligible_players']} eligible players")
-        with st.expander('Selection checks'):
+        if not snapshot['eligible_players']:
+            st.warning('No eligible players. See the exclusion breakdown below to identify what is blocking the saved board; rebuilding alone does not refresh lines or injury checks.')
+        with st.expander('Selection checks and exclusion reasons', expanded=not snapshot['eligible_players']):
             st.write('At least five history games; projected separation ≥0.25 recent-game standard deviations; checks within one hour; at least two teams; at most two players per game. These thresholds are not calibrated probabilities. No matching injury entry does not confirm starting.')
-            if snapshot.get('excluded'):st.dataframe(pd.DataFrame([{'Reason':k,'Lines excluded':v} for k,v in snapshot['excluded'].items()]),hide_index=True,use_container_width=True)
+            if snapshot.get('excluded'):
+                st.dataframe(pd.DataFrame([{'Reason':k,'Lines excluded':v} for k,v in sorted(snapshot['excluded'].items(),key=lambda item:-item[1])]),hide_index=True,width='stretch')
+            else:
+                st.caption('No rejection reasons recorded. The saved board may be empty; check the Plays tab and board storage.')
         keys=(snapshot.get('sizes') or {}).get(str(size),[])
         if not keys:
             st.info(f'No qualifying {size}-player combo yet. Rebuilding uses the same saved inputs and does not refresh stale lines.')
