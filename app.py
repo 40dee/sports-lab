@@ -6991,6 +6991,136 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
     return kept + imported, len(imported)
 
 
+def fantasy_saved_records(records, grades, reference=None):
+    current = pd.Timestamp.now(tz='UTC') if reference is None else utc_timestamp(reference)
+    values = []
+    for key, frozen in unique_forecasts(records):
+        card = frozen.get('card') or {}
+        if not fantasy_weights(card):
+            continue
+        start = utc_timestamp(card.get('Start (UTC)'))
+        created = utc_timestamp(frozen.get('created_at'))
+        result = frozen.get('result') or {}
+        projection = ui_number(result.get('projection'))
+        # Display only verifiable original predictions. Never generate a
+        # retroactive forecast from an expired feed quote or final boxscore.
+        if pd.isna(start) or pd.isna(created) or created >= start or projection is None:
+            continue
+        grade = grades.get(key) or {}
+        outcome = grade.get('outcome', 'PENDING')
+        if outcome == 'LATE_EXCLUDED':
+            continue
+        actual = ui_number(grade.get('actual')) if outcome in ('WIN', 'LOSS', 'TIE') else None
+        values.append({'id':key, 'frozen':frozen, 'card':card,
+            'date':start.tz_convert(SLATE_TIMEZONE).date().isoformat(),
+            'start':start.isoformat(), 'upcoming':bool(start > current),
+            'projection':projection, 'actual':actual, 'outcome':outcome})
+    return sorted(values, key=lambda item:(item['start'],str(item['card'].get('Player')),float(item['card']['Line'])), reverse=True)
+
+
+def fantasy_saved_summary(rows, records, grades, reference=None):
+    current = pd.Timestamp.now(tz='UTC') if reference is None else utc_timestamp(reference)
+    day = slate_day(current)
+    saved = fantasy_saved_records(records, grades, current)
+    today = [item for item in saved if item['date'] == day]
+    imported = {}
+    for card in rows:
+        start = utc_timestamp(card.get('Start (UTC)'))
+        if fantasy_weights(card) and pd.notna(start) and slate_day(start) == day:
+            imported.setdefault(market_signature(card), card)
+    return {'Imported Fantasy lines today (including started)':len(imported),
+            'Upcoming imported Fantasy lines':sum(today_pregame(c.get('Start (UTC)'), current) for c in imported.values()),
+            'Saved pregame Fantasy forecasts today':len(today),
+            'Started Fantasy forecasts today':sum(not item['upcoming'] for item in today),
+            'Settled Fantasy forecasts today':sum(item['outcome'] in ('WIN','LOSS','TIE','DNP') for item in today),
+            'Saved pregame Fantasy forecasts, all dates':len(saved)}, saved
+
+
+def render_fantasy_plays(wf, st):
+    st.subheader('Fantasy plays')
+    st.caption('PrizePicks NBA · Original saved pregame projections · PTS + 1.2 REB + 1.5 AST + 3 STL + 3 BLK − TO')
+    records = wf.store.items('forecast')
+    grades = dict(wf.store.items('grade'))
+    board = wf.store.get('board', 'board') or {}
+    rows = board.get('v4_rows') or st.session_state.get('v4_rows', [])
+    summary, saved = fantasy_saved_summary(rows, records, grades)
+    upcoming = [item for item in saved if item['upcoming'] and item['date'] == slate_day()]
+    default = 'Upcoming' if upcoming or not saved else 'Saved forecasts'
+    mode = st.radio('Fantasy view', ['Upcoming', 'Saved forecasts'], index=0 if default == 'Upcoming' else 1,
+                    horizontal=True, key='fantasy_view_mode')
+    auto = wf.store.get('automation', slate_day()) or {}
+    if auto.get('fantasy_partial') or auto.get('feed_partial'):
+        st.warning('The saved provider feed is incomplete. This page shows only imported lines with saved projections; it does not confirm full Fantasy coverage.')
+    if mode == 'Upcoming':
+        visible = upcoming
+        queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming))
+        if queued:
+            st.caption(f'{queued} imported Fantasy lines are awaiting a verified projection. No MORE/LESS pick is invented for them.')
+        if not visible:
+            st.info('No calculated upcoming Fantasy plays for today. Choose Saved forecasts to see earlier Fantasy projections and results.')
+    else:
+        dates = sorted({item['date'] for item in saved}, reverse=True)
+        if not dates:
+            st.info('No saved pregame Fantasy projections were found. Feed records alone are not model predictions; completed games will not be backfilled with new forecasts.')
+            return
+        date = st.selectbox('Fantasy game date (Pacific)', dates, key='fantasy_saved_date')
+        visible = [item for item in saved if item['date'] == date]
+        st.caption('These are original pregame records. Started and completed games stay visible here; they are not new live picks.')
+    search = st.text_input('Find Fantasy player', placeholder='Search by name…', key='fantasy_find_player')
+    visible = [item for item in visible if search.strip().lower() in ui_name(item['card'].get('Player','')).lower()]
+    st.caption(f'{len(visible)} saved Fantasy lines · {sum(item["outcome"] in ("WIN","LOSS","TIE","DNP") for item in visible)} settled')
+    pages = max(1, math.ceil(len(visible)/10))
+    filters = (mode, st.session_state.get('fantasy_saved_date'), search)
+    if st.session_state.get('_fantasy_filters') != filters or st.session_state.get('fantasy_cards_page',1) > pages:
+        st.session_state.pop('fantasy_cards_page',None)
+        st.session_state['_fantasy_filters'] = filters
+    page = int(st.number_input('Fantasy page', min_value=1, max_value=pages, value=1, step=1, key='fantasy_cards_page')) if visible else 1
+    health = (wf.store.get('health', slate_day()) or {}).get('players') or {}
+    columns = st.columns(2)
+    for i, item in enumerate(visible[(page-1)*10:page*10]):
+        card, result = item['card'], item['frozen'].get('result') or {}
+        with columns[i % 2]:
+            with st.container(border=True):
+                st.markdown('#### ' + ui_name(card.get('Player','')) + ' ' + ui_tier_marker(card))
+                st.caption(str(card.get('Game','')))
+                tier = card.get('Line Type') or 'Unverified'
+                st.caption('Fantasy Score · PrizePicks · ' + str(tier))
+                direction = result.get('direction')
+                if item['upcoming']:
+                    status = health.get(player_health_key(card)) or {}
+                    if status.get('blocked'):
+                        st.warning('Unavailable: ' + str(status.get('note','Current player status needs review')))
+                    else:
+                        st.caption('Upcoming · Saved before tipoff')
+                else:
+                    st.caption('Game started · Saved pregame projection')
+                if direction in ('MORE','LESS'):
+                    st.markdown(('🟢 ↑ MORE' if direction == 'MORE' else '🔴 ↓ LESS') + f" · Line {float(card['Line']):g}")
+                else:
+                    st.caption('Direction unavailable')
+                left, right = st.columns(2)
+                left.metric('Projected Fantasy', f"{item['projection']:.2f}")
+                right.metric('Actual Fantasy', '—' if item['actual'] is None else f"{item['actual']:.2f}")
+                label = {'WIN':'✓ WIN', 'LOSS':'✕ LOSS', 'TIE':'Tie', 'DNP':'DNP', 'PENDING':'Awaiting result'}.get(item['outcome'],item['outcome'])
+                st.caption('Result: ' + label)
+                if not result.get('selection_allowed', True):
+                    st.caption('The forecast direction is not offered on this saved tier.')
+                with st.expander('Saved six-stat breakdown'):
+                    weights = fantasy_weights(card)
+                    breakdown = []
+                    for component in result.get('components') or []:
+                        estimate = ui_number(component.get('Projection'))
+                        stat = component.get('Stat')
+                        if estimate is not None and stat in weights:
+                            breakdown.append({'Stat':stat, 'Stat estimate':estimate,
+                                'Weight':weights[stat], 'Fantasy contribution':estimate * weights[stat]})
+                    if breakdown:
+                        st.dataframe(pd.DataFrame(breakdown), hide_index=True, use_container_width=True)
+                        st.caption('Original component estimates before any saved learning adjustment. No new calculation is run here.')
+                    else:
+                        st.caption('This older forecast has no saved component breakdown.')
+
+
 def pp_fantasy_check(rows, payload):
     if not payload or not isinstance(payload.get('items'), list):
         return {'Feed': 'No saved feed', 'Fantasy records returned': 0}, []
@@ -7027,9 +7157,9 @@ def pp_fantasy_check(rows, payload):
                         'Start (Pacific)': local_text, 'Start (UTC)': start, 'Import check':reason})
     return {'Feed fetched (UTC)':payload.get('fetched_at'),
             'Total feed records':len(items), 'Fantasy records returned':len(fantasy),
-            'Ready fantasy records':sum(d['Import check']=='Ready to import' for d in details),
+            'Upcoming feed records ready to import':sum(d['Import check']=='Ready to import' for d in details),
             'Feed download incomplete':bool(payload.get('partial')),
-            'Imported fantasy lines today':len({identity(r) for r in rows if fantasy_weights(r)})}, details
+            **fantasy_saved_summary(rows, [], {})[0]}, details
 
 
 def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, reference=None, continuation_seconds=1800):
@@ -7869,6 +7999,12 @@ def ui_board(page):
     st.caption('NBA is connected. Other sports will appear here when their engines and feeds are ready.')
     platform = (st.segmented_control('Platform', ['All', 'PrizePicks', 'Kalshi', 'DraftKings'], default=st.session_state.get('mobile_platform', 'All'), key='mobile_platform_buttons', width='stretch') or 'All')
     kind = (st.segmented_control('Pick type', ['Player Props', 'Fantasy'], default=st.session_state.get('mobile_kind', 'Player Props'), key='mobile_kind_buttons', width='stretch') or 'Player Props')
+    if page == 'Plays' and kind == 'Fantasy':
+        if platform not in ('All', 'PrizePicks'):
+            st.info('Fantasy Score is supported for PrizePicks NBA. Choose PrizePicks or open the Fantasy tab.')
+        else:
+            render_fantasy_plays(workflow, st)
+        return
     view = (st.segmented_control('Board view', ['Top plays', 'All props'], default=st.session_state.get('mobile_view', 'Top plays'), key='mobile_view_buttons', width='stretch') or 'Top plays') if page != 'Saved' else 'All props'
     search = st.text_input('Find player', placeholder='Search by name…', key='mobile_search')
     if page == 'Saved':
@@ -8059,8 +8195,12 @@ def render_pp_tier_refresh():
     with st.expander('PrizePicks Regular / Goblin / Demon feed'):
         st.caption('Separate provider, never OddsPAPI. Each refresh below makes at most 2 provider requests. Successful pages and continuation cursors are saved. Cached quotes may be delayed.')
         if st.button('Check Fantasy feed — no API calls'):
-            summary, details = pp_fantasy_check(rows,pp_cached_combined())
+            all_rows = st.session_state.get('v4_rows', [])
+            summary, details = pp_fantasy_check(all_rows, pp_cached_combined())
+            saved_summary, _ = fantasy_saved_summary(all_rows, workflow_store.items('forecast'), dict(workflow_store.items('grade')))
+            summary.update(saved_summary)
             st.write(summary)
+            st.caption('Upcoming counts exclude started games. Saved forecasts include earlier games and remain available in the Fantasy tab. This check does not request new lines or statistics.')
             if details:
                 st.dataframe(pd.DataFrame(details),hide_index=True,use_container_width=True)
             else:
@@ -8248,7 +8388,7 @@ def render_native_kalshi_refresh():
 def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
     st.caption("Model picks · Research · Results")
-    app_page = (st.segmented_control("Navigation", ["Plays", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
+    app_page = (st.segmented_control("Navigation", ["Plays", "Fantasy", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
     st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
         st.session_state.pop("selected_prop_card", None)
@@ -8262,7 +8402,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
@@ -8396,7 +8536,9 @@ def render_app_pages():
 
 
         # ---------------- RESULTS AND PLAYER LINES ----------------
-        if app_page in ("Plays", "Saved"):
+        if app_page == 'Fantasy':
+            render_fantasy_plays(workflow, st)
+        elif app_page in ("Plays", "Saved"):
             ui_board(app_page)
 
         if app_page == "Settings":
