@@ -1,5 +1,10 @@
 name: Prepare today's NBA board and grade results
 on:
+  push:
+    branches: [main]
+    paths:
+      - app.py
+      - .github/workflows/grade-nba.yml
   workflow_dispatch:
     inputs:
       refresh:
