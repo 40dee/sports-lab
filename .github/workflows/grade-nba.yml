@@ -25,6 +25,7 @@ jobs:
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
       PRIZEPICKS_API_KEY: ${{ secrets.PRIZEPICKS_API_KEY }}
       ODDSPAPI_DAILY_REQUEST_CAP: ${{ vars.ODDSPAPI_DAILY_REQUEST_CAP || '34' }}
+      ODDSPAPI_MONTHLY_REQUEST_CAP: ${{ vars.ODDSPAPI_MONTHLY_REQUEST_CAP || '' }}
       PRIZEPICKS_DAILY_REQUEST_CAP: ${{ vars.PRIZEPICKS_DAILY_REQUEST_CAP || '10' }}
       REFRESH: ${{ (github.event_name == 'workflow_dispatch' && inputs.refresh) || github.event.schedule == '0 14,22 * * *' }}
     steps:

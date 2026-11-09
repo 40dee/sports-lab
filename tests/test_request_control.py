@@ -15,7 +15,7 @@ import requests
 SOURCE=Path(__file__).resolve().parents[1]/'app.py'
 tree=ast.parse(SOURCE.read_text())
 names={'Store','now','json_safe','encode','identity','utc_timestamp','slate_day','today_pregame',
- 'odds_cache_key','odds_daily_cap','reserve_odds_request','api_get','odds_fixture_params',
+ 'odds_account_snapshot','odds_monthly_budget','batch_fixture_objects','odds_cache_key','odds_daily_cap','reserve_odds_request','api_get','odds_fixture_params',
  'line_freshness','odds_refresh_plan','player_health_key','merge_scan_rows','decode_game',
  'numeric_line','outcome_direction','explicit_tier','automatic_board_run'}
 env=dict(globals(),st=SimpleNamespace(session_state={}),SLATE_TIMEZONE='America/Los_Angeles',
@@ -29,6 +29,11 @@ class RequestTests(unittest.TestCase):
   self.temp=tempfile.TemporaryDirectory();self.path=Path(self.temp.name)/'store.db'
   self.store=env['Store'](self.path)
   self.settings={'ODDS_API_KEY':'secret-credential','ODDSPAPI_DAILY_REQUEST_CAP':'3'}
+  account={'credential':hashlib.sha256(b'secret-credential').hexdigest(),'checked_at':env['now'](),
+      'month':pd.Timestamp.now(tz='UTC').strftime('%Y-%m'),'used':0,'limit':10000,
+      'reset_at':(pd.Timestamp.now(tz='UTC').normalize()+pd.offsets.MonthBegin(1)).isoformat()}
+  self.store.put('odds_status','account',account)
+  self.store.put('request_budget',account['month']+':oddspapi:'+account['credential'][:16],0)
   self.calls=Mock(return_value=FakeResponse())
   env.update(workflow_store=self.store,setting=lambda k,default='':self.settings.get(k,default),
              requests=SimpleNamespace(get=self.calls,RequestException=requests.RequestException))
@@ -169,3 +174,50 @@ class FreshnessTests(unittest.TestCase):
   board=(root/'grade-nba.yml').read_text();self.assertIn('ODDSPAPI_DAILY_REQUEST_CAP',board)
 
 if __name__=='__main__':unittest.main()
+
+class MonthlyBudgetTests(unittest.TestCase):
+ setUp=RequestTests.setUp
+ tearDown=RequestTests.tearDown
+ def account_response(self,count=178,limit=250):
+  return SimpleNamespace(status_code=200,json=lambda:{'api_key':'never-persist-me',
+   'current_subscription_id':'active','subscriptions':[{'subscription_id':'active',
+    'is_active':True,'request_count':count,'request_limit':limit}]})
+ def test_unmetered_account_works_after_download_pause_and_sanitizes(self):
+  self.store.put('odds_status','provider',{'resume_after':(pd.Timestamp.now(tz='UTC')+pd.Timedelta(hours=1)).isoformat()})
+  self.calls.return_value=self.account_response()
+  snapshot=env['api_get']('/account',{},force=True)
+  self.assertEqual(snapshot['used'],178)
+  self.assertIsNone(self.store.get('request_budget',env['slate_day']()+':oddspapi'))
+  self.assertNotIn('never-persist-me',self.store.export())
+  self.assertNotIn('secret-credential',self.store.export())
+ def test_paces_remaining_allowance_and_preserves_concurrent_reservations(self):
+  self.calls.return_value=self.account_response()
+  account=env['odds_account_snapshot'](self.store,force=True,reference='2026-11-09T18:00Z')
+  budget=env['odds_monthly_budget'](self.store,account,'2026-11-09T18:00Z')
+  self.assertEqual(budget['remaining'],72);self.assertEqual(budget['daily_cap'],3)
+  self.store.put('request_budget',budget['key'],181)
+  env['odds_account_snapshot'](self.store,force=True,reference='2026-11-09T18:02Z')
+  self.assertEqual(self.store.get('request_budget',budget['key']),181)
+ def test_monthly_exhaustion_blocks_paid_call_but_cached_board_still_works(self):
+  self.calls.return_value=self.account_response(250)
+  env['odds_account_snapshot'](self.store,force=True)
+  with self.assertRaisesRegex(ValueError,'Monthly'):env['api_get']('/odds',{'fixtureId':'new'})
+  self.assertEqual(self.calls.call_count,1) # account only
+  params={'fixtureId':'cached'}
+  self.store.put('odds_cache',env['odds_cache_key']('/odds',params),{'fetched_at':env['now'](),'payload':{'saved':True}})
+  self.assertEqual(env['api_get']('/odds',params),{'saved':True})
+ def test_unknown_account_shape_fails_closed(self):
+  self.calls.return_value=SimpleNamespace(status_code=200,json=lambda:{'subscriptions':[]})
+  self.store.put('odds_status','account',{})
+  with self.assertRaisesRegex(ValueError,'quota response'):env['api_get']('/odds',{'fixtureId':'new'})
+  self.assertEqual(self.calls.call_count,1)
+ def test_month_rollover_rejects_old_allowance(self):
+  self.calls.return_value=self.account_response()
+  account=env['odds_account_snapshot'](self.store,force=True,reference='2026-11-30T23:59Z')
+  with self.assertRaisesRegex(ValueError,'New month'):
+   env['odds_monthly_budget'](self.store,account,'2026-12-01T00:01Z')
+ def test_batch_shapes_require_real_fixture_ids(self):
+  fixture={'fixtureId':'one','bookmakerOdds':{}}
+  for value in ([fixture],{'events':[fixture]},fixture,{'one':fixture}):
+   self.assertEqual(env['batch_fixture_objects'](value),[fixture])
+  with self.assertRaises(ValueError):env['batch_fixture_objects']({'data':[{'price':3}]})
