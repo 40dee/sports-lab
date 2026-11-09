@@ -7699,6 +7699,9 @@ def compact_fantasy_card_html(item, status=None):
         note = '<div class="fc-note">' + text(status.get('note','Player status needs review')) + '</div>'
     if not pick_is_selectable(card, result):
         note += '<div class="fc-note">' + text(pick_side_note(card, result)) + '</div>'
+    if item.get('review_note'):
+        side, side_class = 'REVIEW', ''
+        note += '<div class="fc-note">' + text(item['review_note']) + ' Saved model direction: ' + text(direction) + '.</div>'
     marker = ui_tier_marker(card)
     tier = card.get('Line Type') or 'Unverified'
     return f'''<div class="fc-card">
@@ -7750,8 +7753,12 @@ def render_fantasy_plays(wf, st):
     date = None
     if mode == 'Upcoming':
         visible = upcoming
+        if upcoming_all and not upcoming:
+            visible=[dict(item,card=current_cards.get(market_signature(item['card']),item['card']),
+                review_note='Line, availability or offered direction needs verification; research only.') for item in upcoming_all]
+            st.warning('No entry-ready Fantasy picks passed current checks. Showing saved pregame projections for review; these are not current slip recommendations.')
         if len(upcoming_all) > len(upcoming):
-            st.caption(f'{len(upcoming_all)-len(upcoming)} saved Fantasy estimates are passes, stale, or have unverified offered sides; they are excluded from upcoming plays.')
+            st.caption(f'{len(upcoming_all)-len(upcoming)} saved Fantasy estimates are passes, stale, or have unverified offered sides; they are excluded from entry-ready suggestions. Saved projections remain available for review.')
         queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming_all))
         if queued: st.caption(f'{queued} imported Fantasy lines are awaiting verified projections.')
         if not visible: st.info('No selectable upcoming Fantasy plays today. Select Saved forecasts for earlier games.')
@@ -8304,6 +8311,10 @@ def ui_save_pick(card, frozen):
         old['active'] = False
         workflow_store.put('watchlist', key, old)
     else:
+        fresh, note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
+        if not fresh:
+            st.info(note)
+            return False
         if not frozen or not pick_is_selectable(card, frozen.get('result') or {}):
             st.info(pick_side_note(card, (frozen or {}).get('result') or {}))
             return False
@@ -8343,6 +8354,11 @@ def ui_card(card, frozen, saved=False):
         direction_class = 'pending'
         direction_text = pick_display_label(card, result)
         probability = None
+    fresh, freshness_note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
+    if result and not fresh:
+        direction_class = 'pending'
+        direction_text = 'VERIFY LINE'
+        probability = None
     platform = str(card.get('Platform', '')).upper()
     tier = str(card.get('Line Type', '')).strip() if platform == 'PRIZEPICKS' else ''
     marker = ui_tier_marker(card)
@@ -8370,8 +8386,9 @@ def ui_card(card, frozen, saved=False):
     elif health.get('statuses'):
         st.caption('Latest injury status: ' + ', '.join(health['statuses']) + ' · checked ' + str(health.get('checked_at')))
     if today_pregame(card.get('Start (UTC)')):
-        fresh,note=line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
-        st.caption(('' if fresh else '⚠ ')+note)
+        st.caption(('' if fresh else '⚠ ')+freshness_note)
+        if result and not fresh:
+            st.caption('Saved model direction: '+direction+' · Verify the exact line before using this forecast.')
     if result:
         st.caption(pick_side_note(card, result))
     key = identity(card)
@@ -8379,7 +8396,7 @@ def ui_card(card, frozen, saved=False):
     if left.button('Research  ›', key='detail_' + key, use_container_width=True):
         st.session_state['selected_prop_card'] = dict(card)
         st.rerun()
-    if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, disabled=not saved and not pick_is_selectable(card, result), use_container_width=True):
+    if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, disabled=not saved and (not fresh or not pick_is_selectable(card, result)), use_container_width=True):
         ui_save_pick(card, frozen)
         st.rerun()
 
@@ -8763,11 +8780,17 @@ def ui_board(page):
     records = [c for c in records if (stat == 'All' or ui_stat(c) == stat)
                and (tier == 'All' or (c.get('Platform') == 'prizepicks' and c.get('Line Type') == tier))]
     if view == 'Top plays':
-        records = [c for c in records if identity(c) in forecasts
-                   and not (health.get('players', {}).get(player_health_key(c)) or {}).get('blocked', False)
-                   and line_freshness(c,refresh_checks=line_checks)[0]
+        calculated = [c for c in records if identity(c) in forecasts
+                   and not (health.get('players', {}).get(player_health_key(c)) or {}).get('blocked', False)]
+        verified = [c for c in calculated
+                   if line_freshness(c,refresh_checks=line_checks)[0]
                    and pick_is_selectable(c, forecasts[identity(c)]['result'])
                    and not forecasts[identity(c)]['result'].get('tie', False)]
+        records = verified or calculated
+        if calculated and not verified:
+            st.warning('No entry-ready picks passed the current checks. Showing saved pregame projections for review below. Their exact lines or offered directions need verification; these are not current slip recommendations.')
+        elif len(calculated)>len(verified):
+            st.caption(f'{len(calculated)-len(verified)} saved forecasts need review or are passes. All props shows those records.')
         records.sort(key=lambda c: ui_number(forecasts[identity(c)]['result'].get('standardized_gap'), -1), reverse=True)
         st.caption('Ranked by projected gap relative to recent variability. This is not a proven probability or profit ranking. All props remains available.')
     else:
@@ -9124,7 +9147,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1 · shared-odds-1")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1 · shared-odds-1 · saved-board-review-1")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 
