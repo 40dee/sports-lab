@@ -1,5 +1,10 @@
 name: Sports Lab automatic audit
 on:
+  push:
+    branches: [main]
+    paths:
+      - app.py
+      - .github/workflows/sports_lab_audit_schedule.yml
   schedule:
     - cron: '*/30 * * * *'
   workflow_dispatch:
