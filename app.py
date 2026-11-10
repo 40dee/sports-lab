@@ -803,7 +803,7 @@ def combo_clock(reference=None):
     return pd.Timestamp.now(tz='UTC') if reference is None else pd.to_datetime(reference, utc=True)
 
 
-def combo_pool(store, reference=None):
+def combo_pool(store, reference=None, tier_mode="mixed"):
     current = combo_clock(reference)
     board = store.get('board', 'board') or {}
     health = (store.get('health', slate_day(current)) or {}).get('players') or {}
@@ -814,6 +814,8 @@ def combo_pool(store, reference=None):
     for card in board.get('v4_rows') or []:
         if str(card.get('Platform', '')).lower() != 'prizepicks':
             reject('Not a PrizePicks line'); continue
+        if tier_mode == 'standard' and str(card.get('Line Type','')).lower() not in ('standard','regular'):
+            reject('Special or unverified tier excluded from Standard-only'); continue
         signature = market_signature(card)
         # Only a qualifying row may claim a market. A stale duplicate must not
         # hide a later fresh, verified row for the same player/stat/line.
@@ -1022,24 +1024,25 @@ def update_combos(store, generate=False, reference=None):
     current=combo_clock(reference)
     generated=0
     if generate:
-        pool, excluded=combo_pool(store,current)
-        suggestions={'created_at':current.isoformat(),'day':slate_day(current),
-                     'eligible_players':len(pool),'excluded':excluded,'sizes':{}}
-        for size in range(2,7):
-            models=store.get('combo_model',str(size)) or {'policy':'balanced-v1'}
-            policies={}
-            for policy in COMBO_POLICIES:
-                snapshots=[combo_snapshot(legs,policy,current) for legs in combo_candidates(pool,size,policy)]
-                for snapshot in snapshots:
-                    store.put('combo',snapshot['id'],snapshot,immutable=True)
-                    generated+=1
-                policies[policy]=[s['id'] for s in snapshots]
-            suggestions['sizes'][str(size)]=policies[models['policy']]
-            # First complete paired daily cohort is frozen, never cherry-picked later.
-            if all(len(v)==3 for v in policies.values()):
-                store.put('combo_cohort',slate_day(current)+':'+str(size),
-                    {'day':slate_day(current),'size':size,'created_at':current.isoformat(),'policies':policies},immutable=True)
-        store.put('combo_suggestions',slate_day(current),suggestions)
+        for tier_mode in ('mixed','standard'):
+            pool, excluded=combo_pool(store,current,tier_mode=tier_mode)
+            suggestions={'created_at':current.isoformat(),'day':slate_day(current),
+                         'eligible_players':len(pool),'excluded':excluded,'sizes':{},'tier_mode':tier_mode}
+            for size in range(2,7):
+                models=store.get('combo_model',str(size)) or {'policy':'balanced-v1'}
+                policies={}
+                for policy in COMBO_POLICIES:
+                    snapshots=[combo_snapshot(legs,policy,current) for legs in combo_candidates(pool,size,policy)]
+                    for snapshot in snapshots:
+                        store.put('combo',snapshot['id'],snapshot,immutable=True)
+                        generated+=1
+                    policies[policy]=[s['id'] for s in snapshots]
+                suggestions['sizes'][str(size)]=policies[models['policy']]
+                # First complete paired daily cohort is frozen, never cherry-picked later.
+                if tier_mode=='mixed' and all(len(v)==3 for v in policies.values()):
+                    store.put('combo_cohort',slate_day(current)+':'+str(size),
+                        {'day':slate_day(current),'size':size,'created_at':current.isoformat(),'policies':policies},immutable=True)
+            store.put('combo_suggestions',slate_day(current)+(':'+tier_mode if tier_mode=='standard' else ''),suggestions)
     grades=dict(store.items('grade'))
     prior=dict(store.items('combo_grade'))
     for key,combo in store.items('combo'):
@@ -1098,8 +1101,11 @@ def render_combos(wf, st):
     mode=st.segmented_control('Combo view',['Suggestions','Results & learning','Played entries'],default='Suggestions',key='combo_mode') or 'Suggestions'
     if mode=='Suggestions':
         size=st.segmented_control('Players',[2,3,4,5,6],default=2,key='combo_size') or 2
-        snapshot=wf.store.get('combo_suggestions',slate_day()) or {}
-        st.caption('The scheduled board worker prepares these. Browsing makes no odds requests. Ranking is an experimental heuristic, not a combined win probability.')
+        tier_choice=st.segmented_control('Line types',['Standard only','Mixed tiers'],default='Standard only',key='combo_tier_mode') or 'Standard only'
+        tier_mode='standard' if tier_choice=='Standard only' else 'mixed'
+        snapshot=wf.store.get('combo_suggestions',slate_day()+(':standard' if tier_mode=='standard' else '')) or {}
+        st.caption('Standard only uses regular lines. Mixed tiers can include Goblins and Demons. Exact offered directions are required in both views.')
+        st.caption('Suggestions rank projected separation, not entry payouts or expected return. Special tiers can lower payouts; check the actual PrizePicks entry. Browsing makes no odds requests.')
         if st.button('Build from saved board',key='combo_build'):
             try:
                 update_combos(wf.store,generate=True)
@@ -1128,7 +1134,7 @@ def render_combos(wf, st):
             except Exception as error:
                 st.error('ESPN eligibility recheck failed: '+type(error).__name__+'. No paid odds refresh was requested.')
         if not snapshot:
-            st.info('No saved combo suggestions yet. Build from the saved board or wait for the board worker.')
+            st.info('No saved '+tier_choice.lower()+' suggestions yet. Build from the saved board or wait for the board worker. Special tiers are never used to fill Standard-only slips.')
             return
         st.caption(f"Prepared {snapshot['created_at']} UTC · {snapshot['eligible_players']} eligible players")
         if not snapshot['eligible_players']:
