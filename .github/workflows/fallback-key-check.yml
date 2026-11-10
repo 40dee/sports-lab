@@ -1,0 +1,24 @@
+name: Verify fallback key configuration
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/fallback-key-check.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    env:
+      THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+    steps:
+      - name: Check presence only without provider requests
+        run: |
+          python3 - <<'PY'
+          import os
+          present=bool(os.getenv('THE_ODDS_API_KEY','').strip())
+          print('FALLBACK_KEY_CONFIGURED='+str(present))
+          print('Provider requests made: 0')
+          if not present:
+              print('::warning::Add THE_ODDS_API_KEY to repository Actions Secrets for automatic fallback.')
+          PY
