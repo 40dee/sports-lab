@@ -50,3 +50,5 @@ for card in board.get('v4_rows') or []:
     if 'keldon' in str(card.get('Player','')).lower():report['keldon_saved'].append(value)
     if env['fantasy_weights'](card):report['current_fantasy'].append(value)
 print('SAVED_COMBO_DIAGNOSTIC '+env['encode'](report))
+
+print('REGULAR_RAW '+env['encode']((store.get('source','pp_current_regular_fantasy_v1') or {}).get('items',[])))
