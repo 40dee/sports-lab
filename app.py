@@ -8016,18 +8016,11 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
         and pd.notna(utc_timestamp(r.get('Manual observed at')))
         and (pd.isna(utc_timestamp(fetched)) or utc_timestamp(r['Manual observed at'])>=utc_timestamp(fetched))}
     imported=[r for r in imported if market_signature(r) not in manual_newer]
-    # A partial provider download is NOT an authoritative deletion feed.
-    # The previous logic removed every previously imported PrizePicks row,
-    # including Fantasy Score, even when the replacement feed lacked it.
-    # Replace only the exact provider projection IDs actually downloaded;
-    # retain unmatched saved rows with their ORIGINAL timestamps so freshness
-    # and pregame eligibility checks can still reject stale selections.
-    refreshed_ids = {str(item.get('id')) for item in projections if isinstance(item, dict) and item.get('id')}
     kept = [r for r in rows if market_signature(r) in manual_newer or not (
-        r.get('Platform') == 'prizepicks'
+        r.get("Platform") == "prizepicks"
         and (not fantasy_only or bool(fantasy_weights(r)))
-        and str(r.get('Tier Projection ID') or '') in refreshed_ids
-        and str(r.get('Tier Projection ID') or '') != ''
+        and (r.get("Tier Source") == "prizepicksapi.com" or
+             (pp_card_key(r), numeric_line(r.get("Line"))) in matched)
     )]
     if not imported:
         raise ValueError("No unique future player/game/stat matches. Existing board preserved.")
@@ -8551,10 +8544,13 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
                 raise ValueError('PrizePicks feed unavailable')
             return response.json()
         base_filters = {'league': 'NBA', 'status': 'active', 'limit': 200}
-        # Fetch the narrow Fantasy Score market first so it is not stranded
-        # behind a large general NBA feed. Both feeds share the same cap.
-        feeds = [('pp_fantasy_v3', dict(base_filters, stat='Fantasy Score'), 'fantasy_partial', 10),
-                 ('pp_tiers_v1', base_filters, 'feed_partial', 10)]
+        # Prioritize the full NBA PrizePicks feed. The separate Fantasy Score
+        # query consumed two of ten daily calls before the general feed could
+        # finish, leaving standard combo markets missing. Fantasy Score is also
+        # included in the unfiltered NBA feed; only spend leftover calls on the
+        # specialized query once the full feed is complete.
+        feeds = [('pp_tiers_v1', base_filters, 'feed_partial', 10),
+                 ('pp_fantasy_v3', dict(base_filters, stat='Fantasy Score'), 'fantasy_partial', 2)]
         downloaded = {}
         observed_at = None
         for cache_key, filters, flag, allowance in feeds:
@@ -8562,6 +8558,10 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
             same_day = saved_feed.get('slate_day') == day and saved_feed.get('filters') == filters
             needs_download = not same_day or saved_feed.get('partial', True) or refresh
             remaining = ledger['feed_cap'] - ledger.get('feed_requests', 0)
+            if cache_key == 'pp_fantasy_v3' and ledger.get('feed_partial', True):
+                # Never divert scarce requests away from completing the main
+                # PrizePicks feed. Previously saved fantasy pages are retained.
+                remaining = 0
             if needs_download and remaining > 0:
                 try:
                     saved_feed, calls = pp_download_pages(wf.store, cache_key, fetch_page,
@@ -8806,12 +8806,12 @@ def ui_card(card, frozen, saved=False):
     direction_text = ('↑ MORE' if is_more else '↓ LESS' if direction == 'LESS' else (workflow_store.get('calculation_status', identity(card)) or {}).get('Status', 'Queued'))
     if result and not pick_is_selectable(card, result):
         direction_class = 'pending'
-        direction_text = (('↑ MORE' if direction == 'MORE' else '↓ LESS') + ' · VERIFY SIDES') if direction in ('MORE','LESS') else pick_display_label(card, result)
+        direction_text = pick_display_label(card, result)
         probability = None
     fresh, freshness_note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
     if result and not fresh:
         direction_class = 'pending'
-        direction_text = (('↑ MORE' if direction == 'MORE' else '↓ LESS') + ' · VERIFY LINE') if direction in ('MORE','LESS') else 'VERIFY LINE'
+        direction_text = 'VERIFY LINE'
         probability = None
     platform = str(card.get('Platform', '')).upper()
     tier = str(card.get('Line Type', '')).strip() if platform == 'PRIZEPICKS' else ''
