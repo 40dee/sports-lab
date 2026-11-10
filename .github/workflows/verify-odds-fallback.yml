@@ -1,0 +1,35 @@
+name: Verify odds fallback without API credits
+on:
+  push:
+    paths:
+      - .github/workflows/verify-odds-fallback.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    env:
+      THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check secret availability and simulated quota switch
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from datetime import datetime, timezone
+          from unittest.mock import patch
+          import odds_fallback
+          source=Path('app.py').read_text()
+          assert 'automatic_board_run_with_fallback(workflow' in source, 'Scheduled worker not wired to fallback'
+          assert "if exhausted:return run_quota_fallback(wf,budget_seconds)" in source, 'Exhausted route missing'
+          assert odds_fallback.primary_exhausted({'account':'ok'}, {'remaining':0}) is True
+          assert odds_fallback.primary_exhausted({'account':'ok'}, {'remaining':1}) is False
+          assert odds_fallback.primary_exhausted(None, {'remaining':0}) is False
+          print('Scheduled fallback route: PASS')
+          print('Simulated exhausted/non-exhausted quota: PASS')
+          print('Backup secret available to worker:', bool(os.environ.get('THE_ODDS_API_KEY')))
+          assert os.environ.get('THE_ODDS_API_KEY'), 'Backup secret not accessible in GitHub Actions'
+          print('No provider API calls made')
+          PY
