@@ -8321,23 +8321,38 @@ def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, refere
     return state, requests_made
 
 
-def normalize_pp_projection(item):
-    """Normalize compact transport without guessing sides, tiers or provenance."""
+def normalize_pp_projection(item, live_response=False):
+    """Normalize compact transport; only explicit sides and tiers are used."""
     if not isinstance(item,dict):return item
-    if isinstance(item.get('player'),dict) and isinstance(item.get('market'),dict):return item
-    player=item.get('player_name') or (item.get('player') if isinstance(item.get('player'),str) else None)
-    stat=item.get('stat') or item.get('market_stat')
-    if not player or not stat:return item
-    selections=item.get('selections')
-    if not isinstance(selections,list):
-        selections=[]
+    row=dict(item)
+    if not (isinstance(row.get('player'),dict) and isinstance(row.get('market'),dict)):
+        name=row.get('player_name') or (row.get('player') if isinstance(row.get('player'),str) else None)
+        stat=row.get('stat') or row.get('market_stat')
+        if not name or not stat:return row
+        row.update(player={'name':name,'id':row.get('player_id'),'team':row.get('team')},
+            market={'stat':stat,'period':row.get('period')},
+            event={'id':row.get('event_id'),'opponent':row.get('opponent'),
+                'starts_at':row.get('event_starts_at') or row.get('starts_at')})
+    selections=row.get('selections')
+    if not isinstance(selections,list) or not selections:
+        selections=[];offered=row.get('sides');tier=row.get('tier')
         for side in ('more','less'):
-            if type(item.get(side+'_available')) is bool:
-                selections.append({'side':side,'available':item[side+'_available'],'tier':item.get(side+'_tier')})
-    return dict(item,player={'name':player,'id':item.get('player_id'),'team':item.get('team')},
-        market={'stat':stat,'period':item.get('period')},
-        event={'id':item.get('event_id'),'opponent':item.get('opponent'),
-            'starts_at':item.get('event_starts_at') or item.get('starts_at')},selections=selections)
+            raw=(offered.get(side) if isinstance(offered,dict) else None)
+            side_tier=tier.get(side) if isinstance(tier,dict) else tier
+            if isinstance(raw,dict):
+                if raw.get('available') is True:selections.append(dict(raw,side=side,tier=raw.get('tier') or side_tier))
+            elif raw is True or (isinstance(offered,list) and side in [str(v).lower() for v in offered if isinstance(v,str)]):
+                selections.append({'side':side,'available':True,'tier':side_tier})
+            elif type(row.get(side+'_available')) is bool:
+                selections.append({'side':side,'available':row[side+'_available'],'tier':row.get(side+'_tier')})
+        row['selections']=selections
+    if live_response and row.get('is_demo') is not True:
+        # Compact rows omit this redundant flag. The authenticated response's
+        # meta.mode was checked before storing; explicit demo=True never passes.
+        row['is_demo']=False
+    period=str((row.get('market') or {}).get('period','')).lower().replace('_',' ')
+    if period=='full game':row['market']=dict(row['market'],period='Full game')
+    return row
 
 
 def recover_fantasy_source(wf):
@@ -8380,7 +8395,7 @@ def recover_fantasy_source(wf):
         payload=response.json();meta=payload.get('meta') or {}
         if meta.get('mode')!='live' or not isinstance(payload.get('data'),list):
             report['notes'].append('Live response format not confirmed.');break
-        items.extend(normalize_pp_projection(item) for item in payload['data'])
+        items.extend(normalize_pp_projection(item,live_response=True) for item in payload['data'])
         cursor=meta.get('next_cursor')
         wf.store.put('source','pp_fantasy_compact_v1',{'items':items,'fetched_at':fetched,
             'updated_at':now(),'slate_day':slate_day(),'partial':bool(cursor),'next_cursor':cursor,'filters':filters})
@@ -8401,6 +8416,29 @@ def recover_fantasy_source(wf):
         except (ValueError,TypeError,KeyError) as error:
             report['notes'].append('Saved compact source could not yet be matched/calculated: '+type(error).__name__)
     wf.store.put('source','pp_fantasy_recovery_report',report)
+    return report
+
+
+def rebuild_compact_fantasy(wf):
+    source=wf.store.get('source','pp_fantasy_compact_v1') or {}
+    proof=wf.store.get('source','pp_fantasy_recovery_report') or {}
+    report={'checked_at':now(),'provider_requests':0,'imported':0,'records':len(source.get('items') or [])}
+    if proof.get('http_status')!=200 or not source.get('items'):
+        report['state']='No successful authenticated compact response is saved.';return report
+    items=[normalize_pp_projection(item,live_response=True) for item in source['items']]
+    # The original compact response passed meta.mode=live in recovery before it
+    # was saved; this rebuild spends no provider credits and changes no lines.
+    source['items']=items;source['mode']='live';wf.store.put('source','pp_fantasy_compact_v1',source)
+    report['sample']=[{k:item.get(k) for k in ('player','market','event','line','is_demo','sides','tier','selections')} for item in items[:1]]
+    board=wf.store.get('board','board') or {}
+    try:
+        merged,count=pp_merge_tiers(board.get('v4_rows') or [],items,source['fetched_at'],fantasy_only=True)
+        board['v4_rows']=merged;wf.store.put('board','board',board)
+        report.update(imported=count,state='imported')
+        report['preparation']=prepare_saved_board(wf,{'v4_rows':[c for c in merged if fantasy_weights(c)]},budget_seconds=180,max_picks=200)
+        report['combos']=update_combos(wf.store,generate=True)
+    except (ValueError,TypeError,KeyError) as error:report['state']='Match or calculation incomplete: '+type(error).__name__
+    wf.store.put('source','pp_fantasy_rebuild_report',report)
     return report
 
 
@@ -8740,6 +8778,12 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     ledger.update(last_run=now(), errors=errors, preparation=report)
     wf.store.put('automation', day, ledger)
     return ledger
+
+
+if '--rebuild-compact-fantasy' in sys.argv:
+    if not _database_online:raise SystemExit('Permanent storage unavailable; no rebuild made.')
+    print(encode(rebuild_compact_fantasy(workflow)))
+    raise SystemExit(0)
 
 
 if '--recover-fantasy-source' in sys.argv:
