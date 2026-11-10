@@ -8764,7 +8764,7 @@ def board_coverage(wf, board):
     return report
 
 
-def _primary_automatic_board_run(wf, refresh=True, budget_seconds=1200):
+def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     if not wf.store.remote:
         raise RuntimeError('Permanent database required for automatic preparation')
     day = slate_day()
@@ -8959,7 +8959,7 @@ def run_quota_fallback(wf, budget_seconds=1200):
     return ledger
 
 
-def automatic_board_run(wf, refresh=True, budget_seconds=1200):
+def automatic_board_run_with_fallback(wf, refresh=True, budget_seconds=1200):
     # The primary account check is unmetered. A daily guard or temporary
     # provider error never silently spends the second provider's free credits.
     exhausted=False
@@ -8967,7 +8967,7 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     except ValueError:pass
     if exhausted:return run_quota_fallback(wf,budget_seconds)
     try:
-        report=_primary_automatic_board_run(wf,refresh,budget_seconds)
+        report=automatic_board_run(wf,refresh,budget_seconds)
     except ValueError as error:
         if 'Monthly OddsPAPI allowance exhausted' in str(error):return run_quota_fallback(wf,budget_seconds)
         raise
@@ -9039,7 +9039,7 @@ if '--auto-board' in sys.argv:
             # if the ideal 30-minute lead has already passed. Never re-bootstrap
             # a slate that already completed its daily import.
             explicit_refresh=0 < minutes <= 60 and not ledger.get('refreshes')
-        report = automatic_board_run(workflow, refresh=explicit_refresh)
+        report = automatic_board_run_with_fallback(workflow, refresh=explicit_refresh)
         print(encode(report))
         coverage = report.get('coverage') or {}
         if report.get('feed_partial') or report.get('fantasy_partial'):

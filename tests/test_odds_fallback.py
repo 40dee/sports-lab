@@ -60,12 +60,12 @@ class FallbackTests(TestCase):
         get.assert_not_called();self.assertFalse(report['configured']);self.assertEqual(rows,[])
     def test_wrapper_keeps_primary_until_exhausted(self):
         source=Path(__file__).resolve().parents[1].joinpath('app.py').read_text()
-        node=next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name=='automatic_board_run')
+        node=next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name=='automatic_board_run_with_fallback')
         primary=Mock(return_value={'errors':[]});fallback=Mock(return_value={'fallback':True})
         check=Mock(return_value=False)
-        env={'primary_odds_quota_exhausted':check,'_primary_automatic_board_run':primary,'run_quota_fallback':fallback}
+        env={'primary_odds_quota_exhausted':check,'automatic_board_run':primary,'run_quota_fallback':fallback}
         exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
         wf=SimpleNamespace(store=Store())
-        self.assertEqual(env['automatic_board_run'](wf)['active_odds_provider'],'OddsPAPI');fallback.assert_not_called()
+        self.assertEqual(env['automatic_board_run_with_fallback'](wf)['active_odds_provider'],'OddsPAPI');fallback.assert_not_called()
         check.return_value=True
-        self.assertEqual(env['automatic_board_run'](wf),{'fallback':True});self.assertEqual(primary.call_count,1)
+        self.assertEqual(env['automatic_board_run_with_fallback'](wf),{'fallback':True});self.assertEqual(primary.call_count,1)
