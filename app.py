@@ -541,28 +541,57 @@ def kalshi_fee_metadata(fetch, ticker):
 
 
 def confirmed_recap_dnp(summary, player_id):
-    """Accept only a same-game recap explicitly stating this exact ID did not play."""
+    """Resolve explicit same-game absence, with an exact ID-to-name association."""
     import re
+    from html import unescape
     article = summary.get('article') or {}
     event_id = str(summary.get('header', {}).get('id', ''))
     if not event_id or str(article.get('gameId', '')) != event_id or article.get('type') != 'Recap':
         return None
-    listed_out = any(str(injury.get('athlete', {}).get('id', '')) == str(player_id)
-                     and str(injury.get('status', '')).lower() == 'out'
-                     for group in summary.get('injuries', [])
-                     for injury in group.get('injuries', []))
-    if not listed_out:
-        return None
-    # Restrict to an explicit subject immediately followed by 'did not play'.
-    # Out/questionable injury entries or mere absence are not enough.
-    pattern = (r'<a\b[^>]*href=["\'][^"\']*/player/_/id/' + re.escape(str(player_id)) +
-               r'(?:/[^"\']*)?["\'][^>]*>[^<]+</a>\s+did not play(?: for the [A-Za-z ]+)? (?:due to|because of|with)\b')
-    if not re.search(pattern, str(article.get('story', '')), flags=re.I):
+    story = str(article.get('story', ''))
+    names = set()
+    for group in summary.get('injuries', []):
+        for injury in group.get('injuries', []):
+            athlete = injury.get('athlete', {})
+            if str(athlete.get('id', '')) == str(player_id):
+                names.update(str(athlete.get(k) or '') for k in ('displayName', 'fullName'))
+    anchor = (r'<a\b[^>]*href=["\'][^"\']*/player/_/id/' + re.escape(str(player_id)) +
+              r'(?:/[^"\']*)?["\'][^>]*>([^<]+)</a>')
+    names.update(unescape(n) for n in re.findall(anchor, story, flags=re.I))
+    names.discard('')
+    plain = unescape(re.sub(r'<[^>]+>', ' ', story))
+    plain = re.split(r'Up next', plain, flags=re.I)[0]
+    plain = re.sub(r'\s+', ' ', plain)
+    evidence = None
+    for name in sorted(names):
+        who = r'\b' + re.escape(name) + r'\b'
+        # Explicit retrospective absence only. Injury status alone, a missing
+        # boxscore row, a missed shot, or a future absence never establish DNP.
+        patterns = [
+            who + r'\s+did not play\b',
+            who + r'\s+(?:\([^)]*\)\s*)?(?:also\s+)?sat out\b',
+            who + r'\s+(?:\([^)]*\)\s*)?missed (?:the|his \w+(?: straight)?) game\b',
+            r'\b(?:were|was|played|playing)(?:\s+(?:also|Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday)){0,2} without\b[^.!?]{0,180}?' + who,
+            r'\brested\s+' + who,
+            who + r'\s*(?:\([^)]*\))?\s+and\s+[^.!?]{1,100}?\s+each sat\b',
+            who + r'\s*(?:\([^)]*\))?\s+each sat\b',
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, plain, flags=re.I)
+            if match:
+                prefix = plain[max(0, plain.rfind('.', 0, match.start()) + 1):match.start()]
+                if re.search(r'\b(?:will|would|could|might|expected to)\b', prefix, re.I):
+                    continue
+                evidence = match.group(0)
+                break
+        if evidence:
+            break
+    if not evidence:
         return None
     return {'status': 'DNP', 'actual': None,
             'verification': 'Same-game ESPN recap explicitly states this player did not play.',
             'source': 'ESPN game recap', 'source_event_id': event_id,
-            'source_article_id': str(article.get('id', ''))}
+            'source_article_id': str(article.get('id', '')), 'evidence': evidence}
 
 
 def missing_actual_reason(summary, player_id, columns):
@@ -1995,7 +2024,9 @@ class Workflow:
             previous = self.store.get("audit_error", key)
             if previous and not force_retry:
                 next_retry = pd.to_datetime(previous.get("retry_after"), utc=True, errors="coerce")
-                if pd.notna(next_retry) and next_retry > current:
+                upgraded_absence_check = (previous.get('verification_version') != 2 and
+                    str(previous.get('reason', '')).startswith('Final game: exact player ID absent'))
+                if pd.notna(next_retry) and next_retry > current and not upgraded_absence_check:
                     counts["deferred"] += 1
                     continue
             due.append((key, frozen))
@@ -2077,6 +2108,7 @@ class Workflow:
                 if not isinstance(error, (ValueError, KeyError, TypeError)):
                     reason = "Unexpected " + type(error).__name__
                 self.store.put("audit_error", key, {
+                    "verification_version": 2,
                     "resolved": False, "type": type(error).__name__,
                     "reason": reason[:180], "attempts": attempts,
                     "last_attempt": now(),
@@ -3732,8 +3764,8 @@ def render_results_dashboard(wf, st):
     if platform != 'All platforms': visible = visible[visible['Platform'] == platform]
     if outcome != 'All results': visible = visible[visible['Outcome'] == outcome]
     wins, losses, pending = (int(visible['Outcome'].eq(value).sum()) for value in ('WIN', 'LOSS', 'PENDING'))
-    for column, label, value in zip(st.columns(5), ['Picks', 'Wins', 'Losses', 'Hit rate', 'Pending'],
-        [len(visible), wins, losses, f'{wins / (wins + losses):.1%}' if wins + losses else '—', pending]):
+    for column, label, value in zip(st.columns(4), ['Settled picks', 'Wins', 'Losses', 'Hit rate'],
+        [wins + losses, wins, losses, f'{wins / (wins + losses):.1%}' if wins + losses else '—']):
         column.metric(label, value)
     daily = results_daily_summary(visible)
     if wins + losses:
@@ -3770,27 +3802,36 @@ def render_results_dashboard(wf, st):
                 st.caption('Latest six matching picks. Each row keeps its original platform and line. Missing actuals are omitted.')
 
     all_groups = results_attention_groups(visible)
-    waiting = {'Not started', 'Awaiting final', 'Awaiting status check'}
+    waiting = {'Not started', 'Awaiting final'}
     groups = [group for group in all_groups if group['Reason'] not in waiting]
     waiting_count = sum(group['Count'] for group in all_groups if group['Reason'] in waiting)
     if waiting_count:
-        st.caption(f'{waiting_count} pending picks await a game start, final result or saved status check. They remain available under View all results.')
+        st.caption(f'{waiting_count} picks await a game start or final result.')
     if groups:
-        attention_count = sum(group['Count'] for group in groups)
-        st.markdown(f'#### Needs attention · {attention_count} picks across {len(groups)} player/game groups')
-        pages = max(1, math.ceil(len(groups)/5))
-        page = 1
-        if pages > 1:
-            key = 'results_attention_page'
-            if st.session_state.get(key, 1) > pages: st.session_state.pop(key, None)
-            page = int(st.number_input('Attention page', min_value=1, max_value=pages, value=1, step=1, key=key))
-        for group in groups[(page-1)*5:page*5]:
-            label = f"{ui_name(group['Player'])} · {group['Date']} · {group['Count']} picks · {group['Reason']}"
-            with st.expander(label, expanded=False):
-                rows = [{'Prop':compact_result_stat(row.get('Stat')), 'Line':row.get('Line'),
-                         'Pick':row.get('Pick'), 'Platform':row.get('Platform')} for row in group['rows']]
-                st.dataframe(pd.DataFrame(rows), hide_index=True, height=min(250, 38 + 35*len(rows)), use_container_width=True)
-                st.caption('Saved status only. Individual picks remain unresolved until their game and player statistics are verified.')
+        with st.expander(f'Grading review · {len(groups)} player/game groups', expanded=False):
+            attention_count = sum(group['Count'] for group in groups)
+            st.caption(f'{attention_count} unresolved picks. Final-game verification problems are separate from unfinished games; these picks do not count as wins or losses.')
+            if st.button('Recheck unresolved results', key='results_recheck_unresolved',
+                         disabled=bool(st.session_state.get('_audit_active'))):
+                st.session_state['_audit_checked_ids'] = []
+                st.session_state['_audit_force_retry'] = True
+                st.session_state['_audit_active'] = True
+                st.rerun()
+            pages = max(1, math.ceil(len(groups)/5))
+            page = 1
+            if pages > 1:
+                key = 'results_attention_page'
+                if st.session_state.get(key, 1) > pages: st.session_state.pop(key, None)
+                page = int(st.number_input('Review page', min_value=1, max_value=pages, value=1, step=1, key=key))
+            for group in groups[(page-1)*5:page*5]:
+                label = f"{ui_name(group['Player'])} · {group['Date']} · {group['Count']} picks · {group['Reason']}"
+                with st.expander(label, expanded=False):
+                    rows = [{'Prop':compact_result_stat(row.get('Stat')), 'Line':row.get('Line'),
+                             'Pick':row.get('Pick'), 'Platform':row.get('Platform')} for row in group['rows']]
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, height=min(250, 38 + 35*len(rows)), use_container_width=True)
+                    st.caption(group['rows'][0].get('Pending reason', 'Awaiting verification'))
+    if st.session_state.get('_audit_active'):
+        st.caption('Rechecking saved results…')
 
     with st.expander('View all results', expanded=False):
         if len(visible):
@@ -10341,3 +10382,4 @@ def _resume_grading_fragment():
     st.rerun()
 
 _resume_grading_fragment()
+
