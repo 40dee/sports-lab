@@ -4414,6 +4414,8 @@ def line_freshness(card, reference=None, refresh_checks=None):
     if not today_pregame(card.get('Start (UTC)'),current):return True,'Saved pregame record; game started or outside today.'
     field='Tier Fetched At' if card.get('Tier Source')=='prizepicksapi.com' else 'Odds checked (UTC)'
     stamp=utc_timestamp(card.get(field))
+    observed=utc_timestamp(card.get('Tier Observed At'))
+    if card.get('Tier Source')=='prizepicksapi.com' and pd.notna(observed) and pd.notna(stamp):stamp=min(stamp,observed)
     check=(refresh_checks or {}).get(str(card.get('Fixture ID'))) or {}
     attempted=utc_timestamp(check.get('attempted_at'))
     if pd.notna(attempted) and (pd.isna(stamp) or attempted>stamp):
@@ -8047,7 +8049,7 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
                     "Available Sides": sorted(sides),
                     "Tier Source": "prizepicksapi.com",
                     "Tier Observed At": item.get("observed_at"),
-                    "Tier Fetched At": fetched,
+                    "Tier Fetched At": item.get("_sports_lab_fetched_at") or fetched,
                     "Tier Projection ID": str(item["id"]),
                     "Tier Source Start (UTC)": start.isoformat(),
                     "Tier Time Match": ("Exact" if pd.to_datetime(row["Start (UTC)"],utc=True) == start else "Two-team verified; within 15 minutes"),
@@ -8058,10 +8060,11 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
         and pd.notna(utc_timestamp(r.get('Manual observed at')))
         and (pd.isna(utc_timestamp(fetched)) or utc_timestamp(r['Manual observed at'])>=utc_timestamp(fetched))}
     imported=[r for r in imported if market_signature(r) not in manual_newer]
+    replaced_projection_ids={str(r.get('Tier Projection ID')) for r in imported}
     kept = [r for r in rows if market_signature(r) in manual_newer or not (
         r.get("Platform") == "prizepicks"
         and (not fantasy_only or bool(fantasy_weights(r)))
-        and (r.get("Tier Source") == "prizepicksapi.com" or
+        and (r.get("Tier Source") == "prizepicksapi.com" and str(r.get("Tier Projection ID")) in replaced_projection_ids or
              (pp_card_key(r), numeric_line(r.get("Line"))) in matched)
     )]
     if not imported:
@@ -8332,6 +8335,52 @@ def pp_fantasy_check(rows, payload):
             **fantasy_saved_summary(rows, [], {})[0]}, details
 
 
+def prizepicks_projection_page(store, params, purpose='Refresh my saved NBA board'):
+    """Quote and check available credits before reserving a bounded page request."""
+    from urllib.parse import urlencode
+    key=setting('PRIZEPICKS_API_KEY','')
+    if not key:raise ValueError('PRIZEPICKS_API_KEY is missing.')
+    day=slate_day()
+    used=int(store.get('request_budget',day+':prizepicks',0) or 0)
+    if used>=feed_request_cap():
+        raise ValueError('Daily PrizePicks request cap reached; saved pages retained.')
+    backoff=store.get('source','pp_page_backoff') or {}
+    retry_at=utc_timestamp(backoff.get('retry_at'))
+    if pd.notna(retry_at) and pd.Timestamp.now(tz='UTC')<retry_at:
+        raise ValueError('PrizePicks source is cooling down after a failed page; saved pages retained.')
+    health=store.get('source','pp_health') or {}
+    checked=utc_timestamp(health.get('checked_at'))
+    if pd.isna(checked) or not 0<=(pd.Timestamp.now(tz='UTC')-checked).total_seconds()<180:
+        health=check_prizepicks_source(store)
+    try:remaining=int(health['remaining'])
+    except (KeyError,TypeError,ValueError):
+        raise ValueError('Provider credit balance unavailable; no paid page requested.') from None
+    if health.get('http_status')!=200 or health.get('usage_unit')!='credits' or health.get('mode')!='live':
+        raise ValueError('Live provider account or credit unit not verified; no paid page requested.')
+    if remaining<=0:raise ValueError('Provider credits exhausted; saved lines retained.')
+    headers={'Authorization':'Bearer '+key,'X-User-Request':purpose}
+    quote=requests.get('https://prizepicksapi.com/api/v1/credit-costs',headers=headers,
+        params={'path':'/api/v1/projections?'+urlencode(params)},timeout=25)
+    if quote.status_code!=200:raise ValueError('Page credit quote unavailable; no paid page requested.')
+    cost=quote.json().get('quoted_credits')
+    if type(cost) is not int or not 0<=cost<=1:
+        raise ValueError('Page exceeds the one-credit ceiling; no paid page requested.')
+    if remaining<cost:raise ValueError('Insufficient provider credits for quoted page; saved lines retained.')
+    reserve_prizepicks_request(store)
+    try:
+        response=requests.get('https://prizepicksapi.com/api/v1/projections',headers=headers,params=params,timeout=25)
+    except requests.RequestException:
+        store.put('source','pp_page_backoff',{'retry_at':(pd.Timestamp.now(tz='UTC')+pd.Timedelta(minutes=15)).isoformat(),'state':'connection_failed'})
+        raise ValueError('Provider connection failed; saved pages retained.') from None
+    if response.status_code!=200:
+        store.put('source','pp_page_backoff',{'retry_at':(pd.Timestamp.now(tz='UTC')+pd.Timedelta(minutes=15)).isoformat(),'state':'http_'+str(response.status_code)})
+        raise ValueError('Provider HTTP '+str(response.status_code)+'; saved pages retained.')
+    health.update(checked_at=now(),remaining=response.headers.get('X-Credits-Remaining',str(max(0,remaining-cost))),
+        last_page_quoted_credits=cost,last_page_cost=response.headers.get('X-Credits-Cost'))
+    store.put('source','pp_health',health)
+    return response.json()
+
+
 def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, reference=None, continuation_seconds=1800):
     """Persist each successful page; explicit calls only, with a hard request cap."""
     current = pd.Timestamp.now(tz='UTC') if reference is None else pd.to_datetime(reference, utc=True)
@@ -8369,6 +8418,8 @@ def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, refere
         for item in body['data']:
             if not isinstance(item,dict) or not item.get('id'):
                 raise ValueError('Projection record missing ID. Previous saved pages preserved.')
+            item=normalize_pp_projection(item,live_response=True)
+            item['_sports_lab_fetched_at']=current.isoformat()
             items[str(item['id'])] = item
         if cursor:
             seen.add(cursor)
@@ -8530,18 +8581,32 @@ def check_prizepicks_source(store):
     return report
 
 
+def pp_cached_items(payloads):
+    """Combine independent snapshots without promoting older quotes or timestamps."""
+    selected={};ranks={}
+    floor=pd.Timestamp('1970-01-01',tz='UTC')
+    for payload in payloads:
+        for raw in payload.get('items') or []:
+            if not isinstance(raw,dict) or not raw.get('id'):continue
+            item=dict(raw)
+            fetched=item.get('_sports_lab_fetched_at') or payload.get('fetched_at') or payload.get('updated_at')
+            item['_sports_lab_fetched_at']=fetched
+            fetched_stamp=utc_timestamp(fetched);observed=utc_timestamp(item.get('observed_at'))
+            rank=(observed if pd.notna(observed) else fetched_stamp if pd.notna(fetched_stamp) else floor,
+                fetched_stamp if pd.notna(fetched_stamp) else floor)
+            key=str(item['id'])
+            if key not in ranks or rank>ranks[key]:selected[key]=item;ranks[key]=rank
+    return list(selected.values())
+
+
 def pp_cached_combined():
     full = workflow_store.get('source','pp_tiers_v1') or {}
     fantasy = workflow_store.get('source','pp_fantasy_v3') or {}
-    items = {}
     compact=workflow_store.get('source','pp_fantasy_compact_v1') or {}
-    for payload in (full,fantasy,compact):
-        for item in payload.get('items',[]):
-            if isinstance(item,dict) and item.get('id'):
-                items[str(item['id'])] = item
-    if not full and not fantasy:
+    items=pp_cached_items((full,fantasy,compact))
+    if not full and not fantasy and not compact:
         return None
-    return {'items':list(items.values()), 'fetched_at':compact.get('updated_at') or fantasy.get('updated_at') or full.get('fetched_at'),
+    return {'items':items, 'fetched_at':compact.get('updated_at') or fantasy.get('updated_at') or full.get('fetched_at'),
             'partial':bool(full.get('partial') or fantasy.get('partial'))}
 
 
@@ -8764,14 +8829,11 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     key = setting('PRIZEPICKS_API_KEY', '')
     if key and preparation_rows(board.get('v4_rows', [])):
         def fetch_page(params):
-            ledger['feed_requests'] = reserve_prizepicks_request(wf.store)
-            wf.store.put('automation', day, ledger)
-            response = requests.get('https://prizepicksapi.com/api/v1/projections',
-                headers={'Authorization': 'Bearer ' + key}, params=params, timeout=25)
-            if response.status_code != 200:
-                raise ValueError('PrizePicks feed unavailable')
-            return response.json()
-        base_filters = {'league': 'NBA', 'status': 'active', 'limit': 200}
+            body=prizepicks_projection_page(wf.store,params)
+            ledger['feed_requests']=int(wf.store.get('request_budget',day+':prizepicks',0) or 0)
+            wf.store.put('automation',day,ledger)
+            return body
+        base_filters = {'league': 'NBA', 'status': 'active', 'view':'compact', 'limit': 100}
         # Prioritize the full NBA PrizePicks feed. The separate Fantasy Score
         # query consumed two of ten daily calls before the general feed could
         # finish, leaving standard combo markets missing. Fantasy Score is also
@@ -8795,21 +8857,21 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
                     saved_feed, calls = pp_download_pages(wf.store, cache_key, fetch_page,
                         filters, max_pages=min(allowance, remaining), continuation_seconds=86400)
                 except Exception as error:
-                    errors.append(type(error).__name__ + ': ' + ('Fantasy Score' if flag == 'fantasy_partial' else 'tier') + ' feed unavailable; saved pages retained')
+                    reason=str(error) if isinstance(error,ValueError) else ('Fantasy Score' if flag=='fantasy_partial' else 'tier')+' feed unavailable; saved pages retained'
+                    errors.append(type(error).__name__+': '+reason)
                     saved_feed = wf.store.get('source', cache_key) or saved_feed
-            ledger[flag] = not (saved_feed.get('slate_day') == day and not saved_feed.get('partial', True))
+            ledger[flag] = not (saved_feed.get('slate_day') == day and saved_feed.get('filters')==filters and not saved_feed.get('partial', True))
             # Even when the budget is exhausted, reprocess saved pages so a
             # prior interruption cannot leave already-downloaded lines hidden.
             if saved_feed.get('slate_day') == day and saved_feed.get('items'):
                 for item in saved_feed['items']:
                     if isinstance(item, dict) and item.get('id'):
-                        downloaded[str(item['id'])] = item
+                        downloaded[str(item['id'])] = dict(item,_sports_lab_fetched_at=item.get('_sports_lab_fetched_at') or saved_feed.get('fetched_at') or saved_feed.get('updated_at'))
                 observed_at = saved_feed.get('fetched_at') or observed_at
         compact=wf.store.get('source','pp_fantasy_compact_v1') or {}
-        if compact.get('slate_day')==day:
-            for item in compact.get('items') or []:
-                if isinstance(item,dict) and item.get('id'):downloaded[str(item['id'])]=item
-            observed_at=compact.get('updated_at') or compact.get('fetched_at') or observed_at
+        payloads=[{'items':list(downloaded.values())}]
+        if compact.get('slate_day')==day:payloads.append(compact)
+        downloaded={str(item['id']):item for item in pp_cached_items(payloads)}
         if downloaded:
             try:
                 merged, count = pp_merge_tiers(board.get('v4_rows', []), list(downloaded.values()), observed_at)
@@ -9673,20 +9735,12 @@ def render_pp_tier_refresh():
                 key = setting('PRIZEPICKS_API_KEY','')
                 if not key:
                     raise ValueError('PRIZEPICKS_API_KEY is missing.')
-                filters = {'league':'NBA','status':'active','limit':200}
+                filters = {'league':'NBA','status':'active','view':'compact','limit':100}
                 if fantasy_refresh:
                     filters['stat'] = 'Fantasy Score'
                 def fetch_page(params):
-                    reserve_prizepicks_request(workflow_store)
-                    try:
-                        response = requests.get('https://prizepicksapi.com/api/v1/projections',
-                            headers={'Authorization':'Bearer '+key,'X-User-Request':'Refresh my NBA Fantasy Score lines' if fantasy_refresh else 'Refresh my NBA tier-labelled board'},
-                            params=params,timeout=25)
-                    except requests.RequestException:
-                        raise ValueError('Provider connection failed. Successful saved pages retained.') from None
-                    if response.status_code != 200:
-                        raise ValueError(f'Provider HTTP {response.status_code}. Successful saved pages retained.')
-                    return response.json()
+                    return prizepicks_projection_page(workflow_store,params,
+                        'Refresh my NBA Fantasy Score lines' if fantasy_refresh else 'Refresh my NBA tier-labelled board')
                 payload,calls = pp_download_pages(workflow_store,
                     'pp_fantasy_v3' if fantasy_refresh else 'pp_tiers_v1',fetch_page,filters)
             items = payload['items']
