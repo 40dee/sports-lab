@@ -784,6 +784,16 @@ def pick_display_label(card, result):
     return '↑ MORE' if str(result.get('direction')).upper() == 'MORE' else '↓ LESS'
 
 
+def model_direction_label(result):
+    """The model output and platform eligibility are separate facts."""
+    if not result:return 'Not calculated'
+    if result.get('tie'):return 'PASS · equal to line'
+    try:
+        if not math.isfinite(float(result.get('projection'))):return 'Not calculated'
+    except (ValueError,TypeError,OverflowError):return 'Not calculated'
+    return {'MORE':'↑ MORE','LESS':'↓ LESS'}.get(str(result.get('direction','')).upper(),'Not calculated')
+
+
 # Combo snapshots are paper research, never platform orders or inferred payouts.
 COMBO_POLICIES = ('balanced-v1', 'diverse-v1')
 COMBO_RULES_URL = 'https://www.prizepicks.com/help-center/payouts'
@@ -8085,8 +8095,8 @@ def compact_fantasy_card_html(item, status=None):
     result = item['frozen'].get('result') or {}
     text = lambda value: escape(str(value if value is not None else ''))
     direction = result.get('direction')
-    side = pick_display_label(card, result)
-    side_class = ('fc-more' if direction == 'MORE' else 'fc-less') if pick_is_selectable(card, result) else ''
+    side = model_direction_label(result)
+    side_class = 'fc-more' if direction == 'MORE' else 'fc-less' if direction == 'LESS' else ''
     outcome = item.get('outcome', 'PENDING')
     label = {'WIN':'✓ WIN', 'LOSS':'✕ LOSS', 'TIE':'Tie', 'DNP':'DNP', 'PENDING':'Pending'}.get(outcome,outcome)
     outcome_class = 'fc-more' if outcome == 'WIN' else 'fc-less' if outcome == 'LOSS' else ''
@@ -8100,7 +8110,6 @@ def compact_fantasy_card_html(item, status=None):
     if not pick_is_selectable(card, result):
         note += '<div class="fc-note">' + text(pick_side_note(card, result)) + '</div>'
     if item.get('review_note'):
-        side, side_class = 'REVIEW', ''
         note += '<div class="fc-note">' + text(item['review_note']) + ' Saved model direction: ' + text(direction) + '.</div>'
     marker = ui_tier_marker(card)
     tier = card.get('Line Type') or 'Unverified'
@@ -8108,7 +8117,7 @@ def compact_fantasy_card_html(item, status=None):
       <div class="fc-name">{text(ui_name(card.get('Player','')))} {text(marker)}</div>
       <div class="fc-game">{text(card.get('Game',''))}</div>
       <div class="fc-meta">PP · Fantasy · {text(tier)} <span>{text(phase)}</span></div>
-      <div class="fc-line"><b class="{side_class}">{text(side)}</b><span>Line <b>{float(card['Line']):g}</b></span></div>
+      <div class="fc-line"><b class="{side_class}">Model {text(side)}</b><span>Line <b>{float(card['Line']):g}</b></span></div>
       <div class="fc-values"><span>Projection <b>{item['projection']:.2f}</b></span><span>Actual <b>{actual}</b></span><span class="{outcome_class}">{text(label)}</span></div>
       {note}</div>'''
 
@@ -8161,7 +8170,16 @@ def render_fantasy_plays(wf, st):
             st.caption(f'{len(upcoming_all)-len(upcoming)} saved Fantasy estimates are passes, stale, or have unverified offered sides; they are excluded from entry-ready suggestions. Saved projections remain available for review.')
         queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming_all))
         if queued: st.caption(f'{queued} imported Fantasy lines are awaiting verified projections.')
-        if not visible: st.info('No selectable upcoming Fantasy plays today. Select Saved forecasts for earlier games.')
+        if not visible:
+            payload=pp_cached_combined() or {}
+            source_day=str(payload.get('fetched_at') or '')[:10]
+            st.info('No current Fantasy Score lines have been imported for today. '+
+                ('The saved provider feed is dated '+source_day+'. ' if source_day else 'No saved provider feed is available. ')+
+                'Saved forecasts shows older projections; they are not today’s plays.')
+            source_health=wf.store.get('source','pp_health') or {}
+            if source_health.get('checked_at'):
+                st.caption('Last provider health check: '+str(source_health.get('checked_at'))+' · HTTP '+str(source_health.get('http_status')))
+
     else:
         dates = sorted({item['date'] for item in saved}, reverse=True)
         if not dates:
@@ -8301,6 +8319,32 @@ def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, refere
         if not cursor:
             break
     return state, requests_made
+
+
+def check_prizepicks_source(store):
+    report={'checked_at':now(),'endpoint':'coverage','http_status':None}
+    key=setting('PRIZEPICKS_API_KEY','')
+    if not key:
+        report['state']='missing_key'
+    else:
+        try:
+            response=requests.get('https://prizepicksapi.com/api/v1/coverage',
+                headers={'Authorization':'Bearer '+key},timeout=25)
+            report['http_status']=response.status_code
+            report['remaining']=response.headers.get('X-Credits-Remaining')
+            report['usage_unit']=response.headers.get('X-Usage-Unit')
+            if response.status_code==200:
+                payload=response.json();meta=payload.get('meta') or {}
+                report.update(state='received',mode=meta.get('mode'),source_status=meta.get('source_status'))
+                report['nba']=[{field:row.get(field) for field in
+                    ('league','projection_count','first_observed_at','last_observed_at','markets','status')}
+                    for row in payload.get('data',[]) if isinstance(row,dict) and str(row.get('league','')).upper()=='NBA']
+            else:
+                codes={401:'invalid_or_revoked_key',403:'account_restricted',429:'rate_or_allowance_limit',503:'provider_unavailable'}
+                report['state']=codes.get(response.status_code,'http_error')
+        except (requests.RequestException,ValueError,TypeError,KeyError):report['state']='connection_or_response_error'
+    store.put('source','pp_health',report)
+    return report
 
 
 def pp_cached_combined():
@@ -8609,6 +8653,12 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     return ledger
 
 
+if '--check-prizepicks-source' in sys.argv:
+    if not _database_online:raise SystemExit('Permanent storage unavailable; no source check made.')
+    print(encode(check_prizepicks_source(workflow_store)))
+    raise SystemExit(0)
+
+
 if '--check-odds-budget' in sys.argv:
     if not _database_online:raise SystemExit('Permanent database unavailable; no odds check made.')
     try:print(encode(probe_batch_odds(workflow)))
@@ -8804,14 +8854,12 @@ def ui_card(card, frozen, saved=False):
     is_more = direction == 'MORE'
     direction_class = 'more' if is_more else 'less' if direction == 'LESS' else 'pending'
     direction_text = ('↑ MORE' if is_more else '↓ LESS' if direction == 'LESS' else (workflow_store.get('calculation_status', identity(card)) or {}).get('Status', 'Queued'))
-    if result and not pick_is_selectable(card, result):
-        direction_class = 'pending'
-        direction_text = pick_display_label(card, result)
-        probability = None
+    if result:
+        direction_text='Model '+model_direction_label(result)
+        if result.get('tie'):direction_class='pending'
+        if not pick_is_selectable(card,result):probability=None
     fresh, freshness_note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
     if result and not fresh:
-        direction_class = 'pending'
-        direction_text = 'VERIFY LINE'
         probability = None
     platform = str(card.get('Platform', '')).upper()
     tier = str(card.get('Line Type', '')).strip() if platform == 'PRIZEPICKS' else ''
@@ -8827,7 +8875,7 @@ def ui_card(card, frozen, saved=False):
       <div class="sl-prop">{ui_text(stat)} <span class="sl-dot">·</span> Line {line_text}</div>
       <div class="sl-muted">{ui_text(platform)}{(' · ' + ui_text(tier_note)) if tier_note else ''}</div>
       </div></div>
-      <div class="sl-pickline"><div class="sl-side {direction_class}">{ui_text(direction_text)}</div>
+      <div class="sl-pickline"><div class="sl-side {direction_class}" title="Frozen model direction; line eligibility is checked separately">{ui_text(direction_text)}</div>
       <div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
       <div class="sl-proj"><small>Experimental estimate</small><b>{prob_text}</b></div></div>
       </div>''', unsafe_allow_html=True)
@@ -9079,8 +9127,7 @@ def ui_detail(card, forecasts):
         side = ('↑ MORE' if direction == 'MORE' else '↓ LESS' if direction == 'LESS' else 'Not calculated')
         side_class = 'more' if direction == 'MORE' else 'less' if direction == 'LESS' else 'pending'
         if not pick_is_selectable(card, result):
-            side = pick_display_label(card, result)
-            side_class = 'pending'
+            side = model_direction_label(result)
         projection = ui_number(result.get('projection'))
         probability = ui_number(result.get('estimated_hit_probability'))
         if not pick_is_selectable(card, result): probability = None
@@ -9602,7 +9649,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1 · shared-odds-1 · saved-board-review-1 · monthly-budget-1 · manual-lines-1 · compact-reads-1")
+            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1 · shared-odds-1 · saved-board-review-1 · monthly-budget-1 · manual-lines-1 · compact-reads-1 · model-labels-2")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
 

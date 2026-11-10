@@ -42,7 +42,7 @@ class NavigationTests(unittest.TestCase):
         app.run()
         self.assertFalse(app.exception,list(app.exception))
         self.assertTrue(any('Showing saved pregame projections' in item.value for item in app.warning))
-        self.assertTrue(any('Player 0' in item.value and 'VERIFY LINE' in item.value for item in app.markdown))
+        self.assertTrue(any('Player 0' in item.value and '↑ MORE' in item.value and 'VERIFY LINE' not in item.value for item in app.markdown))
         save_buttons=[button for button in app.button if button.label=='☆ Save']
         self.assertEqual(len(save_buttons),3)
         self.assertTrue(all(button.disabled for button in save_buttons))
@@ -78,7 +78,7 @@ class NavigationTests(unittest.TestCase):
         self.assertTrue(any('Showing saved pregame projections for review' in item.value for item in app.warning))
         cards=[item.value for item in app.markdown if 'fc-card' in item.value and 'Player 0' in item.value]
         self.assertTrue(cards)
-        self.assertTrue(any('REVIEW' in card and 'Saved model direction: MORE' in card for card in cards))
+        self.assertTrue(any('↑ MORE' in card and 'Saved model direction: MORE' in card for card in cards))
         self.assertFalse(any('No selectable upcoming Fantasy plays' in item.value for item in app.info))
 
 
