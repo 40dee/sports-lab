@@ -8122,22 +8122,41 @@ def compact_fantasy_card_html(item, status=None):
       {note}</div>'''
 
 
+def fantasy_breakdown_table(rows):
+    from html import escape
+    body=''.join('<tr><td>'+escape(str(row['Stat']))+'</td><td>'+format(row['Estimate'],'.2f')+
+        '</td><td>'+format(row['Weight'],'g')+'</td><td>'+format(row['FP'],'.2f')+'</td></tr>' for row in rows)
+    return '<table class="fc-breakdown"><thead><tr><th>Stat</th><th>Estimate</th><th>Weight</th><th>FP</th></tr></thead><tbody>'+body+'</tbody></table>'
+
+
 def render_fantasy_plays(wf, st):
     st.subheader('Fantasy plays')
     st.caption('PrizePicks NBA · Original saved pregame projections')
     st.markdown('''<style>
-    .fc-card{background:#102234;border:1px solid #39566d;border-radius:11px;padding:11px 12px 9px;margin:5px 0 2px;color:#f1f6fc;}
-    .fc-name{font-size:15px;font-weight:750;line-height:1.25;overflow-wrap:anywhere;}
-    .fc-game{font-size:11px;color:#42c9e9;margin:4px 0;line-height:1.3;}
-    .fc-meta{font-size:10px;color:#aabccd;display:flex;justify-content:space-between;gap:5px;}
-    .fc-line{display:flex;justify-content:space-between;align-items:center;border-top:1px solid #294157;padding-top:8px;margin-top:7px;font-size:13px;}
-    .fc-values{display:flex;justify-content:space-between;gap:7px;margin-top:7px;font-size:10px;color:#b8c8d8;}
-    .fc-values b{font-size:15px;color:#f1f6fc;display:block;margin-top:2px;}
-    .fc-more{color:#67e7ad!important;font-weight:700;}.fc-less{color:#ff939c!important;font-weight:700;}
-    .fc-note{color:#f3c477;font-size:10px;margin-top:6px;line-height:1.3;}
-    [data-baseweb="popover"] [role="listbox"]{background:#102234!important;border:1px solid #45647c;border-radius:10px;color:#f1f6fc!important;}
-    [data-baseweb="popover"] [role="option"]{background:#102234!important;color:#f1f6fc!important;font-size:14px;}
-    [data-baseweb="popover"] [role="option"]:hover,[data-baseweb="popover"] [role="option"][aria-selected="true"]{background:#24465b!important;color:#fff!important;}
+    .fc-card{background:radial-gradient(ellipse at 100% 0%,#8b5cf615,transparent 65%),linear-gradient(145deg,#1b1b28,#11121b);border:1px solid #393449;border-radius:15px;padding:13px 14px 11px;margin:5px 0 2px;color:#f4f1ff;box-shadow:0 8px 22px #00000024;transition:border-color .16s ease,box-shadow .16s ease;}
+    .fc-card:hover{border-color:#8d75c2;box-shadow:0 8px 26px #00000038;}
+    .fc-name{font-size:15px;font-weight:750;line-height:1.25;overflow-wrap:anywhere;color:#f4f1ff;}
+    .fc-game{font-size:11px;color:#b5a0e5;margin:5px 0;line-height:1.3;}
+    .fc-meta{font-size:10px;color:#a6a0b8;display:flex;justify-content:space-between;gap:5px;}
+    .fc-meta span{color:#c9bfdc;}
+    .fc-line{display:flex;justify-content:space-between;align-items:center;border-top:1px solid #ffffff12;padding-top:10px;margin-top:9px;font-size:13px;color:#ece6f8;}
+    .fc-values{display:flex;justify-content:space-between;gap:7px;margin-top:9px;padding:8px 9px;background:#0c0d1480;border:1px solid #ffffff08;border-radius:9px;font-size:10px;color:#aaa4bb;}
+    .fc-values b{font-size:15px;color:#f4f1ff;display:block;margin-top:3px;}
+    .fc-more{color:#64e4b0!important;font-weight:700;}.fc-less{color:#ff8caa!important;font-weight:700;}
+    .fc-note{color:#ddbd8c;font-size:10px;margin-top:7px;line-height:1.4;}
+    .stApp [data-testid="stColumn"]:has(.fc-card) [data-testid="stExpander"] details{background:#15151f!important;border:1px solid #393449!important;border-radius:11px!important;overflow:hidden;}
+    .stApp [data-testid="stColumn"]:has(.fc-card) [data-testid="stExpander"] summary{background:#1c1a2a!important;color:#cbbce7!important;}
+    .stApp [data-testid="stColumn"]:has(.fc-card) [data-testid="stExpander"] summary:hover{background:#252136!important;}
+    .fc-breakdown{width:100%;border-collapse:collapse;background:#13131d;border:1px solid #302c40;border-radius:8px;font-size:12px;color:#dfd9ed;}
+    .fc-breakdown th{padding:8px 7px;background:#211d30;color:#bcaad9;font-size:10px;font-weight:600;text-align:right;border-bottom:1px solid #3a314f;}
+    .fc-breakdown td{padding:8px 7px;text-align:right;border-bottom:1px solid #ffffff0a;font-variant-numeric:tabular-nums;}
+    .fc-breakdown th:first-child,.fc-breakdown td:first-child{text-align:left;}
+    .fc-breakdown tr:last-child td{border-bottom:0;}
+    .fc-breakdown td:last-child{color:#d9cbf3;font-weight:650;}
+    @media(prefers-reduced-motion:reduce){.fc-card{transition:none;}}
+    [data-baseweb="popover"] [role="listbox"]{background:#181621!important;border:1px solid #594773;border-radius:10px;color:#f1f6fc!important;}
+    [data-baseweb="popover"] [role="option"]{background:#181621!important;color:#f1f6fc!important;font-size:14px;}
+    [data-baseweb="popover"] [role="option"]:hover,[data-baseweb="popover"] [role="option"][aria-selected="true"]{background:#342744!important;color:#fff!important;}
     </style>''', unsafe_allow_html=True)
     records = wf.store.items('forecast')
     grades = dict(wf.store.items('grade'))
@@ -8222,7 +8241,7 @@ def render_fantasy_plays(wf, st):
                     if estimate is not None and stat in weights:
                         breakdown.append({'Stat':stat, 'Estimate':estimate, 'Weight':weights[stat], 'FP':estimate * weights[stat]})
                 if breakdown:
-                    st.dataframe(pd.DataFrame(breakdown),hide_index=True,use_container_width=True)
+                    st.markdown(fantasy_breakdown_table(breakdown),unsafe_allow_html=True)
                     st.caption('Saved component estimates before any learning adjustment. PTS + 1.2 REB + 1.5 AST + 3 STL + 3 BLK − TO.')
                 else: st.caption('This older forecast has no saved six-stat breakdown.')
 
@@ -9522,20 +9541,20 @@ def ui_board(page):
 # ---------------- APP HEADER ----------------
 st.markdown("""<style>
 :root { color-scheme:dark; }
-.stApp {background:radial-gradient(ellipse at 50% 0%,#102438 0%,#07121f 44%,#050e19 100%);color:#f3f8ff;}
+.stApp {background:radial-gradient(ellipse at 50% 0%,#211b32 0%,#101019 44%,#090a10 100%);color:#f3f8ff;}
 .stApp h1,.stApp h2,.stApp h3,.stApp h4,.stApp p,.stApp label {color:#f3f8ff;}
 .stApp [data-testid="stCaptionContainer"] p {color:#a9b9cb;}
 .block-container {max-width:1040px;padding-top:1.2rem;padding-bottom:6rem;}
-.sl-card {background:linear-gradient(125deg,#122638,#0b1a2a);border:1px solid #395268;border-radius:19px;padding:17px 17px 12px;margin:18px 0 6px;box-shadow:0 12px 28px #0003;}
+.sl-card {background:linear-gradient(135deg,#1c1b29,#12121c);border:1px solid #393449;border-radius:19px;padding:17px 17px 12px;margin:18px 0 6px;box-shadow:0 12px 28px #0003;}
 .sl-person {display:flex;align-items:center;gap:16px;min-width:0;}
 .sl-person h3 {margin:0;color:white;font-size:1.3rem;line-height:1.25;}
 .sl-photo {width:78px;height:86px;object-fit:cover;border-radius:14px;background:#263d50;flex-shrink:0;}
 .sl-initial {display:flex;align-items:center;justify-content:center;font-size:24px;color:#24ed9c;}
-.sl-team {color:#37d6f7;font-weight:700;font-size:.93rem;margin-top:3px;}
+.sl-team {color:#b5a0e5;font-weight:700;font-size:.93rem;margin-top:3px;}
 .sl-muted {color:#9fb2c5;font-size:.77rem;margin-top:5px;}
 .sl-prop {color:#f1f7fd;font-size:.92rem;margin-top:4px;}
 .sl-dot {color:#23e6a2;}
-.sl-pickline,.sl-hero {display:flex;align-items:center;justify-content:space-between;gap:9px;background:linear-gradient(120deg,#0c2b2b,#0d1d2b);border:1px solid #426075;border-radius:14px;padding:12px;margin-top:14px;}
+.sl-pickline,.sl-hero {display:flex;align-items:center;justify-content:space-between;gap:9px;background:linear-gradient(120deg,#1d192b,#13131e);border:1px solid #403450;border-radius:14px;padding:12px;margin-top:14px;}
 .sl-side {font-size:1.08rem;font-weight:850;white-space:nowrap;text-align:center;border-radius:13px;padding:10px 14px;min-width:115px;}
 .sl-side.more {background:linear-gradient(135deg,#008d46,#00d36b);border:2px solid #36ff99;color:white;box-shadow:0 0 17px #00d46c44;}
 .sl-side.less {background:linear-gradient(135deg,#a71927,#d43a43);border:2px solid #ff6876;color:white;}
