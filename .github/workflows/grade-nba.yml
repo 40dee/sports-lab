@@ -4,6 +4,8 @@ on:
     branches: [main]
     paths:
       - app.py
+      - odds_fallback.py
+      - the_odds_api.py
       - .github/workflows/grade-nba.yml
   workflow_dispatch:
     inputs:
@@ -28,6 +30,7 @@ jobs:
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
       ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+      THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
       PRIZEPICKS_API_KEY: ${{ secrets.PRIZEPICKS_API_KEY }}
       ODDSPAPI_DAILY_REQUEST_CAP: ${{ vars.ODDSPAPI_DAILY_REQUEST_CAP || '34' }}
       ODDSPAPI_MONTHLY_REQUEST_CAP: ${{ vars.ODDSPAPI_MONTHLY_REQUEST_CAP || '' }}
@@ -40,6 +43,8 @@ jobs:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -r requirements.txt
+      - name: Check fallback configuration without provider requests
+        run: python -c "import os; print('THE_ODDS_API_KEY configured for background worker:', bool(os.getenv('THE_ODDS_API_KEY')))"
       - name: Import or resume today's board
         run: |
           if [ "$REFRESH" = "true" ]; then

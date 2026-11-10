@@ -8764,7 +8764,7 @@ def board_coverage(wf, board):
     return report
 
 
-def automatic_board_run(wf, refresh=True, budget_seconds=1200):
+def _primary_automatic_board_run(wf, refresh=True, budget_seconds=1200):
     if not wf.store.remote:
         raise RuntimeError('Permanent database required for automatic preparation')
     day = slate_day()
@@ -8907,6 +8907,74 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     ledger.update(last_run=now(), errors=errors, preparation=report)
     wf.store.put('automation', day, ledger)
     return ledger
+
+
+def primary_odds_quota_exhausted(store):
+    from odds_fallback import primary_exhausted
+    account=odds_account_snapshot(store)
+    budget=odds_monthly_budget(store,account)
+    return primary_exhausted(account,budget)
+
+
+def run_quota_fallback(wf, budget_seconds=1200):
+    from odds_fallback import download
+    day=slate_day();board=wf.store.get('board','board') or {}
+    rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''))
+    previous=board.get('v4_rows') or []
+    for card in rows:
+        teams={wf.e['engine_team_key'](n) for n in card['Game'].split(' vs ')}
+        # Preserve the unique saved fixture identity for existing exact-market
+        # forecasts. Never copy a player identifier from the different provider.
+        fixtures={str(old['Fixture ID']) for old in previous
+            if {wf.e['engine_team_key'](n) for n in str(old.get('Game','')).split(' vs ')}==teams
+            and pd.notna(utc_timestamp(old.get('Start (UTC)')))
+            and abs((utc_timestamp(old['Start (UTC)'])-utc_timestamp(card['Start (UTC)'])).total_seconds())<=900}
+        if len(fixtures)==1:card['Fixture ID']=next(iter(fixtures))
+    if rows:
+        def family(c):
+            return (str(c.get('Fixture ID')),str(c.get('Platform')),normalize_player(c.get('Player','')),
+                ('FANTASY',) if fantasy_weights(c) else tuple(sorted(market_columns(c) or ())),
+                str(c.get('Period')),str(c.get('Line Type','')).lower())
+        families={family(c) for c in rows}
+        # A new regular quote supersedes the old threshold for that market.
+        # Special tiers and immutable frozen forecasts remain untouched.
+        board['v4_rows']=[c for c in previous if family(c) not in families]+rows
+        board.setdefault('v4_summary',[]);board.setdefault('v4_errors',[])
+        board['v4_scan_at']=now();wf.store.put('board','board',board)
+        health_before=wf.store.get('health',day) or {}
+        health=refresh_board_health(wf,{'v4_rows':rows})
+        health['players']={**(health_before.get('players') or {}),**health['players']}
+        wf.store.put('health',day,health)
+        preparation=prepare_saved_board(wf,{'v4_rows':rows},budget_seconds=budget_seconds,max_picks=10000)
+        combos=update_combos(wf.store,generate=True)
+    else:
+        preparation={'ready':0,'total':0,'attempted':0,'pending':0,'state':'paused'}
+        combos={'generated':0}
+    ledger=wf.store.get('automation',day) or {}
+    ledger.update(last_run=now(),active_odds_provider='The Odds API',fallback=status,
+        preparation=preparation,combos=combos,coverage=board_coverage(wf,board),
+        feed_partial=True,fantasy_partial=not bool(status.get('fantasy_lines')),
+        errors=[] if rows else [status.get('note','Fallback paused; saved lines retained.')])
+    wf.store.put('automation',day,ledger)
+    return ledger
+
+
+def automatic_board_run(wf, refresh=True, budget_seconds=1200):
+    # The primary account check is unmetered. A daily guard or temporary
+    # provider error never silently spends the second provider's free credits.
+    exhausted=False
+    try:exhausted=primary_odds_quota_exhausted(wf.store)
+    except ValueError:pass
+    if exhausted:return run_quota_fallback(wf,budget_seconds)
+    try:
+        report=_primary_automatic_board_run(wf,refresh,budget_seconds)
+    except ValueError as error:
+        if 'Monthly OddsPAPI allowance exhausted' in str(error):return run_quota_fallback(wf,budget_seconds)
+        raise
+    if any('Monthly OddsPAPI allowance exhausted' in str(v) for v in report.get('errors',[])):
+        return run_quota_fallback(wf,budget_seconds)
+    report['active_odds_provider']='OddsPAPI'
+    return report
 
 
 if '--rebuild-compact-fantasy' in sys.argv:
@@ -9917,6 +9985,11 @@ def render_app_pages():
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
             from the_odds_api import render_probe as render_the_odds_api_probe
             render_the_odds_api_probe(st, workflow_store, setting("THE_ODDS_API_KEY", ""))
+            st.caption("Provider order: OddsPAPI first; The Odds API only after monthly OddsPAPI exhaustion. The fallback has a separate paced free-credit guard. Scheduled use requires THE_ODDS_API_KEY in GitHub Actions Secrets too.")
+            fallback_status=workflow_store.get("source","the_odds_api_fallback_latest")
+            if fallback_status:
+                st.write("Latest fallback: "+str(fallback_status.get("state"))+" · "+str(fallback_status.get("lines",0))+" lines · "+str(fallback_status.get("games_available",0))+" upcoming games")
+                st.caption(fallback_status.get("note",""))
 
         # ---------------- NBA SCANNER ----------------
 
