@@ -8117,7 +8117,7 @@ def compact_fantasy_card_html(item, status=None):
       <div class="fc-name">{text(ui_name(card.get('Player','')))} {text(marker)}</div>
       <div class="fc-game">{text(card.get('Game',''))}</div>
       <div class="fc-meta">PP · Fantasy · {text(tier)} <span>{text(phase)}</span></div>
-      <div class="fc-line"><b class="{side_class}">Model {text(side)}</b><span>Line <b>{float(card['Line']):g}</b></span></div>
+      <div class="fc-line"><b class="{side_class}">{text(side)}</b><span>Line <b>{float(card['Line']):g}</b></span></div>
       <div class="fc-values"><span>Projection <b>{item['projection']:.2f}</b></span><span>Actual <b>{actual}</b></span><span class="{outcome_class}">{text(label)}</span></div>
       {note}</div>'''
 
@@ -8994,7 +8994,7 @@ def ui_card(card, frozen, saved=False):
     direction_class = 'more' if is_more else 'less' if direction == 'LESS' else 'pending'
     direction_text = ('↑ MORE' if is_more else '↓ LESS' if direction == 'LESS' else (workflow_store.get('calculation_status', identity(card)) or {}).get('Status', 'Queued'))
     if result:
-        direction_text='Model '+model_direction_label(result)
+        direction_text=model_direction_label(result)
         if result.get('tie'):direction_class='pending'
         if not pick_is_selectable(card,result):probability=None
     fresh, freshness_note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
