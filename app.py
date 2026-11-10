@@ -814,8 +814,8 @@ def combo_pool(store, reference=None, tier_mode="mixed"):
     for card in board.get('v4_rows') or []:
         if str(card.get('Platform', '')).lower() != 'prizepicks':
             reject('Not a PrizePicks line'); continue
-        if tier_mode == 'standard' and str(card.get('Line Type','')).lower() not in ('standard','regular'):
-            reject('Special or unverified tier excluded from Standard-only'); continue
+        if tier_mode != 'mixed' and str(card.get('Line Type','')).lower() not in (('standard','regular') if tier_mode=='standard' else (tier_mode,)):
+            reject('Different or unverified tier excluded from '+tier_mode+'-only'); continue
         signature = market_signature(card)
         # Only a qualifying row may claim a market. A stale duplicate must not
         # hide a later fresh, verified row for the same player/stat/line.
@@ -1024,7 +1024,7 @@ def update_combos(store, generate=False, reference=None):
     current=combo_clock(reference)
     generated=0
     if generate:
-        for tier_mode in ('mixed','standard'):
+        for tier_mode in ('mixed','standard','goblin','demon'):
             pool, excluded=combo_pool(store,current,tier_mode=tier_mode)
             suggestions={'created_at':current.isoformat(),'day':slate_day(current),
                          'eligible_players':len(pool),'excluded':excluded,'sizes':{},'tier_mode':tier_mode}
@@ -1042,7 +1042,7 @@ def update_combos(store, generate=False, reference=None):
                 if tier_mode=='mixed' and all(len(v)==3 for v in policies.values()):
                     store.put('combo_cohort',slate_day(current)+':'+str(size),
                         {'day':slate_day(current),'size':size,'created_at':current.isoformat(),'policies':policies},immutable=True)
-            store.put('combo_suggestions',slate_day(current)+(':'+tier_mode if tier_mode=='standard' else ''),suggestions)
+            store.put('combo_suggestions',slate_day(current)+(':'+tier_mode if tier_mode!='mixed' else ''),suggestions)
     grades=dict(store.items('grade'))
     prior=dict(store.items('combo_grade'))
     for key,combo in store.items('combo'):
@@ -1101,9 +1101,9 @@ def render_combos(wf, st):
     mode=st.segmented_control('Combo view',['Suggestions','Results & learning','Played entries'],default='Suggestions',key='combo_mode') or 'Suggestions'
     if mode=='Suggestions':
         size=st.segmented_control('Players',[2,3,4,5,6],default=2,key='combo_size') or 2
-        tier_choice=st.segmented_control('Line types',['Standard only','Mixed tiers'],default='Standard only',key='combo_tier_mode') or 'Standard only'
-        tier_mode='standard' if tier_choice=='Standard only' else 'mixed'
-        snapshot=wf.store.get('combo_suggestions',slate_day()+(':standard' if tier_mode=='standard' else '')) or {}
+        tier_choice=st.segmented_control('Line types',['Standard only','Goblin only','Demon only','Mixed tiers'],default='Standard only',key='combo_tier_mode') or 'Standard only'
+        tier_mode={'Standard only':'standard','Goblin only':'goblin','Demon only':'demon','Mixed tiers':'mixed'}[tier_choice]
+        snapshot=wf.store.get('combo_suggestions',slate_day()+(':'+tier_mode if tier_mode!='mixed' else '')) or {}
         st.caption('Standard only uses regular lines. Mixed tiers can include Goblins and Demons. Exact offered directions are required in both views.')
         st.caption('Suggestions rank projected separation, not entry payouts or expected return. Special tiers can lower payouts; check the actual PrizePicks entry. Browsing makes no odds requests.')
         if st.button('Build from saved board',key='combo_build'):
@@ -1134,7 +1134,7 @@ def render_combos(wf, st):
             except Exception as error:
                 st.error('ESPN eligibility recheck failed: '+type(error).__name__+'. No paid odds refresh was requested.')
         if not snapshot:
-            st.info('No saved '+tier_choice.lower()+' suggestions yet. Build from the saved board or wait for the board worker. Special tiers are never used to fill Standard-only slips.')
+            st.info('No saved '+tier_choice.lower()+' suggestions yet. Build from the saved board or wait for the board worker. Other tiers are never used to fill a tier-specific slip.')
             return
         st.caption(f"Prepared {snapshot['created_at']} UTC · {snapshot['eligible_players']} eligible players")
         if not snapshot['eligible_players']:
@@ -8212,11 +8212,14 @@ def render_fantasy_plays(wf, st):
         st.caption('⚠ Feed incomplete · Saved projections shown; full Fantasy coverage is not confirmed.')
     date = None
     if mode == 'Upcoming':
-        visible = upcoming
+        fantasy_board_view=st.segmented_control('Fantasy board',['All saved lines','Selectable only'],default='All saved lines',key='fantasy_board_scope') or 'All saved lines'
+        eligible_signatures={market_signature(item['card']) for item in upcoming}
+        visible = upcoming if fantasy_board_view=='Selectable only' else [
+            dict(item,card=current_cards.get(market_signature(item['card']),item['card']),
+                **({'review_note':'Saved forecast only: line, availability or offered direction needs verification.'}
+                   if market_signature(item['card']) not in eligible_signatures else {})) for item in upcoming_all]
         if upcoming_all and not upcoming:
-            visible=[dict(item,card=current_cards.get(market_signature(item['card']),item['card']),
-                review_note='Line, availability or offered direction needs verification; research only.') for item in upcoming_all]
-            st.warning('No entry-ready Fantasy picks passed current checks. Showing saved pregame projections for review; these are not current slip recommendations.')
+            st.warning('No selectable Fantasy picks passed current line checks. Showing saved pregame projections for review in All saved lines; these are not current slip recommendations.')
         if len(upcoming_all) > len(upcoming):
             st.caption(f'{len(upcoming_all)-len(upcoming)} saved Fantasy estimates are passes, stale, or have unverified offered sides; they are excluded from entry-ready suggestions. Saved projections remain available for review.')
         queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming_all))
@@ -8248,12 +8251,20 @@ def render_fantasy_plays(wf, st):
                 min_value=pd.Timestamp(dates[-1]).date(), max_value=pd.Timestamp(dates[7]).date(),
                 format='MM/DD/YYYY', key='fantasy_older_day').isoformat()
         visible = [item for item in saved if item['date'] == date]
+    tier_counts={tier:sum(str(item['card'].get('Line Type','')).lower() in values for item in visible)
+        for tier,values in {'Standard':('standard','regular'),'Goblin':('goblin',),'Demon':('demon',)}.items()}
+    st.caption('Saved Fantasy lines in this view · '+ ' · '.join(f'{tier}: {count}' for tier,count in tier_counts.items()))
+    tier_choice=st.segmented_control('Fantasy line type',['All','Standard','Goblin','Demon'],default='All',key='fantasy_tier_filter') or 'All'
+    if tier_choice!='All':
+        tiers=('standard','regular') if tier_choice=='Standard' else (tier_choice.lower(),)
+        visible=[item for item in visible if str(item['card'].get('Line Type','')).lower() in tiers]
+        if not visible:st.info('No '+tier_choice.lower()+' Fantasy lines match this view. Other tiers are not substituted.')
     search = st.text_input('Find Fantasy player', placeholder='Search player…', key='fantasy_find_player',label_visibility='collapsed')
     visible = [item for item in visible if search.strip().lower() in ui_name(item['card'].get('Player','')).lower()]
     st.caption(f'{len(visible)} lines · {sum(item["outcome"] in ("WIN","LOSS","TIE","DNP") for item in visible)} settled · Started games show saved pregame forecasts')
     page_size = 12
     pages = max(1, math.ceil(len(visible)/page_size))
-    filters = (mode, date, search)
+    filters = (mode, date, search, tier_choice, st.session_state.get("fantasy_board_scope"))
     if st.session_state.get('_fantasy_filters') != filters or st.session_state.get('fantasy_cards_page',1) > pages:
         st.session_state.pop('fantasy_cards_page',None)
         st.session_state['_fantasy_filters'] = filters

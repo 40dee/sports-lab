@@ -56,12 +56,13 @@ class NavigationTests(unittest.TestCase):
     def test_stale_upcoming_fantasy_remains_visible_for_review(self):
         import pandas as pd
         import test_combo_regression as fixtures
-        store=fixtures.populated(2)
+        store=fixtures.populated(3)
         current=pd.Timestamp.now(tz='UTC')
         start=current.tz_convert('America/Los_Angeles').normalize()+pd.DateOffset(days=1)-pd.Timedelta(microseconds=1)
         board=store.get('board','board')
-        for card in board['v4_rows']:
+        for number,card in enumerate(board['v4_rows']):
             frozen=store.get('forecast',fixtures.env['identity'](card))
+            card['Line Type']=('Standard','Goblin','Demon')[number]
             card.update({'Start (UTC)':start.tz_convert('UTC').isoformat(),
                          'Period':'result','Stat':'Fantasy Score','Stat Key':'fantasy_score'})
             card.pop('Odds checked (UTC)',None)
@@ -80,6 +81,15 @@ class NavigationTests(unittest.TestCase):
         self.assertTrue(cards)
         self.assertTrue(any('↑ MORE' in card and 'Saved model direction: MORE' in card for card in cards))
         self.assertFalse(any('No selectable upcoming Fantasy plays' in item.value for item in app.info))
+        self.assertTrue(any('Standard: 1' in item.value and 'Goblin: 1' in item.value and 'Demon: 1' in item.value for item in app.caption))
+        app.session_state['fantasy_tier_filter']='Standard'
+        app.run()
+        self.assertFalse(app.exception,list(app.exception))
+        cards=[item.value for item in app.markdown if '<div class="fc-card">' in item.value]
+        self.assertEqual(len(cards),1)
+        self.assertIn('Player 0',cards[0])
+        self.assertNotIn('Player 1',cards[0])
+
 
 
 
