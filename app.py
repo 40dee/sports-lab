@@ -1094,7 +1094,12 @@ def render_combos(wf, st):
             return
         st.caption(f"Prepared {snapshot['created_at']} UTC · {snapshot['eligible_players']} eligible players")
         if not snapshot['eligible_players']:
-            st.warning('No eligible players. See the exclusion breakdown below to identify what is blocking the saved board; rebuilding alone does not refresh lines or injury checks.')
+            worker=wf.store.get('automation',slate_day()) or {}
+            if worker.get('feed_partial') or worker.get('fantasy_partial'):
+                st.warning('The PrizePicks feed is incomplete for this slate. The main board can have prepared projections while Combos has zero verified, entry-ready PrizePicks lines. Saved projections are retained; no unverified combo will be labeled playable.')
+                st.caption(f"PrizePicks feed requests: {worker.get('feed_requests',0)} / {worker.get('feed_cap','?')} daily cap · Board ready: {(worker.get('coverage') or {}).get('ready','?')} · Combos generated: {(worker.get('combos') or {}).get('generated',0)}")
+            else:
+                st.warning('No verified combo candidates passed all pregame checks. See the exclusion breakdown; rebuilding alone does not refresh provider lines or injury checks.')
         with st.expander('Selection checks and exclusion reasons', expanded=not snapshot['eligible_players']):
             st.write('At least five history games; projected separation ≥0.25 recent-game standard deviations; checks within one hour; at least two teams; at most two players per game. These thresholds are not calibrated probabilities. No matching injury entry does not confirm starting.')
             if snapshot.get('excluded'):
