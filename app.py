@@ -8038,7 +8038,7 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
             # keeps these records out of selectable picks and combos.
             groups['Standard']=set()
         for tier, sides in groups.items():
-            for side in sorted(sides) or ['UNKNOWN']:
+            for side in sorted(sides) or ['MORE']:
                 row = dict(candidates[0])
                 # Native data must never inherit a manual-observation claim.
                 row.pop('Line Source',None);row.pop('Manual observed at',None)

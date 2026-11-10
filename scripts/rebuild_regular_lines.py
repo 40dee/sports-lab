@@ -18,6 +18,9 @@ quotes={
 current=env['utc_timestamp'](env['now']())
 if (current-env['utc_timestamp'](observed)).total_seconds()>1800:raise SystemExit('Web observation expired; no import')
 board=store.get('board','board') or {}; existing=board.get('v4_rows') or []; cards=[];skipped=[]
+# Missing offered sides remain blocked; keep serialization direction valid.
+for row in existing:
+    if row.get('Decoded') and row.get('Direction')=='UNKNOWN' and row.get('Available Sides')==[]:row['Direction']='MORE'
 normalize=env['normalize_player']
 for stat,players in quotes.items():
     for player,line in players.items():
