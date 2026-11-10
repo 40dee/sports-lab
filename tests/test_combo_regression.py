@@ -190,3 +190,20 @@ class StandardTierTests(unittest.TestCase):
   saved=store.get('combo_suggestions','2026-11-09:standard')
   self.assertEqual(saved['eligible_players'],0)
   self.assertTrue(all(not keys for keys in saved['sizes'].values()))
+ def test_goblin_and_demon_views_keep_exact_tiers(self):
+  store=populated(8);board=store.get('board','board')
+  for card in list(board['v4_rows']):
+   original=store.get('forecast',env['identity'](card))
+   for tier,line in (('Goblin',10.5),('Demon',30.5)):
+    special=dict(card,Line=line,**{'Line Type':tier,'Available Sides':['MORE']})
+    forecast=copy.deepcopy(original)
+    forecast.update(id=env['identity'](special),card=special)
+    store.put('forecast',forecast['id'],forecast);board['v4_rows'].append(special)
+  store.put('board','board',board)
+  env['update_combos'](store,True,REF)
+  for mode in ('goblin','demon'):
+   saved=store.get('combo_suggestions','2026-11-09:'+mode)
+   self.assertEqual(saved['eligible_players'],8)
+   for keys in saved['sizes'].values():
+    for key in keys:
+     self.assertTrue(all(l['card']['Line Type'].lower()==mode for l in store.get('combo',key)['legs']))
