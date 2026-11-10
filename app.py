@@ -9915,6 +9915,8 @@ def render_app_pages():
             st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1 · shared-odds-1 · saved-board-review-1 · monthly-budget-1 · manual-lines-1 · compact-reads-1 · model-labels-2")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
+            from the_odds_api import render_probe as render_the_odds_api_probe
+            render_the_odds_api_probe(st, workflow_store, setting("THE_ODDS_API_KEY", ""))
 
         # ---------------- NBA SCANNER ----------------
 
