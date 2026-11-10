@@ -8968,7 +8968,12 @@ def primary_odds_quota_exhausted(store):
     from odds_fallback import primary_exhausted
     account=odds_account_snapshot(store)
     budget=odds_monthly_budget(store,account)
-    return primary_exhausted(account,budget)
+    if primary_exhausted(account,budget):
+        return True
+    day=slate_day()
+    cap=min(budget['daily_cap'],int(store.get('request_budget',day+':oddspapi_cap',budget['daily_cap'])))
+    used=int(store.get('request_budget',day+':oddspapi',0))
+    return used >= cap
 
 
 def run_quota_fallback(wf, budget_seconds=1200):
@@ -10040,7 +10045,7 @@ def render_app_pages():
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
             from the_odds_api import render_probe as render_the_odds_api_probe
             render_the_odds_api_probe(st, workflow_store, setting("THE_ODDS_API_KEY", ""))
-            st.caption("Provider order: OddsPAPI first; The Odds API only after monthly OddsPAPI exhaustion. The fallback has a separate paced free-credit guard. Scheduled use requires THE_ODDS_API_KEY in GitHub Actions Secrets too.")
+            st.caption("Provider order: OddsPAPI first; The Odds API when the monthly or daily OddsPAPI guard blocks imports. The fallback has a separate paced free-credit guard. Scheduled use requires THE_ODDS_API_KEY in GitHub Actions Secrets too.")
             fallback_status=workflow_store.get("source","the_odds_api_fallback_latest")
             if fallback_status:
                 st.write("Latest fallback: "+str(fallback_status.get("state"))+" · "+str(fallback_status.get("lines",0))+" lines · "+str(fallback_status.get("games_available",0))+" upcoming games")
