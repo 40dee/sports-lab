@@ -8016,11 +8016,18 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
         and pd.notna(utc_timestamp(r.get('Manual observed at')))
         and (pd.isna(utc_timestamp(fetched)) or utc_timestamp(r['Manual observed at'])>=utc_timestamp(fetched))}
     imported=[r for r in imported if market_signature(r) not in manual_newer]
+    # A partial provider download is NOT an authoritative deletion feed.
+    # The previous logic removed every previously imported PrizePicks row,
+    # including Fantasy Score, even when the replacement feed lacked it.
+    # Replace only the exact provider projection IDs actually downloaded;
+    # retain unmatched saved rows with their ORIGINAL timestamps so freshness
+    # and pregame eligibility checks can still reject stale selections.
+    refreshed_ids = {str(item.get('id')) for item in projections if isinstance(item, dict) and item.get('id')}
     kept = [r for r in rows if market_signature(r) in manual_newer or not (
-        r.get("Platform") == "prizepicks"
+        r.get('Platform') == 'prizepicks'
         and (not fantasy_only or bool(fantasy_weights(r)))
-        and (r.get("Tier Source") == "prizepicksapi.com" or
-             (pp_card_key(r), numeric_line(r.get("Line"))) in matched)
+        and str(r.get('Tier Projection ID') or '') in refreshed_ids
+        and str(r.get('Tier Projection ID') or '') != ''
     )]
     if not imported:
         raise ValueError("No unique future player/game/stat matches. Existing board preserved.")
