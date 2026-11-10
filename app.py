@@ -8061,9 +8061,9 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
                 })
                 imported.append(row)
                 matched.add((key, line))
-    manual_newer={market_signature(r) for r in rows if r.get('Line Source')=='Manual confirmation'
-        and pd.notna(utc_timestamp(r.get('Manual observed at')))
-        and (pd.isna(utc_timestamp(fetched)) or utc_timestamp(r['Manual observed at'])>=utc_timestamp(fetched))}
+    manual_newer={market_signature(r) for r in rows if r.get('Line Source') in ('Manual confirmation','PrizePicks web verification')
+        and pd.notna(utc_timestamp(r.get('Web verified at') or r.get('Manual observed at')))
+        and (pd.isna(utc_timestamp(fetched)) or utc_timestamp(r.get('Web verified at') or r.get('Manual observed at'))>=utc_timestamp(fetched))}
     imported=[r for r in imported if market_signature(r) not in manual_newer]
     replaced_projection_ids={str(r.get('Tier Projection ID')) for r in imported}
     kept = [r for r in rows if market_signature(r) in manual_newer or not (
