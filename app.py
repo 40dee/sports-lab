@@ -8544,8 +8544,13 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
                 raise ValueError('PrizePicks feed unavailable')
             return response.json()
         base_filters = {'league': 'NBA', 'status': 'active', 'limit': 200}
-        feeds = [('pp_fantasy_v3', dict(base_filters, stat='Fantasy Score'), 'fantasy_partial', 2),
-                 ('pp_tiers_v1', base_filters, 'feed_partial', 10)]
+        # Prioritize the full NBA PrizePicks feed. The separate Fantasy Score
+        # query consumed two of ten daily calls before the general feed could
+        # finish, leaving standard combo markets missing. Fantasy Score is also
+        # included in the unfiltered NBA feed; only spend leftover calls on the
+        # specialized query once the full feed is complete.
+        feeds = [('pp_tiers_v1', base_filters, 'feed_partial', 10),
+                 ('pp_fantasy_v3', dict(base_filters, stat='Fantasy Score'), 'fantasy_partial', 2)]
         downloaded = {}
         observed_at = None
         for cache_key, filters, flag, allowance in feeds:
@@ -8553,6 +8558,10 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
             same_day = saved_feed.get('slate_day') == day and saved_feed.get('filters') == filters
             needs_download = not same_day or saved_feed.get('partial', True) or refresh
             remaining = ledger['feed_cap'] - ledger.get('feed_requests', 0)
+            if cache_key == 'pp_fantasy_v3' and ledger.get('feed_partial', True):
+                # Never divert scarce requests away from completing the main
+                # PrizePicks feed. Previously saved fantasy pages are retained.
+                remaining = 0
             if needs_download and remaining > 0:
                 try:
                     saved_feed, calls = pp_download_pages(wf.store, cache_key, fetch_page,
