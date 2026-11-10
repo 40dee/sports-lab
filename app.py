@@ -1064,8 +1064,36 @@ def combo_results_rows(store):
     return rows
 
 
+def combo_legs_html(legs):
+    from html import escape
+    text=lambda value:escape(str(value))
+    rows=[]
+    for leg in legs:
+        card=leg['card'];side=leg['direction']
+        direction_class='more' if side=='MORE' else 'less'
+        rows.append('<div class="combo-leg"><div class="combo-player"><strong>'+text(ui_name(card['Player']))+
+            '</strong><span>'+text(ui_stat(card))+' · '+text(card.get('Line Type') or 'Unverified')+
+            ' · '+text(leg['games'])+' history games</span></div><div class="combo-choice '+direction_class+'">'+
+            ('↑ ' if side=='MORE' else '↓ ')+text(side)+'<strong>'+text(card['Line'])+
+            '</strong></div><div class="combo-projection"><span>Projection</span><strong>'+format(leg['projection'],'.2f')+
+            '</strong></div></div>')
+    return '<div class="combo-legs">'+''.join(rows)+'</div>'
+
+
 def render_combos(wf, st):
     st.subheader('Combos')
+    st.markdown("""<style>
+    [class*="st-key-combo_option_"]{background:radial-gradient(ellipse at 100% 0%,#8b5cf614,transparent 65%),#15151f;border:1px solid #393449!important;border-radius:16px!important;padding:18px!important;box-shadow:0 8px 24px #00000024;}
+    [class*="st-key-combo_option_"] [data-testid="stExpander"] details{background:#15151f!important;border:1px solid #393449!important;border-radius:10px!important;overflow:hidden;}
+    [class*="st-key-combo_option_"] [data-testid="stExpander"] summary{background:#211d30!important;color:#cbbce7!important;}
+    .combo-legs{margin:4px 0 10px;display:grid;gap:8px;}
+    .combo-leg{display:grid;grid-template-columns:minmax(0,1fr) 88px 88px;gap:12px;align-items:center;padding:13px 14px;background:#0e0f18;border:1px solid #2d293d;border-radius:11px;color:#f4f1ff;}
+    .combo-player strong{font-size:14px;display:block;}.combo-player span{display:block;margin-top:4px;font-size:11px;color:#aaa1bb;}
+    .combo-choice{font-size:11px;text-align:center;font-weight:700;}.combo-choice strong{display:block;font-size:18px;margin-top:3px;color:#f4f1ff;}
+    .combo-choice.more{color:#64e4b0;}.combo-choice.less{color:#ff8caa;}
+    .combo-projection{text-align:right;}.combo-projection span{display:block;font-size:10px;color:#aaa1bb;}.combo-projection strong{display:block;margin-top:3px;font-size:18px;color:#c9b4f4;}
+    @media(max-width:600px){.combo-leg{grid-template-columns:minmax(0,1fr) 66px 68px;gap:7px;padding:11px 9px;}.combo-player strong{font-size:12px;}.combo-player span{font-size:10px;}[class*="st-key-combo_option_"]{padding:12px!important;}}
+    </style>""",unsafe_allow_html=True)
     st.caption('PrizePicks · 2–6 different players · Saved paper suggestions, not submitted entries')
     mode=st.segmented_control('Combo view',['Suggestions','Results & learning','Played entries'],default='Suggestions',key='combo_mode') or 'Suggestions'
     if mode=='Suggestions':
@@ -1124,14 +1152,12 @@ def render_combos(wf, st):
             combo=wf.store.get('combo',key)
             if not combo:continue
             valid,note=combo_live_check(wf.store,combo)
-            with st.container(border=True):
+            with st.container(border=True,key='combo_option_'+key):
                 st.markdown(f'**Option {number} · {size} players**')
                 st.caption(('Ready for platform review · ' if valid else 'Needs review · ')+note)
                 games=len({leg['event_id'] for leg in combo['legs']})
                 st.caption(f'{games} games · {size-games} extra same-game legs · Related outcomes may move together. Special tiers may change payouts.')
-                st.dataframe(pd.DataFrame([{'Player':ui_name(l['card']['Player']),'Stat':ui_stat(l['card']),
-                    'Pick':l['direction'],'Line':l['card']['Line'],'Projection':round(l['projection'],2),
-                    'Tier':l['card'].get('Line Type'),'Games':l['games']} for l in combo['legs']]),hide_index=True,use_container_width=True,height=38+35*size)
+                st.markdown(combo_legs_html(combo['legs']),unsafe_allow_html=True)
                 st.caption('Selection: balances the weakest and average projected separation, with penalties for repeated games and stat groups. Original model forecasts are unchanged.')
                 with st.expander('Record this as an entry you played'):
                     st.caption('Only record after submitting in PrizePicks and before the first game. Copy the entry’s actual payout schedule; no standard rates are assumed.')
