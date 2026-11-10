@@ -159,3 +159,34 @@ class ComboTests(unittest.TestCase):
   self.assertIn('update_combos',ast.unparse(next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='maintenance')))
 
 if __name__=='__main__':unittest.main()
+
+class StandardTierTests(unittest.TestCase):
+ def test_standard_filter_runs_before_one_line_per_player(self):
+  store=populated(8);board=store.get('board','board')
+  for card in list(board['v4_rows']):
+   goblin=dict(card,Line=10.5,**{'Line Type':'Goblin','Available Sides':['MORE']})
+   forecast=store.get('forecast',env['identity'](card))
+   forecast.update(id=env['identity'](goblin),card=goblin)
+   forecast['result']['standardized_gap']=2.0
+   store.put('forecast',forecast['id'],forecast)
+   board['v4_rows'].append(goblin)
+  store.put('board','board',board)
+  mixed,_=env['combo_pool'](store,REF)
+  standard,_=env['combo_pool'](store,REF,tier_mode='standard')
+  self.assertTrue(all(x['card']['Line Type']=='Goblin' for x in mixed))
+  self.assertEqual(len(standard),8)
+  self.assertTrue(all(x['card']['Line Type']=='Standard' for x in standard))
+  env['update_combos'](store,True,REF)
+  saved=store.get('combo_suggestions','2026-11-09:standard')
+  self.assertEqual(saved['tier_mode'],'standard')
+  for keys in saved['sizes'].values():
+   for key in keys:
+    self.assertTrue(all(l['card']['Line Type']=='Standard' for l in store.get('combo',key)['legs']))
+ def test_standard_never_fills_with_special_lines(self):
+  store=populated(8);board=store.get('board','board')
+  for card in board['v4_rows']:card['Line Type']='Goblin'
+  store.put('board','board',board)
+  env['update_combos'](store,True,REF)
+  saved=store.get('combo_suggestions','2026-11-09:standard')
+  self.assertEqual(saved['eligible_players'],0)
+  self.assertTrue(all(not keys for keys in saved['sizes'].values()))
