@@ -8805,6 +8805,20 @@ def board_coverage(wf, board):
     return report
 
 
+def scheduled_board_refresh_due(current, starts, ledger):
+    """Start the daily board at 14:30 Pacific, or before an earlier tipoff."""
+    if ledger.get('refreshes') or not starts:
+        return False
+    current = utc_timestamp(current)
+    upcoming = [utc_timestamp(start) for start in starts
+                if pd.notna(utc_timestamp(start)) and utc_timestamp(start) > current]
+    if not upcoming:
+        return False
+    local = current.tz_convert(SLATE_TIMEZONE)
+    minutes = (min(upcoming) - current).total_seconds() / 60
+    return (local.hour, local.minute) >= (14, 30) or 0 < minutes <= 60
+
+
 def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     if not wf.store.remote:
         raise RuntimeError('Permanent database required for automatic preparation')
@@ -9058,8 +9072,8 @@ if '--auto-board' in sys.argv:
         explicit_refresh='--refresh' in sys.argv
         scheduled='--scheduled' in sys.argv
         if scheduled:
-            # GitHub wakes the worker every 30 minutes. Only bootstrap the
-            # day's paid snapshot near the first tipoff, never at fixed UTC hours.
+            # GitHub wakes every 30 minutes; bootstrap at 14:30 Pacific.
+            # Local-time comparison handles daylight saving automatically.
             current=pd.Timestamp.now(tz='UTC')
             today=slate_day(current)
             try:
@@ -9073,13 +9087,10 @@ if '--auto-board' in sys.argv:
             if not starts:
                 print('No upcoming NBA games verified; paid board refresh skipped.')
                 raise SystemExit(0)
-            minutes=(starts[0]-current).total_seconds()/60
             ledger=workflow_store.get('automation',today) or {}
-            # A delayed GitHub tick must not miss the slate. Bootstrap on the
-            # first tick within 60 minutes of the next upcoming tipoff, even
-            # if the ideal 30-minute lead has already passed. Never re-bootstrap
-            # a slate that already completed its daily import.
-            explicit_refresh=0 < minutes <= 60 and not ledger.get('refreshes')
+            # Catch a delayed tick after 14:30 Pacific without importing twice.
+            # Earlier games retain their existing one-hour preparation window.
+            explicit_refresh=scheduled_board_refresh_due(current,starts,ledger)
         report = automatic_board_run_with_fallback(workflow, refresh=explicit_refresh)
         print(encode(report))
         coverage = report.get('coverage') or {}
