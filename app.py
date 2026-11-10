@@ -9599,6 +9599,9 @@ st.markdown("""<style>
 .sl-hero {border:2px solid #22e6a5;padding:18px 14px;margin:16px 0 8px;}
 .sl-hero .sl-proj b {font-size:2rem;}
 .stApp [data-testid="stButton"] button {border-radius:13px;border:1px solid #456073;background:#142536;color:#f0f6fc;}
+.stApp button[data-variant="segmented_control"]{background:#191824!important;border-color:#393449!important;color:#cfc5e2!important;}
+.stApp button[data-variant="segmented_control"][aria-checked="true"]{background:#342746!important;border-color:#9d7bd3!important;color:#f4edff!important;}
+.stApp button[data-variant="segmented_control"]:hover{background:#272033!important;}
 .stApp [data-testid="stButton"] button:hover {border-color:#22e6a5;color:#22e6a5;}
 .stApp [data-testid="stRadio"] [role="radiogroup"] {gap:.35rem;}
 .stApp [data-testid="stRadio"] label {border-radius:12px;}
