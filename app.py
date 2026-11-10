@@ -9015,8 +9015,8 @@ def run_quota_fallback(wf, budget_seconds=1200):
 
 
 def automatic_board_run_with_fallback(wf, refresh=True, budget_seconds=1200):
-    # The primary account check is unmetered. A daily guard or temporary
-    # provider error never silently spends the second provider's free credits.
+    # The primary account check is unmetered. A quota guard may use the
+    # independently budgeted fallback; transient errors do not trigger it.
     exhausted=False
     try:exhausted=primary_odds_quota_exhausted(wf.store)
     except ValueError:pass
@@ -9024,9 +9024,12 @@ def automatic_board_run_with_fallback(wf, refresh=True, budget_seconds=1200):
     try:
         report=automatic_board_run(wf,refresh,budget_seconds)
     except ValueError as error:
-        if 'Monthly OddsPAPI allowance exhausted' in str(error):return run_quota_fallback(wf,budget_seconds)
+        if any(reason in str(error) for reason in (
+            'Monthly OddsPAPI allowance exhausted', 'Daily OddsPAPI request guard reached')):
+            return run_quota_fallback(wf,budget_seconds)
         raise
-    if any('Monthly OddsPAPI allowance exhausted' in str(v) for v in report.get('errors',[])):
+    if any(reason in str(v) for v in report.get('errors',[]) for reason in (
+        'Monthly OddsPAPI allowance exhausted', 'Daily OddsPAPI request guard reached')):
         return run_quota_fallback(wf,budget_seconds)
     report['active_odds_provider']='OddsPAPI'
     return report
