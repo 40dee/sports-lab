@@ -20,15 +20,15 @@ except (TypeError,ValueError):remaining=0
 if health.get('http_status')!=200 or health.get('mode')!='live' or health.get('usage_unit')!='credits' or remaining<1:
     report['reason']='Live account with at least one credit was not confirmed.';finish();raise SystemExit(0)
 key=env['setting']('PRIZEPICKS_API_KEY','')
-headers={'Authorization':'Bearer '+key,'X-User-Request':'Refresh the regular NBA lines requested by the user'}
+headers={'Authorization':'Bearer '+key,'X-User-Request':'Refresh current regular NBA Fantasy Score lines specifically requested by the user'}
 requests=env['requests'];chosen=None
-params={'league':'NBA','status':'active','tier':'standard','view':'compact','limit':100}
+params={'league':'NBA','status':'active','stat':'Fantasy Score','tier':'standard','view':'compact','limit':100}
 quote=requests.get('https://prizepicksapi.com/api/v1/credit-costs',headers=headers,
     params={'path':'/api/v1/projections?'+urlencode(params)},timeout=25)
 if quote.status_code==200 and quote.json().get('quoted_credits')==1:chosen=params
 if chosen is None:
     report['reason']='No regular-only compact page quoted at one credit; no download made.';finish();raise SystemExit(0)
-budget=day+':pp_detailed_regular_repair'
+budget=day+':pp_current_regular_fantasy_repair'
 reserved=store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING RETURNING key',
     ('request_budget',budget,'1',env['now']()),fetch=True)
 if not reserved:
@@ -43,7 +43,7 @@ if meta.get('mode')!='live' or not isinstance(body.get('data'),list):
 fetched=env['now']()
 items=[dict(env['normalize_pp_projection'](item,live_response=True),_sports_lab_fetched_at=fetched) for item in body['data']]
 payload={'items':items,'fetched_at':fetched,'updated_at':fetched,'slate_day':day,'partial':bool(meta.get('next_cursor')),'filters':chosen,'verified_live_response':True}
-store.put('source','pp_detailed_regular_v1',payload)
+store.put('source','pp_current_regular_fantasy_v1',payload)
 report['source_records']=len(items)
 report['explicit_regular_sides']=[{'player':(item.get('player') or {}).get('name'),'line':item.get('line'),
     'sides':[s.get('side') for s in item.get('selections') or [] if s.get('available') is True and s.get('tier')=='standard']} for item in items]
