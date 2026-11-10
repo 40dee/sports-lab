@@ -80,3 +80,17 @@ class CompactRecoveryTests(unittest.TestCase):
     self.assertEqual(second['requests'],0)
     self.assertTrue(all('oddspapi' not in call.args[0] for call in getter.call_args_list))
    finally:env.clear();env.update(old)
+
+
+class CompactProvenanceTests(unittest.TestCase):
+ def test_compact_explicit_sides_and_tier_retain_one_direction(self):
+  row={'id':'actual','player':'Real Player','stat':'Fantasy Score','period':'Full game',
+    'team':'BOS','opponent':'NYK','starts_at':'2026-11-10T03:00Z','line':42.5,
+    'sides':['more'],'tier':'goblin','status':'active','league':'NBA'}
+  normalized=env['normalize_pp_projection'](row,live_response=True)
+  self.assertIs(normalized['is_demo'],False)
+  self.assertEqual(normalized['selections'],[{'side':'more','available':True,'tier':'goblin'}])
+  # A second normalization must not lose the compact evidence.
+  self.assertEqual(env['normalize_pp_projection'](normalized,True),normalized)
+  self.assertNotIn('is_demo',env['normalize_pp_projection'](row))
+  self.assertIs(env['normalize_pp_projection'](dict(row,is_demo=True),True)['is_demo'],True)
