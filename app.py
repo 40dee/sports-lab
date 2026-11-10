@@ -8553,7 +8553,7 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
         base_filters = {'league': 'NBA', 'status': 'active', 'limit': 200}
         # Fetch the narrow Fantasy Score market first so it is not stranded
         # behind a large general NBA feed. Both feeds share the same cap.
-        feeds = [('pp_fantasy_v3', dict(base_filters, stat='Fantasy Score'), 'fantasy_partial', 2),
+        feeds = [('pp_fantasy_v3', dict(base_filters, stat='Fantasy Score'), 'fantasy_partial', 10),
                  ('pp_tiers_v1', base_filters, 'feed_partial', 10)]
         downloaded = {}
         observed_at = None
