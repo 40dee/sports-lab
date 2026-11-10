@@ -8321,6 +8321,89 @@ def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, refere
     return state, requests_made
 
 
+def normalize_pp_projection(item):
+    """Normalize compact transport without guessing sides, tiers or provenance."""
+    if not isinstance(item,dict):return item
+    if isinstance(item.get('player'),dict) and isinstance(item.get('market'),dict):return item
+    player=item.get('player_name') or (item.get('player') if isinstance(item.get('player'),str) else None)
+    stat=item.get('stat') or item.get('market_stat')
+    if not player or not stat:return item
+    selections=item.get('selections')
+    if not isinstance(selections,list):
+        selections=[]
+        for side in ('more','less'):
+            if type(item.get(side+'_available')) is bool:
+                selections.append({'side':side,'available':item[side+'_available'],'tier':item.get(side+'_tier')})
+    return dict(item,player={'name':player,'id':item.get('player_id'),'team':item.get('team')},
+        market={'stat':stat,'period':item.get('period')},
+        event={'id':item.get('event_id'),'opponent':item.get('opponent'),
+            'starts_at':item.get('event_starts_at') or item.get('starts_at')},selections=selections)
+
+
+def recover_fantasy_source(wf):
+    """One bounded repair, max two quoted credits/day; no paid odds calls."""
+    from urllib.parse import urlencode
+    health=check_prizepicks_source(wf.store)
+    key=setting('PRIZEPICKS_API_KEY','')
+    report={'checked_at':now(),'requests':0,'imported':0,'state':'blocked','notes':[]}
+    if health.get('http_status')!=200 or health.get('mode')!='live':
+        report['notes'].append('Provider health or live authentication unavailable.');return report
+    try:remaining=int(health.get('remaining'))
+    except (ValueError,TypeError):
+        report['notes'].append('Credit balance unavailable; recovery did not spend credits.');return report
+    if health.get('usage_unit')!='credits':
+        report['notes'].append('Unexpected billing unit; recovery did not spend credits.');return report
+    filters={'league':'NBA','status':'active','stat':'Fantasy Score','view':'compact','limit':100}
+    quoted=requests.get('https://prizepicksapi.com/api/v1/credit-costs',
+        headers={'Authorization':'Bearer '+key},params={'path':'/api/v1/projections?'+urlencode(filters)},timeout=25)
+    if quoted.status_code!=200 or quoted.json().get('quoted_credits')!=1:
+        report['notes'].append('Expected one-credit quote not confirmed; no projections downloaded.');return report
+    cursor=None;seen=set();items=[];fetched=now();last_headers={}
+    # This repair budget is separate from the old attempt counter, which had
+    # counted unaffordable failed full-page calls. Never reset either counter.
+    budget_key=slate_day()+':pp_compact_recovery'
+    wf.store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING',
+        ('request_budget',budget_key,'0',now()))
+    for _ in range(min(2,remaining)):
+        reserved=wf.store.query('UPDATE sports_records SET payload=CAST(CAST(payload AS INTEGER)+1 AS TEXT),updated=? '
+            'WHERE namespace=? AND key=? AND CAST(payload AS INTEGER)<2 RETURNING payload',
+            (now(),'request_budget',budget_key),fetch=True)
+        if not reserved:break
+        params=dict(filters)
+        if cursor:params['cursor']=cursor
+        response=requests.get('https://prizepicksapi.com/api/v1/projections',
+            headers={'Authorization':'Bearer '+key},params=params,timeout=25)
+        report['requests']+=1;last_headers={'remaining':response.headers.get('X-Credits-Remaining'),
+            'cost':response.headers.get('X-Credits-Cost'),'http_status':response.status_code}
+        if response.status_code!=200:
+            report['notes'].append('Compact Fantasy source HTTP '+str(response.status_code));break
+        payload=response.json();meta=payload.get('meta') or {}
+        if meta.get('mode')!='live' or not isinstance(payload.get('data'),list):
+            report['notes'].append('Live response format not confirmed.');break
+        items.extend(normalize_pp_projection(item) for item in payload['data'])
+        cursor=meta.get('next_cursor')
+        wf.store.put('source','pp_fantasy_compact_v1',{'items':items,'fetched_at':fetched,
+            'updated_at':now(),'slate_day':slate_day(),'partial':bool(cursor),'next_cursor':cursor,'filters':filters})
+        if not cursor or cursor in seen:break
+        seen.add(cursor)
+    report.update(last_headers,records=len(items),partial=bool(cursor),
+        fields=sorted(items[0]) if items and isinstance(items[0],dict) else [])
+    board=wf.store.get('board','board') or {}
+    if items:
+        try:
+            merged,count=pp_merge_tiers(board.get('v4_rows',[]),items,fetched,fantasy_only=True)
+            board['v4_rows']=merged;wf.store.put('board','board',board)
+            report.update(imported=count,state='imported')
+            # Source data is saved before calculation, so an interruption loses
+            # no quotes. Only true upcoming rows can produce frozen forecasts.
+            report['preparation']=prepare_saved_board(wf,{'v4_rows':[c for c in merged if fantasy_weights(c)]},budget_seconds=180,max_picks=200)
+            report['combos']=update_combos(wf.store,generate=True)
+        except (ValueError,TypeError,KeyError) as error:
+            report['notes'].append('Saved compact source could not yet be matched/calculated: '+type(error).__name__)
+    wf.store.put('source','pp_fantasy_recovery_report',report)
+    return report
+
+
 def check_prizepicks_source(store):
     report={'checked_at':now(),'endpoint':'coverage','http_status':None}
     key=setting('PRIZEPICKS_API_KEY','')
@@ -8351,13 +8434,14 @@ def pp_cached_combined():
     full = workflow_store.get('source','pp_tiers_v1') or {}
     fantasy = workflow_store.get('source','pp_fantasy_v3') or {}
     items = {}
-    for payload in (full,fantasy):
+    compact=workflow_store.get('source','pp_fantasy_compact_v1') or {}
+    for payload in (full,fantasy,compact):
         for item in payload.get('items',[]):
             if isinstance(item,dict) and item.get('id'):
                 items[str(item['id'])] = item
     if not full and not fantasy:
         return None
-    return {'items':list(items.values()), 'fetched_at':fantasy.get('updated_at') or full.get('fetched_at'),
+    return {'items':list(items.values()), 'fetched_at':compact.get('updated_at') or fantasy.get('updated_at') or full.get('fetched_at'),
             'partial':bool(full.get('partial') or fantasy.get('partial'))}
 
 
@@ -8621,6 +8705,11 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
                     if isinstance(item, dict) and item.get('id'):
                         downloaded[str(item['id'])] = item
                 observed_at = saved_feed.get('fetched_at') or observed_at
+        compact=wf.store.get('source','pp_fantasy_compact_v1') or {}
+        if compact.get('slate_day')==day:
+            for item in compact.get('items') or []:
+                if isinstance(item,dict) and item.get('id'):downloaded[str(item['id'])]=item
+            observed_at=compact.get('updated_at') or compact.get('fetched_at') or observed_at
         if downloaded:
             try:
                 merged, count = pp_merge_tiers(board.get('v4_rows', []), list(downloaded.values()), observed_at)
@@ -8651,6 +8740,12 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     ledger.update(last_run=now(), errors=errors, preparation=report)
     wf.store.put('automation', day, ledger)
     return ledger
+
+
+if '--recover-fantasy-source' in sys.argv:
+    if not _database_online:raise SystemExit('Permanent storage unavailable; no recovery made.')
+    print(encode(recover_fantasy_source(workflow)))
+    raise SystemExit(0)
 
 
 if '--check-prizepicks-source' in sys.argv:
