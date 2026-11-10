@@ -8806,12 +8806,12 @@ def ui_card(card, frozen, saved=False):
     direction_text = ('↑ MORE' if is_more else '↓ LESS' if direction == 'LESS' else (workflow_store.get('calculation_status', identity(card)) or {}).get('Status', 'Queued'))
     if result and not pick_is_selectable(card, result):
         direction_class = 'pending'
-        direction_text = pick_display_label(card, result)
+        direction_text = (('↑ MORE' if direction == 'MORE' else '↓ LESS') + ' · VERIFY SIDES') if direction in ('MORE','LESS') else pick_display_label(card, result)
         probability = None
     fresh, freshness_note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
     if result and not fresh:
         direction_class = 'pending'
-        direction_text = 'VERIFY LINE'
+        direction_text = (('↑ MORE' if direction == 'MORE' else '↓ LESS') + ' · VERIFY LINE') if direction in ('MORE','LESS') else 'VERIFY LINE'
         probability = None
     platform = str(card.get('Platform', '')).upper()
     tier = str(card.get('Line Type', '')).strip() if platform == 'PRIZEPICKS' else ''
