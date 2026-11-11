@@ -1,0 +1,106 @@
+name: Check PrizePicks Fantasy coverage (maximum 4 credits)
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/check-fantasy-coverage.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fantasy-coverage-diagnostic
+  cancel-in-progress: false
+jobs:
+  coverage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    env:
+      THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+    steps:
+      - name: Check two other NBA games without changing the board
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          from datetime import datetime, timedelta, timezone
+          
+          BASE = "https://api.the-odds-api.com/v4/sports/basketball_nba"
+          MARKETS = ("player_fantasy_points", "player_fantasy_points_alternate")
+          def run(get=None):
+              key = os.environ.get("THE_ODDS_API_KEY", "").strip()
+              report = {"board_changed": False, "max_credits": 4, "games": [], "requests": 0}
+              if not key:
+                  report["state"] = "missing_github_secret"
+                  return report
+              def request(path, params):
+                  from urllib.parse import urlencode
+                  url = BASE + path + "?" + urlencode(dict(params, apiKey=key))
+                  report["requests"] += 1
+                  try:
+                      response = (get or urllib.request.urlopen)(url, timeout=20)
+                      with response:
+                          remaining = int(response.headers["x-requests-remaining"])
+                          last = int(response.headers["x-requests-last"])
+                          report["credits_remaining"] = remaining
+                          report["test_credits_used"] = report.get("test_credits_used", 0) + last
+                          return json.load(response)
+                  except Exception:
+                      raise ValueError("Provider request failed or quota headers were unavailable; no retry made.") from None
+              try:
+                  events = request("/events", {"dateFormat": "iso"})
+                  if not isinstance(events, list):
+                      raise ValueError("Unexpected schedule format.")
+                  now = datetime.now(timezone.utc)
+                  upcoming = []
+                  for event in events:
+                      if not isinstance(event, dict):
+                          continue
+                      try:
+                          start = datetime.fromisoformat(event.get("commence_time", "").replace("Z", "+00:00"))
+                          valid = now + timedelta(minutes=5) < start < now + timedelta(hours=48)
+                      except (ValueError, TypeError):
+                          continue
+                      # The prior single-game sample already checked this matchup.
+                      if {event.get("home_team"), event.get("away_team")} == {"Boston Celtics", "Toronto Raptors"}:
+                          continue
+                      if valid and str(event.get("id", "")).isalnum() and event.get("home_team") and event.get("away_team"):
+                          upcoming.append(event)
+                  upcoming.sort(key=lambda e: (e["commence_time"], e["id"]))
+                  seen = set()
+                  for event in upcoming:
+                      if event["id"] in seen:
+                          continue
+                      if len(report["games"]) >= 2 or report.get("test_credits_used", 0) + 2 > 4:
+                          break
+                      if report["credits_remaining"] < 2:
+                          break
+                      seen.add(event["id"])
+                      data = request("/events/" + event["id"] + "/odds", {
+                          "bookmakers": "prizepicks", "regions": "us_dfs",
+                          "markets": ",".join(MARKETS), "oddsFormat": "american", "dateFormat": "iso"})
+                      if not isinstance(data, dict) or data.get("id") != event["id"]:
+                          raise ValueError("Returned game did not match request.")
+                      rows = []
+                      for book in data.get("bookmakers", []):
+                          if book.get("key") != "prizepicks":
+                              continue
+                          for market in book.get("markets", []):
+                              if market.get("key") not in MARKETS:
+                                  continue
+                              for outcome in market.get("outcomes", []):
+                                  side = {"Over": "MORE", "Under": "LESS"}.get(outcome.get("name"))
+                                  if side:
+                                      rows.append({"player": outcome.get("description"), "market": market["key"],
+                                                   "line": outcome.get("point"), "direction": side,
+                                                   "updated_utc": market.get("last_update")})
+                      report["games"].append({
+                          "game": event["away_team"] + " at " + event["home_team"],
+                          "start_utc": event["commence_time"],
+                          "unique_lines": {m: len({(r["player"], r["line"]) for r in rows if r["market"] == m}) for m in MARKETS},
+                          "rows": rows})
+                  report["state"] = "completed" if report["games"] else "no_eligible_games_or_quota"
+              except ValueError as exc:
+                  report.update(state="stopped", error=str(exc))
+              return report
+          
+          if __name__ == "__main__":
+              print(json.dumps(run(), indent=2))
+          PY
