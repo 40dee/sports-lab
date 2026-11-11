@@ -833,11 +833,17 @@ def combo_clock(reference=None):
     return pd.Timestamp.now(tz='UTC') if reference is None else pd.to_datetime(reference, utc=True)
 
 
+def saved_forecast_records(store):
+    """Paged compact reads keep bulky evidence out of board preparation."""
+    reader=getattr(store,'forecast_items',None)
+    return reader() if callable(reader) else store.items('forecast')
+
+
 def combo_pool(store, reference=None, tier_mode="mixed"):
     current = combo_clock(reference)
     board = store.get('board', 'board') or {}
     health = (store.get('health', slate_day(current)) or {}).get('players') or {}
-    index = forecast_index(store.items('forecast'))
+    index = forecast_index(saved_forecast_records(store))
     line_checks=dict(store.items('odds_refresh'))
     pool, excluded, seen = [], {}, set()
     def reject(reason): excluded[reason] = excluded.get(reason, 0) + 1
@@ -1951,9 +1957,13 @@ class Workflow:
 
         key = identity(card)
         signature = market_signature(card, str(event["id"]))
-        existing = next((frozen for _, frozen in
-            unique_forecasts(self._preparation_existing if getattr(self, "_preparation_existing", None) is not None else self.store.items("forecast"))
-            if market_signature(frozen["card"], frozen.get("event_id")) == signature), None)
+        prepared_index=getattr(self,'_preparation_event_index',None)
+        if prepared_index is not None:
+            existing=prepared_index.get(signature)
+        else:
+            existing = next((frozen for _, frozen in
+                unique_forecasts(self.store.items("forecast"))
+                if market_signature(frozen["card"], frozen.get("event_id")) == signature), None)
         if existing is not None:
             return existing
 
@@ -1978,6 +1988,8 @@ class Workflow:
         )
 
         frozen = self.store.get("forecast", key)
+        if prepared_index is not None:
+            prepared_index.setdefault(signature,frozen)
         self.record_paper_forecast(frozen)
 
         return frozen
@@ -3468,10 +3480,14 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
     import copy
     board = board if isinstance(board, dict) else {}
     rows = preparation_rows(board.get('v4_rows') or [])
-    snapshot = wf.store.items('forecast')
+    snapshot = saved_forecast_records(wf.store)
     index = forecast_index(snapshot)
     previous_snapshot = getattr(wf, '_preparation_existing', None)
     wf._preparation_existing = list(snapshot)
+    previous_event_index=getattr(wf,'_preparation_event_index',None)
+    wf._preparation_event_index={}
+    for _,frozen in unique_forecasts(snapshot):
+        wf._preparation_event_index.setdefault(market_signature(frozen['card'],frozen.get('event_id')),frozen)
     states = dict(wf.store.items('calculation_status'))
     # Warm small namespaces once, including absent keys, instead of a remote
     # lookup for every new forecast or every prop with the initial model.
@@ -3479,9 +3495,12 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
     wf.store.items('model')
     began = clock()
     last_progress=began
+    ready_count=sum(bool(saved_prediction(index,c)) for c in rows)
+    initial_ready=ready_count
+    unavailable_keys={identity(c) for c in rows if not saved_prediction(index,c) and (states.get(identity(c)) or {}).get('Status')=='Unavailable'}
     report = {'run_at': now(), 'state': 'running', 'total': len(rows),
-              'ready': sum(bool(saved_prediction(index, c)) for c in rows),
-              'slate_day':slate_day(),'unavailable':0,
+              'ready': ready_count,
+              'slate_day':slate_day(),'unavailable':len(unavailable_keys),
               'attempted': 0, 'source_scan_at': board.get('v4_scan_at')}
     wf.store.put('preparation', 'last', report)
     # Work on an isolated environment mapping; do not patch process-wide globals.
@@ -3515,8 +3534,11 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
                 shared_cache, (_name, encode(args)), lambda: _fn(*args))
     history = engine['fetch_player_history']
     wf.e['fetch_player_history'] = lambda *args: reuse(history_cache, args, lambda: history(*args))
+    repeated_failures={}
+    player_wide_failures={'Player is listed out or suspended; no playable projection.',
+        'At least 3 current-season appearances are needed.'}
     try:
-        for card in sorted(rows, key=lambda c: str(c.get('Start (UTC)'))):
+        for card in sorted(rows, key=lambda c: (str(c.get('Start (UTC)')),str(c.get('Player')))):
             key = identity(card)
             if saved_prediction(index, card):
                 continue
@@ -3532,13 +3554,25 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
             if report['attempted']==0 or clock()-last_progress>=3:
                 wf.store.put('preparation','last',report)
                 last_progress=clock()
+            player_key=(str(card.get('Game')),str(card.get('Start (UTC)')),str(card.get('Player')))
             try:
+                prior_failure=repeated_failures.get(player_key)
+                if prior_failure and (prior_failure[0]=='At least 3 current-season appearances are needed.' or clock()-prior_failure[1]<60):
+                    raise ValueError(prior_failure[0])
+                if prior_failure:
+                    repeated_failures.pop(player_key,None)
+                    prior_failure=None
                 frozen = wf.calculate(card, engine['current_season']())
                 index[key] = index[market_signature(card)] = frozen
                 wf._preparation_existing.append((frozen['id'], frozen))
                 state = {'Status': 'Ready', 'updated_at': now()}
+                ready_count+=1
+                unavailable_keys.discard(key)
             except Exception as error:
                 details = calculation_failure_details(error)
+                if isinstance(error,ValueError) and str(error) in player_wide_failures and not prior_failure:
+                    repeated_failures[player_key]=(str(error),clock())
+                unavailable_keys.add(key)
                 print('SPORTS_LAB_PREP_ERROR', str(card.get('Player')), details['reason'], details['location'], flush=True)
                 state = {'Status': 'Unavailable', **details,
                          'Player': card.get('Player'), 'Stat': card.get('Stat'),
@@ -3548,8 +3582,8 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
             wf.store.put('calculation_status', key, state)
             report['attempted'] += 1
             if report['attempted']==1 or report['attempted'] % 5 == 0 or clock()-last_progress>=3:
-                report['ready'] = sum(bool(saved_prediction(index, c)) for c in rows)
-                report['unavailable']=sum(not saved_prediction(index,c) and (states.get(identity(c)) or {}).get('Status')=='Unavailable' for c in rows)
+                report['ready'] = ready_count
+                report['unavailable']=len(unavailable_keys)
                 report['pending']=len(rows)-report['ready']-report['unavailable']
                 report['updated_at']=now()
                 wf.store.put('preparation', 'last', report)
@@ -3559,12 +3593,15 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
         if original_availability is not None:
             wf.availability = original_availability
         wf._preparation_existing = previous_snapshot
+        wf._preparation_event_index=previous_event_index
     report['ready'] = sum(bool(saved_prediction(index, c)) for c in rows)
     report['unavailable'] = sum(not saved_prediction(index, c) and
         (states.get(identity(c)) or {}).get('Status') == 'Unavailable' for c in rows)
     report['pending'] = len(rows) - report['ready'] - report['unavailable']
     report['state'] = 'complete' if report['ready'] == len(rows) else 'retry pending' if not report['pending'] else 'queued'
     report['finished_at'] = now()
+    report['elapsed_seconds']=round(max(0,clock()-began),2)
+    report['newly_ready']=max(0,report['ready']-initial_ready)
     report.pop('current', None)
     wf.store.put('preparation', 'last', report)
     return report
@@ -8982,7 +9019,7 @@ def refresh_board_health(wf, board):
 def board_coverage(wf, board, reference=None):
     """Count missed deadlines separately so a shrinking slate cannot look complete."""
     current=combo_clock(reference)
-    index = forecast_index(wf.store.items('forecast'))
+    index = forecast_index(saved_forecast_records(wf.store))
     statuses = dict(wf.store.items('calculation_status'))
     cards = {}
     for card in board.get('v4_rows') or []:
