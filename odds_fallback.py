@@ -23,7 +23,7 @@ def primary_exhausted(account, budget):
     return bool(account and budget and int(budget.get('remaining', -1)) == 0)
 
 
-def reserve(store, key, current, remaining_hint):
+def reserve(store, key, current, remaining_hint, cost=COST):
     fingerprint=hashlib.sha256(key.encode()).hexdigest()[:20]
     month=current.strftime('%Y-%m')+':the_odds_api:'+fingerprint
     day=current.astimezone(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d')+':the_odds_api:'+fingerprint
@@ -38,18 +38,18 @@ def reserve(store, key, current, remaining_hint):
     today=int(store.get('request_budget',day,0) or 0)
     days=calendar.monthrange(current.year,current.month)[1]-current.day+1
     daily_cap=min(24,max(0,(500-monthly+today)//max(1,days)))
-    if monthly+COST>500 or today+COST>daily_cap:
+    if monthly+cost>500 or today+cost>daily_cap:
         raise ValueError('Free fallback credit allowance reached; saved plays retained.')
     rows=store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET '
         'payload=CAST(CAST(sports_records.payload AS INTEGER)+? AS TEXT),updated=excluded.updated '
         'WHERE CAST(sports_records.payload AS INTEGER)+?<=? RETURNING payload',
-        ('request_budget',day,str(COST),current.isoformat(),COST,COST,daily_cap),fetch=True)
+        ('request_budget',day,str(cost),current.isoformat(),cost,cost,daily_cap),fetch=True)
     if not rows:raise ValueError('Free fallback daily credit allowance reached; saved plays retained.')
     rows=store.query('UPDATE sports_records SET payload=CAST(CAST(payload AS INTEGER)+? AS TEXT),updated=? '
         'WHERE namespace=? AND key=? AND CAST(payload AS INTEGER)+?<=500 RETURNING payload',
-        (COST,current.isoformat(),'request_budget',month,COST),fetch=True)
+        (cost,current.isoformat(),'request_budget',month,cost),fetch=True)
     if not rows:raise ValueError('Free fallback monthly credit allowance reached; saved plays retained.')
-    return {'daily_cap':daily_cap,'reserved_today':today+COST,'reserved_month':int(rows[0][0])}
+    return {'daily_cap':daily_cap,'reserved_today':today+cost,'reserved_month':int(rows[0][0])}
 
 
 def decode(event, fetched, current):
@@ -93,7 +93,7 @@ def download(store, api_key, current=None, get=None):
     current=current or datetime.now(timezone.utc);get=get or requests.get
     report={'provider':'The Odds API','checked_at':current.isoformat(),'state':'paused',
             'configured':bool(api_key),'http_requests':0,'games_requested':0,'games_available':0,
-            'lines':0,'fantasy_lines':0,'complete':False}
+            'lines':0,'fantasy_lines':0,'complete':False,'requested_markets':['player_fantasy_points'],'game_coverage':[]}
     if not api_key:
         report['note']='THE_ODDS_API_KEY is missing from this runtime. Add the same key to GitHub Actions Secrets for background use.'
         return [],report
@@ -139,14 +139,17 @@ def download(store, api_key, current=None, get=None):
             if fetched and 0<=(current-fetched).total_seconds()<1800:
                 body=cached['event'];captured=cached['fetched_at']
             else:
-                report['budget']=reserve(store,api_key,current,remaining)
+                report['budget']=reserve(store,api_key,current,remaining,cost=1)
                 body=request('/events/'+event['id']+'/odds',{'bookmakers':'prizepicks,draftkings',
-                    'regions':'us_dfs','markets':','.join(MARKETS),'oddsFormat':'american','dateFormat':'iso'})
+                    'regions':'us_dfs','markets':'player_fantasy_points','oddsFormat':'american','dateFormat':'iso'})
                 report['games_requested']+=1
                 if not isinstance(body,dict) or body.get('id')!=event['id'] or {body.get('home_team'),body.get('away_team')}!={event['home_team'],event['away_team']}:
                     raise ValueError('Fallback game identity mismatch; response rejected.')
                 captured=current.isoformat();store.put('source',cache_key,{'fetched_at':captured,'event':body})
-            decoded=decode(body,captured,current);rows.extend(decoded);covered+=bool(decoded)
+            decoded=decode(body,captured,current);rows.extend(decoded)
+            fantasy_count=sum(c['Stat Key']=='fantasy_score' for c in decoded)
+            report['game_coverage'].append({'event_id':event['id'],'game':event['home_team']+' vs '+event['away_team'],'fantasy_lines':fantasy_count})
+            covered+=bool(fantasy_count)
         report.update(state='received' if rows else 'no_current_lines',complete=bool(games) and covered==len(games))
     except ValueError as error:
         report.update(state='partial' if rows else 'paused',note=str(error))
