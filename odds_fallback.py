@@ -17,6 +17,7 @@ MARKETS = {
 }
 COST = len(MARKETS)
 FANTASY_MARKETS = ('player_fantasy_points', 'player_fantasy_points_alternate')
+BOARD_MARKETS = tuple(key for base in MARKETS for key in (base, base + '_alternate'))
 
 
 def line_type(book, market_key, outcome):
@@ -113,11 +114,15 @@ def decode(event, fetched, current):
     return list(grouped.values())
 
 
-def download(store, api_key, current=None, get=None):
+def download(store, api_key, current=None, get=None, markets=None):
+    markets = tuple(markets or FANTASY_MARKETS)
+    if not markets or any(m.removesuffix('_alternate') not in MARKETS for m in markets) or len(set(markets)) != len(markets):
+        raise ValueError('Unsupported or duplicate fallback markets.')
+    profile = '' if markets == FANTASY_MARKETS else hashlib.sha256(','.join(markets).encode()).hexdigest()[:12] + ':'
     current=current or datetime.now(timezone.utc);get=get or requests.get
     report={'provider':'The Odds API','checked_at':current.isoformat(),'state':'paused',
             'configured':bool(api_key),'http_requests':0,'games_requested':0,'games_available':0,
-            'lines':0,'fantasy_lines':0,'complete':False,'requested_markets':list(FANTASY_MARKETS),'game_coverage':[]}
+            'lines':0,'fantasy_lines':0,'complete':False,'requested_markets':list(markets),'game_coverage':[]}
     if not api_key:
         report['note']='THE_ODDS_API_KEY is missing from this runtime. Add the same key to GitHub Actions Secrets for background use.'
         return [],report
@@ -125,7 +130,7 @@ def download(store, api_key, current=None, get=None):
         report['note']='Permanent storage required for the free-credit guard.';return [],report
     fingerprint=hashlib.sha256(api_key.encode()).hexdigest()[:20]
     day=current.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()
-    snapshot_key='the_odds_api_daily_v2:'+fingerprint+':'+day
+    snapshot_key='the_odds_api_daily_v2:'+profile+fingerprint+':'+day
     snapshot=store.get('source',snapshot_key) or {}
     if snapshot.get('complete'):
         # The original quote timestamps remain unchanged. Reusing a saved
@@ -167,23 +172,25 @@ def download(store, api_key, current=None, get=None):
         games.sort(key=lambda e:e['commence_time']);report['games_available']=len(games)
         covered=0
         for event in games:
-            cache_key='the_odds_api_game_v2:'+fingerprint+':'+event['id']
+            cache_key='the_odds_api_game_v2:'+profile+fingerprint+':'+event['id']
             cached=store.get('source',cache_key) or {};fetched=stamp(cached.get('fetched_at'))
             if fetched and 0<=(current-fetched).total_seconds()<1800:
                 body=cached['event'];captured=cached['fetched_at']
             else:
-                report['budget']=reserve(store,api_key,current,remaining,cost=len(FANTASY_MARKETS))
+                report['budget']=reserve(store,api_key,current,remaining,cost=len(markets))
                 body=request('/events/'+event['id']+'/odds',{'bookmakers':'prizepicks,draftkings',
-                    'regions':'us_dfs','markets':','.join(FANTASY_MARKETS),'oddsFormat':'american','dateFormat':'iso'})
+                    'regions':'us_dfs','markets':','.join(markets),'oddsFormat':'american','dateFormat':'iso'})
                 report['games_requested']+=1
                 if not isinstance(body,dict) or body.get('id')!=event['id'] or {body.get('home_team'),body.get('away_team')}!={event['home_team'],event['away_team']}:
                     raise ValueError('Fallback game identity mismatch; response rejected.')
                 captured=current.isoformat();store.put('source',cache_key,{'fetched_at':captured,'event':body})
             decoded=decode(body,captured,current);rows.extend(decoded)
             fantasy_count=sum(c['Stat Key']=='fantasy_score' for c in decoded)
-            report['game_coverage'].append({'event_id':event['id'],'game':event['home_team']+' vs '+event['away_team'],'fantasy_lines':fantasy_count})
+            report['game_coverage'].append({'event_id':event['id'],'game':event['home_team']+' vs '+event['away_team'],'fantasy_lines':fantasy_count,
+                'market_counts':{m:sum(c['Market ID']=='theodds:'+m for c in decoded) for m in markets}})
             covered+=bool(fantasy_count)
-        report.update(state='received' if rows else 'no_current_lines',complete=bool(games) and covered==len(games))
+        report.update(state='received' if rows else 'no_current_lines',complete=bool(games) and covered==len(games) and (markets==FANTASY_MARKETS or all(
+            all(g['market_counts'].get(m,0)>0 for m in markets) for g in report['game_coverage'])))
     except ValueError as error:
         report.update(state='partial' if rows else 'paused',note=str(error))
     report['lines']=len(rows);report['fantasy_lines']=sum(c['Stat Key']=='fantasy_score' for c in rows)

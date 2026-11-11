@@ -9038,14 +9038,14 @@ def primary_odds_quota_exhausted(store):
 
 
 def run_quota_fallback(wf, budget_seconds=1200):
-    from odds_fallback import download
+    from odds_fallback import download, BOARD_MARKETS
     day=slate_day();board=wf.store.get('board','board') or {}
     saved_status=wf.store.get('source','the_odds_api_fallback_latest') or {}
     checked=utc_timestamp(saved_status.get('checked_at'))
-    if saved_status.get('complete') and pd.notna(checked) and slate_day(checked)==day and board.get('v4_rows'):
+    if saved_status.get('complete') and saved_status.get('requested_markets')==list(BOARD_MARKETS) and pd.notna(checked) and slate_day(checked)==day and board.get('v4_rows'):
         rows=[];status=dict(saved_status,http_requests=0,games_requested=0,reused_snapshot=True)
     else:
-        rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''))
+        rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''),markets=BOARD_MARKETS)
     previous=board.get('v4_rows') or []
     for card in rows:
         teams={wf.e['engine_team_key'](n) for n in card['Game'].split(' vs ')}

@@ -105,3 +105,23 @@ class FallbackTests(TestCase):
         game['bookmakers'][0]['markets'].remove(regular)
         rows=f.decode(game,NOW.isoformat(),NOW)
         self.assertTrue(all(r['Line Type']=='Demon' for r in rows))
+
+    def test_all_regular_prop_tiers_and_request_budget(self):
+        game=event();book=game['bookmakers'][0];book['markets']=[]
+        for base in f.MARKETS:
+            book['markets'].append({'key':base,'last_update':NOW.isoformat(),'outcomes':[
+                {'description':'Player','point':20,'name':'Over','price':-137}]})
+            book['markets'].append({'key':base+'_alternate','last_update':NOW.isoformat(),'outcomes':[
+                {'description':'Player','point':25,'name':'Over','price':100},
+                {'description':'Player','point':15,'name':'Over','price':-137}]})
+        store=Store();get=Mock(side_effect=[response([game]),response(game,488)])
+        rows,report=f.download(store,'key',NOW,get,markets=f.BOARD_MARKETS)
+        self.assertEqual(set(get.call_args.kwargs['params']['markets'].split(',')),set(f.BOARD_MARKETS))
+        self.assertEqual(report['budget']['reserved_today'],len(f.BOARD_MARKETS))
+        self.assertTrue(report['complete'])
+        for name,key in f.MARKETS.values():
+            self.assertEqual({r['Line Type'] for r in rows if r['Stat Key']==key},{'Standard','Goblin','Demon'})
+        again,report=f.download(store,'key',NOW,get,markets=f.BOARD_MARKETS)
+        self.assertEqual(get.call_count,2)
+        self.assertEqual(again,rows)
+        self.assertEqual(report['http_requests'],0)
