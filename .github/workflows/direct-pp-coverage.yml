@@ -1,0 +1,39 @@
+name: Direct PrizePicks account coverage check
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/direct-pp-coverage.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  direct-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      PRIZEPICKS_API_KEY: ${{ secrets.PRIZEPICKS_API_KEY }}
+    steps:
+      - name: Read account coverage without downloading lines
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request, urllib.error
+          key=os.environ.get("PRIZEPICKS_API_KEY","").strip()
+          report={"paid_line_requests":0,"board_changed":False}
+          if not key:
+              report["state"]="missing_actions_key"
+          else:
+              req=urllib.request.Request("https://prizepicksapi.com/api/v1/coverage",headers={"Authorization":"Bearer "+key})
+              try:
+                  with urllib.request.urlopen(req,timeout=25) as response:
+                      data=json.load(response)
+                      report.update(http_status=response.status,remaining=response.headers.get("X-Credits-Remaining"),usage_unit=response.headers.get("X-Usage-Unit"))
+                      meta=data.get("meta") or {}
+                      report["meta"]={k:meta.get(k) for k in ("mode","source_status")}
+                      report["nba"]=[{k:row.get(k) for k in ("league","projection_count","markets","status","last_observed_at")} for row in data.get("data",[]) if isinstance(row,dict) and str(row.get("league","")).upper()=="NBA"]
+                      report["state"]="received"
+              except urllib.error.HTTPError as error:
+                  report.update(state="provider_rejected_request",http_status=error.code,remaining=error.headers.get("X-Credits-Remaining"))
+              except Exception:
+                  report["state"]="connection_or_response_error"
+          print(json.dumps(report,indent=2))
+          PY
