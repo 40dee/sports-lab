@@ -898,7 +898,7 @@ def combo_pool(store, reference=None, tier_mode="mixed"):
     for leg in pool:
         if leg['player_id'] in players: continue
         players.add(leg['player_id']); kept.append(leg)
-    return kept[:24], excluded
+    return kept, excluded
 
 
 def combo_rank(legs, policy):
@@ -910,6 +910,7 @@ def combo_rank(legs, policy):
 
 
 def combo_candidates(pool, size, policy):
+    import heapq
     # Bounded beam search, not an exhaustive optimizer or a probability model.
     beam = [()]
     for _ in range(size):
@@ -919,16 +920,39 @@ def combo_candidates(pool, size, policy):
                 legs = [pool[j] for j in chosen+(i,)]
                 if sum(x['event_id']==pool[i]['event_id'] for x in legs) > 2: continue
                 next_beam.append(chosen+(i,))
-        next_beam.sort(key=lambda indexes:(-combo_rank([pool[j] for j in indexes],policy),indexes))
-        beam = next_beam[:128]
+        # Retain search paths from every game as well as the global leaders.
+        # Otherwise a strong early matchup can crowd all later games out of
+        # the beam before a complete slip is ever evaluated.
+        rank = lambda indexes:(-combo_rank([pool[j] for j in indexes],policy),indexes)
+        leaders = heapq.nsmallest(128,next_beam,key=rank)
+        by_game = {}
+        for indexes in next_beam:
+            game = pool[indexes[-1]]['event_id']
+            prior = by_game.get(game)
+            if prior is None or rank(indexes)<rank(prior):by_game[game]=indexes
+        beam = list(dict.fromkeys(leaders+list(by_game.values())))
     eligible = [indexes for indexes in beam if len({pool[j]['team_id'] for j in indexes}) >= 2]
     selected = []
+    # Rank complete entries first; diversify alternatives without changing
+    # the strongest entry or adding a player who failed eligibility checks.
+    eligible.sort(key=lambda indexes:(-combo_rank([pool[j] for j in indexes],policy),indexes))
     for indexes in eligible:
         # Alternatives must replace at least one player in a two-pick entry,
         # and at least two for larger entries when the pool permits it.
         if any(len(set(indexes)&set(old)) > max(1,size-2) for old in selected): continue
         selected.append(indexes)
-        if len(selected)==3: break
+        if len(selected)==1: break
+    while len(selected)<3:
+        remaining=[indexes for indexes in eligible if indexes not in selected and not any(
+            len(set(indexes)&set(old))>max(1,size-2) for old in selected)]
+        if not remaining:break
+        used_teams={pool[j]['team_id'] for old in selected for j in old}
+        best=max(combo_rank([pool[j] for j in indexes],policy) for indexes in remaining)
+        comparable=[indexes for indexes in remaining if combo_rank([pool[j] for j in indexes],policy)>=best-.10]
+        chosen=min(comparable,key=lambda indexes:(
+            -len({pool[j]['team_id'] for j in indexes}-used_teams),
+            -combo_rank([pool[j] for j in indexes],policy),indexes))
+        selected.append(chosen)
     return [[pool[j] for j in indexes] for indexes in selected]
 
 
@@ -8025,6 +8049,25 @@ def pp_nearby_fantasy_candidates(rows, item, source_start):
     return candidates
 
 
+def pp_native_game_templates(rows, item, source_start):
+    """Use independently saved game metadata; roster identity is checked later."""
+    player=item.get('player') or {};event=item.get('event') or {}
+    team=pp_nba_team_code(player.get('team'));opponent=pp_nba_team_code(event.get('opponent'))
+    if not team or not opponent or team==opponent:return []
+    games={}
+    for row in rows:
+        start=utc_timestamp(row.get('Start (UTC)'))
+        teams={pp_nba_team_code(t) for t in str(row.get('Game','')).split(' vs ')}
+        if (pd.isna(start) or not today_pregame(start) or teams!={team,opponent}
+                or abs((start-source_start).total_seconds())>900):continue
+        key=(str(row.get('Fixture ID')),start.isoformat())
+        if not row.get('Fixture ID'):continue
+        games[key]={'Fixture ID':row['Fixture ID'],'Game':row['Game'],
+            'Start (UTC)':row['Start (UTC)'],'Player':player.get('name'),
+            'Player ID':'','Period':'result','Platform':'prizepicks','Decoded':True}
+    return list(games.values()) if len(games)==1 else []
+
+
 def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
     templates = {}
     player_games = {}
@@ -8058,6 +8101,8 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
             candidates = player_games.get((key[0], key[2]), [])
         if not candidates and key[1] == ("FANTASY",):
             candidates = pp_nearby_fantasy_candidates(rows, item, start)
+        if not candidates and key[1]:
+            candidates = pp_native_game_templates(rows,item,start)
         if not key[1] or not candidates:
             continue
         if len({str(c["Player ID"]) for c in candidates}) != 1:
@@ -8083,8 +8128,13 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
                 row = dict(candidates[0])
                 # Native data must never inherit a manual-observation claim.
                 row.pop('Line Source',None);row.pop('Manual observed at',None)
-                if key[1] == ("FANTASY",):
-                    row.update({"Platform": "prizepicks", "Stat": "Fantasy Score", "Stat Key": "fantasy_score", "Period": "result"})
+                stat_names={('FANTASY',):'Fantasy Score',('PTS',):'Points',('REB',):'Rebounds',
+                    ('AST',):'Assists',('STL',):'Steals',('BLK',):'Blocks',('TOV',):'Turnovers',
+                    ('FG3M',):'3 Point FG',('PTS','REB'):'Points + Rebounds',
+                    ('AST','PTS'):'Points + Assists',('AST','REB'):'Assists + Rebounds',
+                    ('AST','PTS','REB'):'Points + Assists + Rebounds',('BLK','STL'):'Blocks + Steals'}
+                row.update({'Platform':'prizepicks','Stat':stat_names[key[1]],
+                    'Stat Key':'fantasy_score' if key[1]==('FANTASY',) else '+'.join(key[1]),'Period':'result'})
                 row.update({
                     "Line": line, "Raw Handicap": line,
                     "Line Type": tier, "Direction": side,
@@ -8409,8 +8459,9 @@ def prizepicks_projection_page(store, params, purpose='Refresh my saved NBA boar
         params={'path':'/api/v1/projections?'+urlencode(params)},timeout=25)
     if quote.status_code!=200:raise ValueError('Page credit quote unavailable; no paid page requested.')
     cost=quote.json().get('quoted_credits')
-    if type(cost) is not int or not 0<=cost<=1:
-        raise ValueError('Page exceeds the one-credit ceiling; no paid page requested.')
+    ceiling=max(1,min(10,math.ceil(int(params.get('limit',100))/100)))
+    if type(cost) is not int or not 0<=cost<=ceiling:
+        raise ValueError('Page exceeds the compact-page credit ceiling; no page requested.')
     if remaining<cost:raise ValueError('Insufficient provider credits for quoted page; saved lines retained.')
     reserve_prizepicks_request(store)
     try:
@@ -8435,7 +8486,7 @@ def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, refere
     reusable = (saved.get('version') == 3 and saved.get('filters') == filters
                 and saved.get('slate_day') == slate_day(current)
                 and pd.notna(stamp) and 0 <= (current-stamp).total_seconds() < continuation_seconds)
-    if reusable and not saved.get('partial') and (current-stamp).total_seconds() < 300:
+    if reusable and (saved.get('pagination_complete') or not saved.get('partial')):
         return saved, 0
     continuing = reusable and saved.get('partial') and saved.get('next_cursor')
     state = dict(saved) if continuing else {
@@ -8470,7 +8521,10 @@ def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, refere
         if cursor:
             seen.add(cursor)
         state.update({'items':list(items.values()), 'next_cursor':next_cursor,
-                      'partial':bool(next_cursor), 'seen_cursors':sorted(seen),
+                      'pagination_complete':not bool(next_cursor),
+                      'source_status':meta.get('source_status','unknown'),
+                      'source_incomplete':state.get('source_incomplete',False) or meta.get('source_status')!='fresh',
+                      'partial':bool(next_cursor) or state.get('source_incomplete',False) or meta.get('source_status')!='fresh', 'seen_cursors':sorted(seen),
                       'updated_at':current.isoformat(),
                       'pages_downloaded':state.get('pages_downloaded',0)+1})
         store.put('source',cache_key,state)
@@ -8819,6 +8873,64 @@ def scheduled_board_refresh_due(current, starts, ledger):
     return (local.hour, local.minute) >= (14, 30) or 0 < minutes <= 60
 
 
+def import_daily_prizepicks_board(wf, board, ledger, day):
+    """Download once per slate, persist pages and reuse the same saved feed."""
+    errors=[]
+    ledger['feed_cap']=feed_request_cap()
+    ledger['feed_requests']=max(ledger.get('feed_requests',0),int(wf.store.get('request_budget',day+':prizepicks',0) or 0))
+    key = setting('PRIZEPICKS_API_KEY', '')
+    if key:
+        def fetch_page(params):
+            body=prizepicks_projection_page(wf.store,params)
+            ledger['feed_requests']=int(wf.store.get('request_budget',day+':prizepicks',0) or 0)
+            wf.store.put('automation',day,ledger)
+            return body
+        base_filters = {'league': 'NBA', 'status': 'active', 'view':'compact', 'limit': 1000}
+        # One complete daily traversal includes Fantasy and every tier. Do
+        # not spend another set of calls downloading the same Fantasy records.
+        feeds = [('pp_tiers_v1', base_filters, 'feed_partial', 10)]
+        downloaded = {}
+        observed_at = None
+        for cache_key, filters, flag, allowance in feeds:
+            saved_feed = wf.store.get('source', cache_key) or {}
+            same_day = saved_feed.get('slate_day') == day and saved_feed.get('filters') == filters
+            needs_download = not same_day or bool(saved_feed.get('next_cursor')) or not saved_feed.get('pagination_complete',not saved_feed.get('partial',True))
+            remaining = ledger['feed_cap'] - ledger.get('feed_requests', 0)
+            if needs_download and remaining > 0:
+                try:
+                    saved_feed, calls = pp_download_pages(wf.store, cache_key, fetch_page,
+                        filters, max_pages=min(allowance, remaining), continuation_seconds=86400)
+                except Exception as error:
+                    reason=str(error) if isinstance(error,ValueError) else ('Fantasy Score' if flag=='fantasy_partial' else 'tier')+' feed unavailable; saved pages retained'
+                    errors.append(type(error).__name__+': '+reason)
+                    saved_feed = wf.store.get('source', cache_key) or saved_feed
+            ledger[flag] = not (saved_feed.get('slate_day') == day and saved_feed.get('filters')==filters and not saved_feed.get('partial', True))
+            # Even when the budget is exhausted, reprocess saved pages so a
+            # prior interruption cannot leave already-downloaded lines hidden.
+            if saved_feed.get('slate_day') == day and saved_feed.get('items'):
+                for item in saved_feed['items']:
+                    if isinstance(item, dict) and item.get('id'):
+                        downloaded[str(item['id'])] = dict(item,_sports_lab_fetched_at=item.get('_sports_lab_fetched_at') or saved_feed.get('fetched_at') or saved_feed.get('updated_at'))
+                observed_at = saved_feed.get('fetched_at') or observed_at
+        ledger['fantasy_partial']=ledger.get('feed_partial',True)
+        compact=wf.store.get('source','pp_fantasy_compact_v1') or {}
+        payloads=[{'items':list(downloaded.values())}]
+        if compact.get('slate_day')==day:payloads.append(compact)
+        downloaded={str(item['id']):item for item in pp_cached_items(payloads)}
+        if downloaded:
+            try:
+                merged, count = pp_merge_tiers(board.get('v4_rows', []), list(downloaded.values()), observed_at)
+                board['v4_rows'] = merged
+                ledger['native_import']={'downloaded_records':len(downloaded),'imported_rows':count,
+                    'pagination_complete':bool(saved_feed.get('pagination_complete')),
+                    'source_status':saved_feed.get('source_status','unknown')}
+            except (ValueError, TypeError, KeyError):
+                errors.append('Saved PrizePicks pages could not be matched to upcoming games; existing board retained.')
+        wf.store.put('board', 'board', board)
+    wf.store.put('automation',day,ledger)
+    return board,errors
+
+
 def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     if not wf.store.remote:
         raise RuntimeError('Permanent database required for automatic preparation')
@@ -8884,61 +8996,9 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
                 board['v4_rows']=merge_scan_rows(board.get('v4_rows',[]),rows,{str(game['fixtureId'])})
                 wf.store.put('board','board',board)
         except ValueError as error:errors.append(str(error))
-    # Give Fantasy its own filtered cursor so it cannot sit behind thousands
-    # of ordinary props. Both feeds share the SAME existing daily call cap.
-    key = setting('PRIZEPICKS_API_KEY', '')
-    if key and preparation_rows(board.get('v4_rows', [])):
-        def fetch_page(params):
-            body=prizepicks_projection_page(wf.store,params)
-            ledger['feed_requests']=int(wf.store.get('request_budget',day+':prizepicks',0) or 0)
-            wf.store.put('automation',day,ledger)
-            return body
-        base_filters = {'league': 'NBA', 'status': 'active', 'view':'compact', 'limit': 100}
-        # Prioritize the full NBA PrizePicks feed. The separate Fantasy Score
-        # query consumed two of ten daily calls before the general feed could
-        # finish, leaving standard combo markets missing. Fantasy Score is also
-        # included in the unfiltered NBA feed; only spend leftover calls on the
-        # specialized query once the full feed is complete.
-        feeds = [('pp_tiers_v1', base_filters, 'feed_partial', 10),
-                 ('pp_fantasy_v3', dict(base_filters, stat='Fantasy Score'), 'fantasy_partial', 2)]
-        downloaded = {}
-        observed_at = None
-        for cache_key, filters, flag, allowance in feeds:
-            saved_feed = wf.store.get('source', cache_key) or {}
-            same_day = saved_feed.get('slate_day') == day and saved_feed.get('filters') == filters
-            needs_download = not same_day or saved_feed.get('partial', True) or refresh
-            remaining = ledger['feed_cap'] - ledger.get('feed_requests', 0)
-            if cache_key == 'pp_fantasy_v3' and ledger.get('feed_partial', True):
-                # Never divert scarce requests away from completing the main
-                # PrizePicks feed. Previously saved fantasy pages are retained.
-                remaining = 0
-            if needs_download and remaining > 0:
-                try:
-                    saved_feed, calls = pp_download_pages(wf.store, cache_key, fetch_page,
-                        filters, max_pages=min(allowance, remaining), continuation_seconds=86400)
-                except Exception as error:
-                    reason=str(error) if isinstance(error,ValueError) else ('Fantasy Score' if flag=='fantasy_partial' else 'tier')+' feed unavailable; saved pages retained'
-                    errors.append(type(error).__name__+': '+reason)
-                    saved_feed = wf.store.get('source', cache_key) or saved_feed
-            ledger[flag] = not (saved_feed.get('slate_day') == day and saved_feed.get('filters')==filters and not saved_feed.get('partial', True))
-            # Even when the budget is exhausted, reprocess saved pages so a
-            # prior interruption cannot leave already-downloaded lines hidden.
-            if saved_feed.get('slate_day') == day and saved_feed.get('items'):
-                for item in saved_feed['items']:
-                    if isinstance(item, dict) and item.get('id'):
-                        downloaded[str(item['id'])] = dict(item,_sports_lab_fetched_at=item.get('_sports_lab_fetched_at') or saved_feed.get('fetched_at') or saved_feed.get('updated_at'))
-                observed_at = saved_feed.get('fetched_at') or observed_at
-        compact=wf.store.get('source','pp_fantasy_compact_v1') or {}
-        payloads=[{'items':list(downloaded.values())}]
-        if compact.get('slate_day')==day:payloads.append(compact)
-        downloaded={str(item['id']):item for item in pp_cached_items(payloads)}
-        if downloaded:
-            try:
-                merged, count = pp_merge_tiers(board.get('v4_rows', []), list(downloaded.values()), observed_at)
-                board['v4_rows'] = merged
-            except (ValueError, TypeError, KeyError):
-                errors.append('Saved PrizePicks pages could not be matched to upcoming games; existing board retained.')
-        wf.store.put('board', 'board', board)
+    if setting('PRIZEPICKS_API_KEY',''):
+        board,feed_errors=import_daily_prizepicks_board(wf,board,ledger,day)
+        errors.extend(feed_errors)
     # Both checks operate on saved lines and free ESPN inputs, never new odds.
     last_check = wf.store.get('input_health', 'latest') or {}
     checked_at = pd.to_datetime(last_check.get('checked_at'), utc=True, errors='coerce')
@@ -8979,7 +9039,12 @@ def primary_odds_quota_exhausted(store):
 def run_quota_fallback(wf, budget_seconds=1200):
     from odds_fallback import download
     day=slate_day();board=wf.store.get('board','board') or {}
-    rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''))
+    saved_status=wf.store.get('source','the_odds_api_fallback_latest') or {}
+    checked=utc_timestamp(saved_status.get('checked_at'))
+    if saved_status.get('complete') and pd.notna(checked) and slate_day(checked)==day and board.get('v4_rows'):
+        rows=[];status=dict(saved_status,http_requests=0,games_requested=0,reused_snapshot=True)
+    else:
+        rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''))
     previous=board.get('v4_rows') or []
     for card in rows:
         teams={wf.e['engine_team_key'](n) for n in card['Game'].split(' vs ')}
@@ -9001,20 +9066,23 @@ def run_quota_fallback(wf, budget_seconds=1200):
         board['v4_rows']=[c for c in previous if family(c) not in families]+rows
         board.setdefault('v4_summary',[]);board.setdefault('v4_errors',[])
         board['v4_scan_at']=now();wf.store.put('board','board',board)
+    ledger=wf.store.get('automation',day) or {}
+    board,feed_errors=import_daily_prizepicks_board(wf,board,ledger,day)
+    current_rows=preparation_rows(board.get('v4_rows',[]))
+    if current_rows:
         health_before=wf.store.get('health',day) or {}
-        health=refresh_board_health(wf,{'v4_rows':rows})
+        health=refresh_board_health(wf,{'v4_rows':current_rows})
         health['players']={**(health_before.get('players') or {}),**health['players']}
         wf.store.put('health',day,health)
-        preparation=prepare_saved_board(wf,{'v4_rows':rows},budget_seconds=budget_seconds,max_picks=10000)
+        preparation=prepare_saved_board(wf,{'v4_rows':current_rows},budget_seconds=budget_seconds,max_picks=10000)
         combos=update_combos(wf.store,generate=True)
     else:
         preparation={'ready':0,'total':0,'attempted':0,'pending':0,'state':'paused'}
         combos={'generated':0}
-    ledger=wf.store.get('automation',day) or {}
     ledger.update(last_run=now(),active_odds_provider='The Odds API',fallback=status,
         preparation=preparation,combos=combos,coverage=board_coverage(wf,board),
-        feed_partial=True,fantasy_partial=not (status.get('complete') and status.get('fantasy_lines')),
-        errors=[] if rows else [status.get('note','Fallback paused; saved lines retained.')])
+        feed_partial=ledger.get('feed_partial',True),fantasy_partial=ledger.get('fantasy_partial',True),
+        errors=feed_errors+([] if rows or status.get('reused_snapshot') else [status.get('note','Fallback paused; saved lines retained.')]))
     wf.store.put('automation',day,ledger)
     return ledger
 
@@ -9868,14 +9936,16 @@ def render_pp_tier_refresh():
                 key = setting('PRIZEPICKS_API_KEY','')
                 if not key:
                     raise ValueError('PRIZEPICKS_API_KEY is missing.')
-                filters = {'league':'NBA','status':'active','view':'compact','limit':100}
+                filters = {'league':'NBA','status':'active','view':'compact','limit':1000}
                 if fantasy_refresh:
+                    filters['limit']=100
                     filters['stat'] = 'Fantasy Score'
                 def fetch_page(params):
                     return prizepicks_projection_page(workflow_store,params,
                         'Refresh my NBA Fantasy Score lines' if fantasy_refresh else 'Refresh my NBA tier-labelled board')
                 payload,calls = pp_download_pages(workflow_store,
-                    'pp_fantasy_v3' if fantasy_refresh else 'pp_tiers_v1',fetch_page,filters)
+                    'pp_fantasy_v3' if fantasy_refresh else 'pp_tiers_v1',fetch_page,filters,
+                    max_pages=2 if fantasy_refresh else 10,continuation_seconds=86400)
             items = payload['items']
             if fantasy_refresh:
                 items = [item for item in items if pp_stat_key((item.get('market') or {}).get('stat')) == ('FANTASY',)]

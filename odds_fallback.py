@@ -100,6 +100,15 @@ def download(store, api_key, current=None, get=None):
     if not getattr(store,'remote',False):
         report['note']='Permanent storage required for the free-credit guard.';return [],report
     fingerprint=hashlib.sha256(api_key.encode()).hexdigest()[:20]
+    day=current.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()
+    snapshot_key='the_odds_api_daily:'+fingerprint+':'+day
+    snapshot=store.get('source',snapshot_key) or {}
+    if snapshot.get('complete'):
+        # The original quote timestamps remain unchanged. Reusing a saved
+        # board must never make stale lines look freshly verified.
+        saved_report=dict(snapshot['report'],http_requests=0,games_requested=0,reused_snapshot=True)
+        store.put('source','the_odds_api_fallback_latest',saved_report)
+        return snapshot.get('rows') or [],saved_report
     status=store.get('source','the_odds_api_quota:'+fingerprint) or {}
     probe=store.get('source','the_odds_api_probe_latest') or {}
     remaining=status.get('credits_remaining',probe.get('credits_remaining',500))
@@ -156,4 +165,7 @@ def download(store, api_key, current=None, get=None):
     report['lines']=len(rows);report['fantasy_lines']=sum(c['Stat Key']=='fantasy_score' for c in rows)
     report['note']=report.get('note') or ('Saved regular markets only; full Fantasy coverage is not guaranteed. Alternate tiers are not inferred.')
     store.put('source','the_odds_api_fallback_latest',report)
+    if report['complete']:
+        store.put('source',snapshot_key,{'complete':True,'rows':rows,'report':dict(report)})
     return rows,report
+
