@@ -9013,7 +9013,7 @@ def run_quota_fallback(wf, budget_seconds=1200):
     ledger=wf.store.get('automation',day) or {}
     ledger.update(last_run=now(),active_odds_provider='The Odds API',fallback=status,
         preparation=preparation,combos=combos,coverage=board_coverage(wf,board),
-        feed_partial=True,fantasy_partial=not bool(status.get('fantasy_lines')),
+        feed_partial=True,fantasy_partial=not (status.get('complete') and status.get('fantasy_lines')),
         errors=[] if rows else [status.get('note','Fallback paused; saved lines retained.')])
     wf.store.put('automation',day,ledger)
     return ledger
