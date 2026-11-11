@@ -1,4 +1,4 @@
-# Revalidate live credit capacity after compact refresh and provenance repairs.
+# Recheck live source capacity on November 11 before any further line downloads.
 name: Check PrizePicks source health without downloading lines
 on:
   push:
