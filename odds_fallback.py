@@ -138,6 +138,11 @@ def download(store, api_key, current=None, get=None, markets=None):
         # board must never make stale lines look freshly verified.
         saved_report=dict(snapshot['report'],http_requests=0,games_requested=0,reused_snapshot=True)
         store.put('source','the_odds_api_fallback_latest',saved_report)
+        coverage=saved_report.get('game_coverage') or []
+        store.put('board_download',day,{'day':day,'provider':'The Odds API','state':'saved snapshot',
+            'updated_at':datetime.now(timezone.utc).isoformat(),'games_total':saved_report.get('games_available'),
+            'games_done':len(coverage),'games_with_lines':sum(any(g.get('market_counts',{}).values()) for g in coverage),
+            'lines':len(snapshot.get('rows') or [])})
         return snapshot.get('rows') or [],saved_report
     claimed=store.query(
         'INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING RETURNING key',
@@ -155,6 +160,13 @@ def download(store, api_key, current=None, get=None, markets=None):
         report.update(lines=len(recovered),fantasy_lines=sum(c['Stat Key']=='fantasy_score' for c in recovered))
         store.put('source','the_odds_api_fallback_latest',report)
         return recovered,report
+    def progress(state='downloading', current_game=None):
+        store.put('board_download',str(day),{'day':str(day),'provider':'The Odds API',
+            'state':state,'updated_at':datetime.now(timezone.utc).isoformat(),
+            'games_total':report['games_available'],'games_done':len(report['game_coverage']),
+            'games_with_lines':sum(any(g['market_counts'].values()) for g in report['game_coverage']),
+            'lines':sum(sum(g['market_counts'].values()) for g in report['game_coverage']),
+            'current_game':current_game})
     status=store.get('source','the_odds_api_quota:'+fingerprint) or {}
     probe=store.get('source','the_odds_api_probe_latest') or {}
     remaining=status.get('credits_remaining',probe.get('credits_remaining',500))
@@ -187,8 +199,10 @@ def download(store, api_key, current=None, get=None, markets=None):
             and stamp(e['commence_time']).astimezone(ZoneInfo('America/Los_Angeles')).date()==day
             and str(e.get('id','')).isalnum() and e.get('home_team') and e.get('away_team')]
         games.sort(key=lambda e:e['commence_time']);report['games_available']=len(games)
+        progress()
         covered=0
         for event in games:
+            progress(current_game=event['home_team']+' vs '+event['away_team'])
             cache_key='the_odds_api_game_v2:'+profile+fingerprint+':'+event['id']
             cached=store.get('source',cache_key) or {};fetched=stamp(cached.get('fetched_at'))
             if fetched and fetched.astimezone(ZoneInfo('America/Los_Angeles')).date()==day:
@@ -206,10 +220,12 @@ def download(store, api_key, current=None, get=None, markets=None):
             report['game_coverage'].append({'event_id':event['id'],'game':event['home_team']+' vs '+event['away_team'],'fantasy_lines':fantasy_count,
                 'market_counts':{m:sum(c['Market ID']=='theodds:'+m for c in decoded) for m in markets}})
             covered+=bool(fantasy_count)
+            progress()
         report.update(state='received' if rows else 'no_current_lines',complete=bool(games) and covered==len(games) and (markets==FANTASY_MARKETS or all(
             all(g['market_counts'].get(m,0)>0 for m in markets) for g in report['game_coverage'])))
     except ValueError as error:
         report.update(state='partial' if rows else 'paused',note=str(error))
+    progress('received' if report.get('complete') else 'partial')
     report['lines']=len(rows);report['fantasy_lines']=sum(c['Stat Key']=='fantasy_score' for c in rows)
     report['note']=report.get('note') or ('Saved Standard and provider-encoded Goblin/Demon markets. Full Fantasy coverage is not guaranteed. Unsupported alternate metadata is excluded. Payouts are unavailable; provider prices are not executable odds.')
     store.put('source','the_odds_api_fallback_latest',report)
@@ -217,4 +233,5 @@ def download(store, api_key, current=None, get=None, markets=None):
     report['cache_policy']='One capture per Pacific slate date; no automatic paid refresh, including incomplete boards.'
     store.put('source',snapshot_key,{'captured':True,'complete':report['complete'],'rows':rows,'report':dict(report)})
     return rows,report
+
 
