@@ -1173,7 +1173,9 @@ def render_board_run_status(store, st):
         st.caption('Games downloaded: discovering schedule; total not verified yet.' if stage=='importing' else 'Game download total unavailable for this pass.')
     if download.get('current_game'):st.caption('Current game: '+str(download['current_game']))
     for missing in download.get('missing_markets') or []:
-        st.caption('Missing provider markets: '+missing)
+        st.caption('Unresolved provider markets: '+missing)
+    for skipped in download.get('skipped_markets') or []:
+        st.caption('Skipped — not supplied by the provider at capture: '+skipped)
     if download.get('pages') is not None:
         st.caption(f"PrizePicks feed: {download['pages']} saved pages · {download.get('feed_rows',0)} rows · "+('pagination complete' if download.get('pagination_complete') else 'pagination incomplete'))
     preparation=store.get('preparation','last') or {}
@@ -9240,7 +9242,7 @@ def run_quota_fallback(wf, budget_seconds=1200):
     day=slate_day();board=wf.store.get('board','board') or {}
     saved_status=wf.store.get('source','the_odds_api_fallback_latest') or {}
     checked=utc_timestamp(saved_status.get('checked_at'))
-    if saved_status.get('complete') and saved_status.get('requested_markets')==list(BOARD_MARKETS) and pd.notna(checked) and slate_day(checked)==day and board.get('v4_rows'):
+    if saved_status.get('complete') and saved_status.get('coverage_version')==2 and saved_status.get('requested_markets')==list(BOARD_MARKETS) and pd.notna(checked) and slate_day(checked)==day and board.get('v4_rows'):
         rows=[];status=dict(saved_status,http_requests=0,games_requested=0,reused_snapshot=True)
     else:
         rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''),markets=BOARD_MARKETS)
@@ -9248,8 +9250,10 @@ def run_quota_fallback(wf, budget_seconds=1200):
     board_download_progress(wf.store,provider='The Odds API',state='saved snapshot' if status.get('reused_snapshot') else status.get('state'),
         games_total=status.get('games_available'),games_done=len(game_coverage),
         games_with_lines=sum(any(g.get('market_counts',{}).values()) for g in game_coverage),lines=status.get('lines',len(rows)),
-        missing_markets=[g.get('game','Unknown game')+': '+', '.join(m for m,count in (g.get('market_counts') or {}).items() if not count)
-            for g in game_coverage if any(not count for count in (g.get('market_counts') or {}).values())])
+        missing_markets=[g.get('game','Unknown game')+': '+', '.join(m for m,state in (g.get('market_status') or {}).items() if state not in ('available','not_supplied_at_capture','no_outcomes_at_capture'))
+            for g in game_coverage if any(state not in ('available','not_supplied_at_capture','no_outcomes_at_capture') for state in (g.get('market_status') or {}).values())],
+        skipped_markets=[g.get('game','Unknown game')+': '+', '.join(m for m,state in (g.get('market_status') or {}).items() if state in ('not_supplied_at_capture','no_outcomes_at_capture'))
+            for g in game_coverage if any(state in ('not_supplied_at_capture','no_outcomes_at_capture') for state in (g.get('market_status') or {}).values())])
     previous=board.get('v4_rows') or []
     for card in rows:
         teams={wf.e['engine_team_key'](n) for n in card['Game'].split(' vs ')}
