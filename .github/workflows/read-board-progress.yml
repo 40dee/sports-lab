@@ -1,0 +1,24 @@
+name: Read saved board progress
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - scripts/read_board_progress.py
+      - .github/workflows/read-board-progress.yml
+permissions:
+  contents: read
+jobs:
+  status:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read persisted progress without importing app or calling odds providers
+        run: python scripts/read_board_progress.py
