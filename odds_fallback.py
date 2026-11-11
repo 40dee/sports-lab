@@ -16,6 +16,26 @@ MARKETS = {
     'player_fantasy_points': ('Fantasy Score','fantasy_score'),
 }
 COST = len(MARKETS)
+FANTASY_MARKETS = ('player_fantasy_points', 'player_fantasy_points_alternate')
+
+
+def line_type(book, market_key, outcome):
+    """Use The Odds API's documented PrizePicks encoding, never line size."""
+    if not market_key.endswith('_alternate'):
+        return 'Standard'
+    if book.get('key') != 'prizepicks':
+        return None
+    price = outcome.get('price')
+    if type(price) not in (int, float) or not math.isfinite(price):
+        return None
+    if price == 100:
+        return 'Demon'
+    base = market_key.removesuffix('_alternate')
+    defaults = {o.get('price') for m in book.get('markets') or [] if m.get('key') == base
+                for o in m.get('outcomes') or [] if type(o.get('price')) in (int, float)
+                and math.isfinite(o['price']) and o['price'] < 0}
+    return 'Goblin' if defaults == {price} else None
+
 
 
 def primary_exhausted(account, budget):
@@ -62,7 +82,8 @@ def decode(event, fetched, current):
         platform=book.get('key')
         if platform not in ('prizepicks','draftkings'):continue
         for market in book.get('markets') or []:
-            stat=MARKETS.get(market.get('key'))
+            market_key=market.get('key') or ''
+            stat=MARKETS.get(market_key.removesuffix('_alternate'))
             observed=stamp(market.get('last_update'))
             if not stat or not observed or not 0<=(current-observed).total_seconds()<=1800:continue
             for outcome in market.get('outcomes') or []:
@@ -74,13 +95,16 @@ def decode(event, fetched, current):
                     if not math.isfinite(line) or not 0<line<=1000:continue
                 except (ValueError,TypeError):continue
                 if not side or not isinstance(player,str) or not player.strip():continue
-                identity=(platform,market['key'],player,line)
+                tier=line_type(book,market_key,outcome)
+                if tier is None:continue
+                identity=(platform,market['key'],player,line,tier)
                 card=grouped.setdefault(identity,{
                     'Game':event['home_team']+' vs '+event['away_team'],
                     'Fixture ID':'theodds:'+str(event['id']),'Start (UTC)':event['commence_time'],
                     'Platform':platform,'Player':player,'Stat':stat[0],'Stat Key':stat[1],
                     'Period':'result','Line':line,'Raw Handicap':line,'Direction':side,
-                    'Available Sides':[],'Line Type':'Standard','Line Status':'Provider regular market',
+                    'Available Sides':[],'Line Type':tier,'Line Status':'Provider regular market' if tier=='Standard' else 'Provider encoded '+tier,
+                    'Tier Source':'The Odds API documented encoding','Payout Multiplier':None,
                     'Odds':None,'Market ID':'theodds:'+market['key'],
                     'Outcome ID':'theodds:'+market['key']+':'+player,'Player ID':'','Decoded':True,
                     'Line Source':'The Odds API','Odds checked (UTC)':observed.isoformat(),
@@ -93,7 +117,7 @@ def download(store, api_key, current=None, get=None):
     current=current or datetime.now(timezone.utc);get=get or requests.get
     report={'provider':'The Odds API','checked_at':current.isoformat(),'state':'paused',
             'configured':bool(api_key),'http_requests':0,'games_requested':0,'games_available':0,
-            'lines':0,'fantasy_lines':0,'complete':False,'requested_markets':['player_fantasy_points'],'game_coverage':[]}
+            'lines':0,'fantasy_lines':0,'complete':False,'requested_markets':list(FANTASY_MARKETS),'game_coverage':[]}
     if not api_key:
         report['note']='THE_ODDS_API_KEY is missing from this runtime. Add the same key to GitHub Actions Secrets for background use.'
         return [],report
@@ -101,7 +125,7 @@ def download(store, api_key, current=None, get=None):
         report['note']='Permanent storage required for the free-credit guard.';return [],report
     fingerprint=hashlib.sha256(api_key.encode()).hexdigest()[:20]
     day=current.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()
-    snapshot_key='the_odds_api_daily:'+fingerprint+':'+day
+    snapshot_key='the_odds_api_daily_v2:'+fingerprint+':'+day
     snapshot=store.get('source',snapshot_key) or {}
     if snapshot.get('complete'):
         # The original quote timestamps remain unchanged. Reusing a saved
@@ -143,14 +167,14 @@ def download(store, api_key, current=None, get=None):
         games.sort(key=lambda e:e['commence_time']);report['games_available']=len(games)
         covered=0
         for event in games:
-            cache_key='the_odds_api_game:'+fingerprint+':'+event['id']
+            cache_key='the_odds_api_game_v2:'+fingerprint+':'+event['id']
             cached=store.get('source',cache_key) or {};fetched=stamp(cached.get('fetched_at'))
             if fetched and 0<=(current-fetched).total_seconds()<1800:
                 body=cached['event'];captured=cached['fetched_at']
             else:
-                report['budget']=reserve(store,api_key,current,remaining,cost=1)
+                report['budget']=reserve(store,api_key,current,remaining,cost=len(FANTASY_MARKETS))
                 body=request('/events/'+event['id']+'/odds',{'bookmakers':'prizepicks,draftkings',
-                    'regions':'us_dfs','markets':'player_fantasy_points','oddsFormat':'american','dateFormat':'iso'})
+                    'regions':'us_dfs','markets':','.join(FANTASY_MARKETS),'oddsFormat':'american','dateFormat':'iso'})
                 report['games_requested']+=1
                 if not isinstance(body,dict) or body.get('id')!=event['id'] or {body.get('home_team'),body.get('away_team')}!={event['home_team'],event['away_team']}:
                     raise ValueError('Fallback game identity mismatch; response rejected.')
@@ -163,7 +187,7 @@ def download(store, api_key, current=None, get=None):
     except ValueError as error:
         report.update(state='partial' if rows else 'paused',note=str(error))
     report['lines']=len(rows);report['fantasy_lines']=sum(c['Stat Key']=='fantasy_score' for c in rows)
-    report['note']=report.get('note') or ('Saved regular markets only; full Fantasy coverage is not guaranteed. Alternate tiers are not inferred.')
+    report['note']=report.get('note') or ('Saved Standard and provider-encoded Goblin/Demon markets. Full Fantasy coverage is not guaranteed. Unsupported alternate metadata is excluded. Payouts are unavailable; provider prices are not executable odds.')
     store.put('source','the_odds_api_fallback_latest',report)
     if report['complete']:
         store.put('source',snapshot_key,{'complete':True,'rows':rows,'report':dict(report)})

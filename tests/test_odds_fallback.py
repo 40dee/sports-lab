@@ -51,7 +51,7 @@ class FallbackTests(TestCase):
         store=Store();game=event();get=Mock(side_effect=[response([game]),response(game,492)])
         rows,report=f.download(store,'key',NOW,get)
         self.assertEqual(len(rows),1);self.assertEqual(report['games_requested'],1)
-        self.assertEqual(set(get.call_args.kwargs['params']['markets'].split(',')),{'player_fantasy_points'})
+        self.assertEqual(set(get.call_args.kwargs['params']['markets'].split(',')),set(f.FANTASY_MARKETS))
         rows,report=f.download(store,'key',NOW,get)
         self.assertEqual(report['http_requests'],0);self.assertEqual(get.call_count,2)
         self.assertNotIn('apiKey',str(store.query('SELECT payload FROM sports_records',fetch=True)))
@@ -83,4 +83,25 @@ class FallbackTests(TestCase):
         self.assertEqual(report['fantasy_lines'],6)
         self.assertEqual(len(report['game_coverage']),6)
         for call in get.call_args_list[1:]:
-            self.assertEqual(call.kwargs['params']['markets'],'player_fantasy_points')
+            self.assertEqual(set(call.kwargs['params']['markets'].split(',')),set(f.FANTASY_MARKETS))
+
+    def test_tier_labels_use_provider_prices_and_preserve_sides(self):
+        game=event()
+        regular=game['bookmakers'][0]['markets'][0]
+        regular['key']='player_fantasy_points'
+        for outcome in regular['outcomes']:outcome['price']=-137
+        alternate={'key':'player_fantasy_points_alternate','last_update':NOW.isoformat(),'outcomes':[
+            {'description':'Player','point':50,'name':'Over','price':100},
+            {'description':'Player','point':37,'name':'Over','price':-137},
+            {'description':'Player','point':99,'name':'Over','price':-137},
+            {'description':'Player','point':5,'name':'Under','price':100},
+            {'description':'Player','point':20,'name':'Over','price':-200},
+            {'description':'Player','point':25,'name':'Over'}]}
+        game['bookmakers'][0]['markets'].append(alternate)
+        rows=f.decode(game,NOW.isoformat(),NOW)
+        self.assertEqual([r['Line Type'] for r in rows],['Standard','Demon','Goblin','Goblin','Demon'])
+        self.assertEqual(rows[-1]['Available Sides'],['LESS'])
+        self.assertTrue(all(r['Odds'] is None and r['Payout Multiplier'] is None for r in rows))
+        game['bookmakers'][0]['markets'].remove(regular)
+        rows=f.decode(game,NOW.isoformat(),NOW)
+        self.assertTrue(all(r['Line Type']=='Demon' for r in rows))
