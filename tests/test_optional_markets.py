@@ -7,6 +7,28 @@ from test_odds_fallback import Store, response, event, NOW
 
 
 class OptionalMarketTests(unittest.TestCase):
+    def test_absent_market_creates_no_cards_and_removes_only_its_superseded_quotes(self):
+        _,_,rows,report=self.capture(event())
+        self.assertFalse(any(c['Market ID']=='theodds:player_threes' for c in rows))
+        old=dict(rows[0],**{'Market ID':'theodds:player_threes','Stat':'3 Point FG'})
+        alternate=dict(old,**{'Market ID':'theodds:player_threes_alternate'})
+        another_game=dict(old,**{'Provider Event ID':'different'})
+        historical=dict(old,**{'Start (UTC)':'2025-01-01T00:00:00Z'})
+        other_platform=dict(old,Platform='draftkings')
+        kept=f.prune_unavailable_lines([old,alternate,another_game,historical,other_platform]+rows,report)
+        self.assertNotIn(old,kept)
+        self.assertNotIn(alternate,kept)
+        self.assertIn(another_game,kept)
+        self.assertIn(historical,kept)
+        self.assertIn(other_platform,kept)
+        self.assertTrue(all(c in kept for c in rows))
+
+    def test_unresolved_market_does_not_authorize_removing_saved_quotes(self):
+        _,_,rows,report=self.capture(event())
+        old=dict(rows[0],**{'Market ID':'theodds:player_threes'})
+        report['game_coverage'][0]['market_status']['player_threes']='unusable_returned_market'
+        self.assertEqual(f.prune_unavailable_lines([old],report),[old])
+
     def capture(self,game,markets=None):
         store=Store();get=Mock(side_effect=[response([game]),response(game)])
         rows,report=f.download(store,'key',NOW,get,markets=markets or f.BOARD_MARKETS)
