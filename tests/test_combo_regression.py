@@ -15,10 +15,10 @@ SOURCE=Path(__file__).resolve().parents[1]/'app.py'
 tree=ast.parse(SOURCE.read_text())
 names={'json_safe','encode','identity','utc_timestamp','market_signature','unique_forecasts',
  'forecast_index','saved_prediction','slate_day','today_pregame','player_health_key',
- 'pick_is_selectable','pick_offered_sides','line_freshness'}
+ 'pick_is_selectable','pick_offered_sides','line_freshness','board_coverage'}
 names.update(n.name for n in tree.body if isinstance(n,ast.FunctionDef) and
              (n.name.startswith('combo_') or n.name in ('update_combos','record_combo_actual')))
-env=dict(globals(),SLATE_TIMEZONE='America/Los_Angeles',COMBO_POLICIES=('balanced-v1','diverse-v1'))
+env=dict(globals(),SLATE_TIMEZONE='America/Los_Angeles',COMBO_POLICIES=('balanced-v1','diverse-v1'),now=lambda:REF)
 env.update(market_columns=lambda c:c.get('Stat Key'),fantasy_weights=lambda _:None)
 exec(compile(ast.Module(body=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in names],type_ignores=[]),str(SOURCE),'exec'),env)
 REF='2026-11-09T18:00:00Z'
@@ -47,6 +47,7 @@ def populated(count=18):
               'player_id':str(i),'team_id':str(i),'statuses':[],'blocked':False}
   cards.append(c)
  store.put('board','board',{'v4_rows':cards}); store.put('health','2026-11-09',{'players':health})
+ store.put('board_run','2026-11-09',{'stage':'finished','import_complete':True,'board_scan_at':None})
  return store
 
 class ComboTests(unittest.TestCase):
@@ -207,3 +208,4 @@ class StandardTierTests(unittest.TestCase):
    for keys in saved['sizes'].values():
     for key in keys:
      self.assertTrue(all(l['card']['Line Type'].lower()==mode for l in store.get('combo',key)['legs']))
+
