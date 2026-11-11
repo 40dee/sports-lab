@@ -118,7 +118,7 @@ def decode(event, fetched, current):
     return list(grouped.values())
 
 
-COVERAGE_VERSION = 2
+COVERAGE_VERSION = 3
 
 
 def market_coverage(event, decoded, markets):
@@ -171,8 +171,29 @@ def reclassify_saved_coverage(store, report, profile, fingerprint, markets):
             game['market_status']={m:'unverified_response' for m in markets}
             continue
         rows=decode(body,cached['fetched_at'],captured)
+        game['start']=body.get('commence_time')
         game['market_counts'],game['market_status']=market_coverage(body,rows,markets)
     return finalize_coverage(result)
+
+
+def prune_unavailable_lines(rows, report):
+    """Remove superseded quotes from this feed; frozen forecasts are separate."""
+    absent={}
+    for game in report.get('game_coverage') or []:
+        start=stamp(game.get('start'))
+        if start is None:continue
+        for market,state in (game.get('market_status') or {}).items():
+            if state in ('not_supplied_at_capture','no_outcomes_at_capture'):
+                absent[(str(game.get('event_id')),'theodds:'+market)]=start
+    kept=[]
+    for card in rows:
+        event_id=str(card.get('Provider Event ID') or str(card.get('Fixture ID','')).removeprefix('theodds:'))
+        key=(event_id,str(card.get('Market ID')))
+        if (card.get('Platform')=='prizepicks' and key in absent
+                and stamp(card.get('Start (UTC)'))==absent[key]):
+            continue
+        kept.append(card)
+    return kept
 
 
 def download(store, api_key, current=None, get=None, markets=None):
@@ -280,7 +301,7 @@ def download(store, api_key, current=None, get=None, markets=None):
             decoded=decode(body,captured,stamp(captured) or current);rows.extend(decoded)
             fantasy_count=sum(c['Stat Key']=='fantasy_score' for c in decoded)
             counts,states=market_coverage(body,decoded,markets)
-            report['game_coverage'].append({'event_id':event['id'],'game':event['home_team']+' vs '+event['away_team'],'fantasy_lines':fantasy_count,
+            report['game_coverage'].append({'event_id':event['id'],'start':event['commence_time'],'game':event['home_team']+' vs '+event['away_team'],'fantasy_lines':fantasy_count,
                 'market_counts':counts,'market_status':states})
             covered+=bool(fantasy_count)
             progress()
