@@ -69,3 +69,18 @@ class FallbackTests(TestCase):
         self.assertEqual(env['automatic_board_run_with_fallback'](wf)['active_odds_provider'],'OddsPAPI');fallback.assert_not_called()
         check.return_value=True
         self.assertEqual(env['automatic_board_run_with_fallback'](wf),{'fallback':True});self.assertEqual(primary.call_count,1)
+
+    def test_fantasy_requests_cover_all_six_games(self):
+        games=[]
+        for i in range(6):
+            game=event();game['id']='abc'+str(i)
+            game['bookmakers'][0]['markets'][0]['key']='player_fantasy_points'
+            games.append(game)
+        get=Mock(side_effect=[response(games)]+[response(game,498-i) for i,game in enumerate(games)])
+        rows,report=f.download(Store(),'key',NOW,get)
+        self.assertTrue(report['complete'])
+        self.assertEqual(report['games_requested'],6)
+        self.assertEqual(report['fantasy_lines'],6)
+        self.assertEqual(len(report['game_coverage']),6)
+        for call in get.call_args_list[1:]:
+            self.assertEqual(call.kwargs['params']['markets'],'player_fantasy_points')
