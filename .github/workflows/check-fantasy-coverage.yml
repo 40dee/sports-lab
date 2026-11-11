@@ -1,4 +1,4 @@
-name: Check PrizePicks Fantasy coverage (maximum 4 credits)
+name: Check PrizePicks Fantasy coverage (maximum 10 credits)
 on:
   push:
     branches: [main]
@@ -8,15 +8,15 @@ permissions:
   contents: read
 concurrency:
   group: fantasy-coverage-diagnostic
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   coverage:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     timeout-minutes: 3
     env:
       THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
     steps:
-      - name: Check two other NBA games without changing the board
+      - name: Check up to five NBA games without changing the board
         run: |
           python3 - <<'PY'
           import json, os, urllib.request, urllib.error
@@ -26,7 +26,7 @@ jobs:
           MARKETS = ("player_fantasy_points", "player_fantasy_points_alternate")
           def run(get=None):
               key = os.environ.get("THE_ODDS_API_KEY", "").strip()
-              report = {"board_changed": False, "max_credits": 4, "games": [], "requests": 0}
+              report = {"board_changed": False, "max_credits": 10, "games": [], "requests": 0}
               if not key:
                   report["state"] = "missing_github_secret"
                   return report
@@ -58,9 +58,6 @@ jobs:
                           valid = now + timedelta(minutes=5) < start < now + timedelta(hours=48)
                       except (ValueError, TypeError):
                           continue
-                      # The prior single-game sample already checked this matchup.
-                      if {event.get("home_team"), event.get("away_team")} == {"Boston Celtics", "Toronto Raptors"}:
-                          continue
                       if valid and str(event.get("id", "")).isalnum() and event.get("home_team") and event.get("away_team"):
                           upcoming.append(event)
                   upcoming.sort(key=lambda e: (e["commence_time"], e["id"]))
@@ -68,7 +65,7 @@ jobs:
                   for event in upcoming:
                       if event["id"] in seen:
                           continue
-                      if len(report["games"]) >= 2 or report.get("test_credits_used", 0) + 2 > 4:
+                      if len(report["games"]) >= 5 or report.get("test_credits_used", 0) + 2 > 10:
                           break
                       if report["credits_remaining"] < 2:
                           break
