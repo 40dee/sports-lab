@@ -318,7 +318,7 @@ class Store:
             "audit_error",
             "health",
             "coverage",
-            "board_run", "board_run_history",
+            "board_run", "board_run_history", "board_download",
             "input_health",
             "request_budget",
             "odds_cache", "odds_lock", "odds_fixture", "odds_refresh", "odds_status",
@@ -1076,6 +1076,30 @@ def combo_learning(store, reference=None):
     return reports
 
 
+def board_download_progress(store, **values):
+    day=slate_day()
+    record=store.get('board_download',day) or {}
+    record.update(values,updated_at=now(),day=day)
+    store.put('board_download',day,record)
+
+
+def render_live_board_status(store, st):
+    # Fragment refreshes must see other workers, not the browser's read cache.
+    cache=getattr(store,'_read_cache',None)
+    if isinstance(cache,dict):
+        for namespace,key in (('board_run',slate_day()),('board_download',slate_day()),('preparation','last')):
+            cache.pop(('get',namespace,key),None)
+            cache.pop(('items',namespace,None),None)
+    render_board_run_status(store,st)
+    run=store.get('board_run',slate_day()) or {}
+    token=(run.get('stage'),run.get('finished_at'))
+    prior=st.session_state.get('_board_live_stage')
+    st.session_state['_board_live_stage']=token
+    if prior is not None and token!=prior and token[0]=='finished':
+        if isinstance(cache,dict):cache.clear()
+        st.rerun()
+
+
 def board_run_stage(store, stage, import_complete=None):
     """Persist stage clocks independently of the worker's final summary."""
     day=slate_day()
@@ -1083,6 +1107,7 @@ def board_run_stage(store, stage, import_complete=None):
     stamp=now()
     if stage=='importing':
         record={'day':day,'started_at':stamp,'stage':stage,'import_complete':False}
+        store.put('board_download',day,{'day':day,'updated_at':stamp,'state':'discovering','games_total':None,'games_done':0,'games_with_lines':0,'lines':0})
     else:
         record['stage']=stage
         if stage=='preparing':record['import_finished_at']=stamp
@@ -1132,6 +1157,28 @@ def render_board_run_status(store, st):
     st.caption('Board: '+stage+' · Total '+elapsed(record.get('started_at'),end)+
         ' · Import '+elapsed(record.get('started_at'),record.get('import_finished_at') or end)+
         ' · Projections '+(elapsed(record.get('import_finished_at'),end) if record.get('import_finished_at') else 'waiting'))
+    download=store.get('board_download',slate_day()) or {}
+    total=download.get('games_total')
+    done=download.get('games_done',0)
+    if total:
+        st.progress(min(1.,done/total),text=f"Games downloaded: {done}/{total} ({min(100,int(100*done/total))}%)")
+        st.caption(f"{download.get('games_with_lines',0)} games returned lines · {download.get('lines',0)} decoded lines · {download.get('state','unknown')}")
+    else:
+        st.caption('Games downloaded: discovering schedule; total not verified yet.' if stage=='importing' else 'Game download total unavailable for this pass.')
+    if download.get('current_game'):st.caption('Current game: '+str(download['current_game']))
+    for missing in download.get('missing_markets') or []:
+        st.caption('Missing provider markets: '+missing)
+    if download.get('pages') is not None:
+        st.caption(f"PrizePicks feed: {download['pages']} saved pages · {download.get('feed_rows',0)} rows · "+('pagination complete' if download.get('pagination_complete') else 'pagination incomplete'))
+    preparation=store.get('preparation','last') or {}
+    began,run_start=utc_timestamp(preparation.get('run_at')),utc_timestamp(record.get('started_at'))
+    if pd.notna(began) and pd.notna(run_start) and began>=run_start and preparation.get('total'):
+        count=preparation['total'];ready=preparation.get('ready',0)
+        st.progress(min(1.,ready/count),text=f"Projections ready: {ready}/{count} ({min(100,int(100*ready/count))}%)")
+        st.caption(f"{preparation.get('unavailable',0)} unavailable · {preparation.get('pending',max(0,count-ready))} pending · {preparation.get('state','running')}")
+        st.caption('Last calculation update: '+str(preparation.get('updated_at') or preparation.get('finished_at') or preparation.get('run_at'))+' UTC')
+        if preparation.get('current'):st.caption('Calculating: '+str(preparation['current']))
+    else:st.caption('Projections: waiting for this pass to finish importing and checking inputs.')
     with st.expander('Board timing and completion'):
         for label,key in (('Started','started_at'),('Import finished','import_finished_at'),('Board prepared','finished_at')):
             value=utc_timestamp(record.get(key))
@@ -3431,8 +3478,10 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
     wf.store.items('paper_forecast')
     wf.store.items('model')
     began = clock()
+    last_progress=began
     report = {'run_at': now(), 'state': 'running', 'total': len(rows),
               'ready': sum(bool(saved_prediction(index, c)) for c in rows),
+              'slate_day':slate_day(),'unavailable':0,
               'attempted': 0, 'source_scan_at': board.get('v4_scan_at')}
     wf.store.put('preparation', 'last', report)
     # Work on an isolated environment mapping; do not patch process-wide globals.
@@ -3480,6 +3529,9 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
                 continue
             state = {'Status': 'Calculating', 'updated_at': now(), 'Player': card.get('Player')}
             report['current'] = str(card.get('Player')) + ' · ' + str(card.get('Stat'))
+            if report['attempted']==0 or clock()-last_progress>=3:
+                wf.store.put('preparation','last',report)
+                last_progress=clock()
             try:
                 frozen = wf.calculate(card, engine['current_season']())
                 index[key] = index[market_signature(card)] = frozen
@@ -3495,9 +3547,13 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
             states[key] = state
             wf.store.put('calculation_status', key, state)
             report['attempted'] += 1
-            if report['attempted'] % 25 == 0:
+            if report['attempted']==1 or report['attempted'] % 5 == 0 or clock()-last_progress>=3:
                 report['ready'] = sum(bool(saved_prediction(index, c)) for c in rows)
+                report['unavailable']=sum(not saved_prediction(index,c) and (states.get(identity(c)) or {}).get('Status')=='Unavailable' for c in rows)
+                report['pending']=len(rows)-report['ready']-report['unavailable']
+                report['updated_at']=now()
                 wf.store.put('preparation', 'last', report)
+                last_progress=clock()
     finally:
         wf.player, wf.event_for, wf.e = original_player, original_event, engine
         if original_availability is not None:
@@ -8615,6 +8671,10 @@ def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, refere
                       'updated_at':current.isoformat(),
                       'pages_downloaded':state.get('pages_downloaded',0)+1})
         store.put('source',cache_key,state)
+        progress=store.get('board_download',slate_day(current)) or {}
+        progress.update(pages=state['pages_downloaded'],feed_rows=len(state['items']),
+            pagination_complete=state['pagination_complete'],updated_at=now())
+        store.put('board_download',slate_day(current),progress)
         cursor = next_cursor
         if not cursor:
             break
@@ -8992,6 +9052,7 @@ def import_daily_prizepicks_board(wf, board, ledger, day):
                     reason=str(error) if isinstance(error,ValueError) else ('Fantasy Score' if flag=='fantasy_partial' else 'tier')+' feed unavailable; saved pages retained'
                     errors.append(type(error).__name__+': '+reason)
                     saved_feed = wf.store.get('source', cache_key) or saved_feed
+            board_download_progress(wf.store,pages=saved_feed.get('pages_downloaded',0),feed_rows=len(saved_feed.get('items') or []),pagination_complete=bool(saved_feed.get('pagination_complete')))
             ledger[flag] = not (saved_feed.get('slate_day') == day and saved_feed.get('filters')==filters and not saved_feed.get('partial', True))
             # Even when the budget is exhausted, reprocess saved pages so a
             # prior interruption cannot leave already-downloaded lines hidden.
@@ -9045,7 +9106,9 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
         if games:
             catalog = market_catalog()
             decoded, summaries, successful = [], [], set()
-            for game in games:
+            board_download_progress(wf.store,provider='OddsPAPI',state='downloading',games_total=len(games))
+            for game_number,game in enumerate(games,1):
+                board_download_progress(wf.store,current_game=str(game.get('participant1Name',''))+' vs '+str(game.get('participant2Name','')))
                 try:
                     rows, summary = decode_game(game, game_odds(str(game['fixtureId'])), catalog)
                     if rows:
@@ -9063,11 +9126,16 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
                         'Account usage unavailable; paid downloads paused.',
                         'Account quota response unrecognized; paid downloads paused.') else type(error).__name__ + ': fixture import unavailable'
                     errors.append('Fixture ' + str(game['fixtureId']) + ': ' + safe)
+                board_download_progress(wf.store,games_done=len(successful),games_checked=game_number,games_with_lines=len(successful),lines=len(decoded))
+            board_download_progress(wf.store,state='received' if len(successful)==len(games) else 'partial',current_game=None)
             ledger['games_imported'] = len(successful)
             ledger['games_found'] = len(games)
             board['v4_rows'] = merge_scan_rows(board.get('v4_rows', []), decoded, successful)
             board.update(v4_summary=summaries, v4_errors=errors, v4_scan_at=now())
             wf.store.put('board', 'board', board)
+    if ledger.get('games_found') and not (wf.store.get('board_download',day) or {}).get('games_total'):
+        board_download_progress(wf.store,provider='OddsPAPI',state='saved snapshot',games_total=ledger['games_found'],
+            games_done=ledger.get('games_imported',0),games_with_lines=ledger.get('games_imported',0),lines=len(board.get('v4_rows') or []))
     known=wf.store.items('odds_fixture')
     has_upcoming_board=any(today_pregame(c.get('Start (UTC)')) for c in board.get('v4_rows') or [])
     has_shared_metadata=any(today_pregame(game.get('startTime')) for _,game in known)
@@ -9139,6 +9207,12 @@ def run_quota_fallback(wf, budget_seconds=1200):
         rows=[];status=dict(saved_status,http_requests=0,games_requested=0,reused_snapshot=True)
     else:
         rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''),markets=BOARD_MARKETS)
+    game_coverage=status.get('game_coverage') or []
+    board_download_progress(wf.store,provider='The Odds API',state='saved snapshot' if status.get('reused_snapshot') else status.get('state'),
+        games_total=status.get('games_available'),games_done=len(game_coverage),
+        games_with_lines=sum(any(g.get('market_counts',{}).values()) for g in game_coverage),lines=status.get('lines',len(rows)),
+        missing_markets=[g.get('game','Unknown game')+': '+', '.join(m for m,count in (g.get('market_counts') or {}).items() if not count)
+            for g in game_coverage if any(not count for count in (g.get('market_counts') or {}).values())])
     previous=board.get('v4_rows') or []
     for card in rows:
         teams={wf.e['engine_team_key'](n) for n in card['Game'].split(' vs ')}
@@ -10197,7 +10271,7 @@ def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
     st.caption("Model picks · Research · Results")
     app_page = (st.segmented_control("Navigation", ["Plays", "Fantasy", "Combos", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
-    render_board_run_status(workflow.store,st)
+    st.fragment(run_every=5)(render_live_board_status)(workflow.store,st)
     st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
         st.session_state.pop("selected_prop_card", None)
@@ -10352,7 +10426,11 @@ def render_app_pages():
 
 
         # ---------------- RESULTS AND PLAYER LINES ----------------
-        if app_page == 'Combos':
+        board_allowed,board_note=combo_board_ready(workflow.store) if app_page in ('Plays','Fantasy','Combos') else (True,'')
+        if not board_allowed:
+            st.info('Today’s picks are waiting for the complete board. '+board_note)
+            st.caption('Saved plays and results remain available. Progress updates automatically; browsing does not download provider lines.')
+        elif app_page == 'Combos':
             render_combos(workflow, st)
         elif app_page == 'Fantasy':
             render_fantasy_plays(workflow, st)
