@@ -161,7 +161,7 @@ class FreshnessTests(unittest.TestCase):
        upcoming_nba=discovery,refresh_board_health=lambda *_:{},
        refresh_saved_game_lines=lambda wf,board,*_:(board,[]),
        prepare_saved_board=lambda *_args,**_kw:{},update_combos=lambda *_args,**_kw:{},
-       board_coverage=lambda *_:{})
+       board_coverage=lambda *_:{},board_run_stage=lambda *_:{})
    env['automatic_board_run'](SimpleNamespace(store=store),refresh=False)
    self.assertEqual(calls,['schedule'])
    self.assertIsNotNone(store.get('odds_fixture','f1'))
@@ -259,3 +259,4 @@ class CompactReadTests(unittest.TestCase):
   self.assertEqual(len(self.store.forecast_items()),205)
   self.store.put('forecast','new',{'id':'new','result':{'projection':12.}})
   self.assertEqual(len(self.store.forecast_items()),206)
+
