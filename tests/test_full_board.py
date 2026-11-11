@@ -59,7 +59,7 @@ class FullBoardTests(unittest.TestCase):
   self.store.remote=True
   key='offline-test';fingerprint=hashlib.sha256(key.encode()).hexdigest()[:20]
   row={'Odds checked (UTC)':REF}
-  self.store.put('source','the_odds_api_daily:'+fingerprint+':2026-11-09',
+  self.store.put('source','the_odds_api_daily_v2:'+fingerprint+':2026-11-09',
     {'complete':True,'rows':[row],'report':{'complete':True,'checked_at':REF,'http_requests':6}})
   get=Mock(side_effect=AssertionError('No provider call allowed'))
   rows,report=odds_fallback.download(self.store,key,datetime(2026,11,9,20,tzinfo=timezone.utc),get)
