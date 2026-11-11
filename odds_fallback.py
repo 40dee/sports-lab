@@ -81,14 +81,17 @@ def decode(event, fetched, current):
         return []
     grouped={}
     for book in event.get('bookmakers') or []:
+        if not isinstance(book,dict):continue
         platform=book.get('key')
         if platform not in ('prizepicks','draftkings'):continue
         for market in book.get('markets') or []:
+            if not isinstance(market,dict):continue
             market_key=market.get('key') or ''
             stat=MARKETS.get(market_key.removesuffix('_alternate'))
             observed=stamp(market.get('last_update'))
             if not stat or not observed or not 0<=(current-observed).total_seconds()<=1800:continue
             for outcome in market.get('outcomes') or []:
+                if not isinstance(outcome,dict):continue
                 side={'Over':'MORE','Under':'LESS'}.get(outcome.get('name'))
                 player=outcome.get('description');line=outcome.get('point')
                 try:
@@ -115,6 +118,63 @@ def decode(event, fetched, current):
     return list(grouped.values())
 
 
+COVERAGE_VERSION = 2
+
+
+def market_coverage(event, decoded, markets):
+    """Only a successful, structurally valid PrizePicks response proves absence.
+
+    Not supplied means absent from THIS provider snapshot, not proof that the
+    underlying PrizePicks app never offered that market.
+    """
+    books=event.get('bookmakers')
+    books=[b for b in books if isinstance(b,dict) and b.get('key')=='prizepicks'] if isinstance(books,list) else []
+    valid=len(books)==1 and isinstance(books[0].get('markets'),list)
+    raw=books[0]['markets'] if valid else []
+    valid=valid and all(isinstance(m,dict) and isinstance(m.get('key'),str) for m in raw)
+    counts={m:sum(c.get('Platform')=='prizepicks' and c.get('Market ID')=='theodds:'+m for c in decoded) for m in markets}
+    states={}
+    for key in markets:
+        matches=[m for m in raw if isinstance(m,dict) and m.get('key')==key]
+        if not valid:state='unverified_response'
+        elif not matches:state='not_supplied_at_capture'
+        elif len(matches)!=1 or not isinstance(matches[0].get('outcomes'),list):state='unusable_returned_market'
+        elif not matches[0]['outcomes']:state='no_outcomes_at_capture'
+        elif any(not isinstance(o,dict) for o in matches[0]['outcomes']):state='unusable_returned_market'
+        elif counts[key]>0:state='available'
+        else:state='unusable_returned_market'
+        states[key]=state
+    return counts,states
+
+
+def finalize_coverage(report):
+    coverage=report.get('game_coverage') or []
+    total=report.get('games_available',0)
+    resolved={'available','not_supplied_at_capture','no_outcomes_at_capture'}
+    requested=report.get('requested_markets') or []
+    report['coverage_version']=COVERAGE_VERSION
+    report['complete']=bool(total) and len(coverage)==total and len({g.get('event_id') for g in coverage})==total and all(
+        set(g.get('market_status') or {})==set(requested) and all(v in resolved for v in g['market_status'].values()) for g in coverage)
+    report['markets_skipped']=sum(v in ('not_supplied_at_capture','no_outcomes_at_capture') for g in coverage for v in (g.get('market_status') or {}).values())
+    report['markets_unresolved']=sum(v not in resolved for g in coverage for v in (g.get('market_status') or {}).values())
+    return report
+
+
+def reclassify_saved_coverage(store, report, profile, fingerprint, markets):
+    # Recheck raw SAVED responses: no paid refresh and no upgraded timestamps.
+    import copy
+    result=copy.deepcopy(report)
+    for game in result.get('game_coverage') or []:
+        cached=store.get('source','the_odds_api_game_v2:'+profile+fingerprint+':'+str(game.get('event_id'))) or {}
+        body=cached.get('event');captured=stamp(cached.get('fetched_at'))
+        if not captured or not isinstance(body,dict) or str(body.get('id'))!=str(game.get('event_id')):
+            game['market_status']={m:'unverified_response' for m in markets}
+            continue
+        rows=decode(body,cached['fetched_at'],captured)
+        game['market_counts'],game['market_status']=market_coverage(body,rows,markets)
+    return finalize_coverage(result)
+
+
 def download(store, api_key, current=None, get=None, markets=None):
     markets = tuple(markets or FANTASY_MARKETS)
     if not markets or any(m.removesuffix('_alternate') not in MARKETS for m in markets) or len(set(markets)) != len(markets):
@@ -136,7 +196,9 @@ def download(store, api_key, current=None, get=None, markets=None):
     if snapshot.get('captured') or snapshot.get('complete'):
         # The original quote timestamps remain unchanged. Reusing a saved
         # board must never make stale lines look freshly verified.
-        saved_report=dict(snapshot['report'],http_requests=0,games_requested=0,reused_snapshot=True)
+        saved_report=reclassify_saved_coverage(store,snapshot['report'],profile,fingerprint,markets)
+        saved_report.update(http_requests=0,games_requested=0,reused_snapshot=True)
+        store.put('source',snapshot_key,dict(snapshot,complete=saved_report['complete'],report=saved_report))
         store.put('source','the_odds_api_fallback_latest',saved_report)
         coverage=saved_report.get('game_coverage') or []
         store.put('board_download',day,{'day':day,'provider':'The Odds API','state':'saved snapshot',
@@ -217,14 +279,15 @@ def download(store, api_key, current=None, get=None, markets=None):
                 captured=current.isoformat();store.put('source',cache_key,{'fetched_at':captured,'event':body})
             decoded=decode(body,captured,stamp(captured) or current);rows.extend(decoded)
             fantasy_count=sum(c['Stat Key']=='fantasy_score' for c in decoded)
+            counts,states=market_coverage(body,decoded,markets)
             report['game_coverage'].append({'event_id':event['id'],'game':event['home_team']+' vs '+event['away_team'],'fantasy_lines':fantasy_count,
-                'market_counts':{m:sum(c['Market ID']=='theodds:'+m for c in decoded) for m in markets}})
+                'market_counts':counts,'market_status':states})
             covered+=bool(fantasy_count)
             progress()
-        report.update(state='received' if rows else 'no_current_lines',complete=bool(games) and covered==len(games) and (markets==FANTASY_MARKETS or all(
-            all(g['market_counts'].get(m,0)>0 for m in markets) for g in report['game_coverage'])))
+        report.update(state='received' if rows else 'no_current_lines')
     except ValueError as error:
         report.update(state='partial' if rows else 'paused',note=str(error))
+    finalize_coverage(report)
     progress('received' if report.get('complete') else 'partial')
     report['lines']=len(rows);report['fantasy_lines']=sum(c['Stat Key']=='fantasy_score' for c in rows)
     report['note']=report.get('note') or ('Saved Standard and provider-encoded Goblin/Demon markets. Full Fantasy coverage is not guaranteed. Unsupported alternate metadata is excluded. Payouts are unavailable; provider prices are not executable odds.')
