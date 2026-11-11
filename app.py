@@ -2809,6 +2809,7 @@ class Workflow:
             frame["day"] = pd.to_datetime(
                 frame["start"],
                 utc=True,
+                format="ISO8601",
             ).dt.strftime("%Y-%m-%d")
 
             days = sorted(frame["day"].unique())
