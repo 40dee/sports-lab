@@ -27,13 +27,15 @@ class BoardCompletionTests(unittest.TestCase):
         self.assertEqual(store.get('combo_suggestions','2026-11-09'),{'old':'preserve'})
         self.assertEqual(store.items('combo'),[])
 
-    def test_every_missing_forecast_and_unavailable_line_blocks(self):
+    def test_pending_blocks_but_unavailable_is_excluded(self):
         store=self.ready()
         first=next(iter(store.items('forecast')))[0]
         del store.records['forecast',first]
         self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
         store.put('calculation_status',first,{'Status':'Unavailable'})
-        self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
+        self.assertTrue(fixture.env['combo_board_ready'](store,fixture.REF)[0])
+        pool,_=fixture.env['combo_pool'](store,fixture.REF)
+        self.assertTrue(all(item['forecast_id']!=first for item in pool))
 
     def test_changed_board_and_empty_board_block(self):
         store=self.ready();board=store.get('board','board')
