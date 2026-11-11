@@ -125,3 +125,44 @@ class FallbackTests(TestCase):
         self.assertEqual(get.call_count,2)
         self.assertEqual(again,rows)
         self.assertEqual(report['http_requests'],0)
+
+    def test_partial_capture_is_reused_after_hours_without_paid_retry(self):
+        game=event();game['bookmakers']=[]
+        store=Store();get=Mock(side_effect=[response([game]),response(game)])
+        rows,report=f.download(store,'key',NOW,get)
+        self.assertFalse(report['complete'])
+        self.assertEqual(get.call_count,2)
+        later=NOW.replace(hour=1,minute=30)
+        rows,report=f.download(store,'key',later,get)
+        self.assertTrue(report['reused_snapshot'])
+        self.assertEqual(report['http_requests'],0)
+        self.assertEqual(get.call_count,2)
+        self.assertEqual(report['checked_at'],NOW.isoformat())
+
+    def test_reserved_capture_makes_no_provider_requests(self):
+        import hashlib
+        store=Store();key='key'
+        fingerprint=hashlib.sha256(key.encode()).hexdigest()[:20]
+        snapshot='the_odds_api_daily_v2:'+fingerprint+':2026-11-09'
+        store.put('daily_board_capture',snapshot,{})
+        get=Mock(side_effect=AssertionError('No network'))
+        rows,report=f.download(store,key,NOW,get)
+        self.assertEqual(report['state'],'capture_already_started')
+        get.assert_not_called()
+
+    def test_next_pacific_date_gets_its_own_capture_and_preserves_previous(self):
+        store=Store();game=event()
+        get=Mock(side_effect=[response([game]),response(game),response([])])
+        f.download(store,'key',NOW,get)
+        next_day=NOW.replace(day=11)
+        f.download(store,'key',next_day,get)
+        self.assertEqual(get.call_count,3)
+        captures=store.query("SELECT key FROM sports_records WHERE namespace='source' AND key LIKE 'the_odds_api_daily_v2:%'",fetch=True)
+        self.assertEqual(len(captures),2)
+
+    def test_daily_slate_allowance_does_not_bypass_monthly_limit(self):
+        store=Store()
+        r=f.reserve(store,'key',NOW,500,cost=120,daily_allowance=120)
+        self.assertEqual(r['reserved_today'],120)
+        with self.assertRaises(ValueError):f.reserve(store,'key',NOW,380,cost=12,daily_allowance=120)
+        with self.assertRaises(ValueError):f.reserve(Store(),'other',NOW,5,cost=12,daily_allowance=180)

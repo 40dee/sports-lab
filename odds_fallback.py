@@ -2,6 +2,7 @@
 import calendar
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import math
 from zoneinfo import ZoneInfo
 import requests
@@ -44,7 +45,7 @@ def primary_exhausted(account, budget):
     return bool(account and budget and int(budget.get('remaining', -1)) == 0)
 
 
-def reserve(store, key, current, remaining_hint, cost=COST):
+def reserve(store, key, current, remaining_hint, cost=COST, daily_allowance=None):
     fingerprint=hashlib.sha256(key.encode()).hexdigest()[:20]
     month=current.strftime('%Y-%m')+':the_odds_api:'+fingerprint
     day=current.astimezone(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d')+':the_odds_api:'+fingerprint
@@ -58,7 +59,7 @@ def reserve(store, key, current, remaining_hint, cost=COST):
     monthly=int(store.get('request_budget',month,used) or used)
     today=int(store.get('request_budget',day,0) or 0)
     days=calendar.monthrange(current.year,current.month)[1]-current.day+1
-    daily_cap=min(24,max(0,(500-monthly+today)//max(1,days)))
+    daily_cap=min(24,max(0,(500-monthly+today)//max(1,days))) if daily_allowance is None else min(180,max(0,int(daily_allowance)))
     if monthly+cost>500 or today+cost>daily_cap:
         raise ValueError('Free fallback credit allowance reached; saved plays retained.')
     rows=store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET '
@@ -132,12 +133,28 @@ def download(store, api_key, current=None, get=None, markets=None):
     day=current.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()
     snapshot_key='the_odds_api_daily_v2:'+profile+fingerprint+':'+day
     snapshot=store.get('source',snapshot_key) or {}
-    if snapshot.get('complete'):
+    if snapshot.get('captured') or snapshot.get('complete'):
         # The original quote timestamps remain unchanged. Reusing a saved
         # board must never make stale lines look freshly verified.
         saved_report=dict(snapshot['report'],http_requests=0,games_requested=0,reused_snapshot=True)
         store.put('source','the_odds_api_fallback_latest',saved_report)
         return snapshot.get('rows') or [],saved_report
+    claimed=store.query(
+        'INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING RETURNING key',
+        ('daily_board_capture',snapshot_key,'{}',current.isoformat()),fetch=True)
+    if not claimed:
+        report.update(state='capture_already_started',reused_snapshot=True,
+            note='Daily download already started. Reusing saved lines; no provider request made.')
+        recovered=[]
+        prefix='the_odds_api_game_v2:'+profile+fingerprint+':%'
+        for (payload,) in store.query('SELECT payload FROM sports_records WHERE namespace=? AND key LIKE ?',
+                ('source',prefix),fetch=True):
+            cached=json.loads(payload);captured=stamp(cached.get('fetched_at'))
+            if captured and captured.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()==day:
+                recovered.extend(decode(cached.get('event') or {},cached['fetched_at'],captured))
+        report.update(lines=len(recovered),fantasy_lines=sum(c['Stat Key']=='fantasy_score' for c in recovered))
+        store.put('source','the_odds_api_fallback_latest',report)
+        return recovered,report
     status=store.get('source','the_odds_api_quota:'+fingerprint) or {}
     probe=store.get('source','the_odds_api_probe_latest') or {}
     remaining=status.get('credits_remaining',probe.get('credits_remaining',500))
@@ -156,10 +173,10 @@ def download(store, api_key, current=None, get=None, markets=None):
     rows=[]
     try:
         # Event metadata costs no credits. Only this Pacific date is accepted.
-        schedule_key='the_odds_api_schedule:'+fingerprint
+        schedule_key='the_odds_api_schedule:'+fingerprint+':'+day
         cached=store.get('source',schedule_key) or {}
         fetched=stamp(cached.get('checked_at'))
-        if fetched and 0<=(current-fetched).total_seconds()<1800:events=cached.get('events') or []
+        if fetched and fetched.astimezone(ZoneInfo('America/Los_Angeles')).date()==current.astimezone(ZoneInfo('America/Los_Angeles')).date():events=cached.get('events') or []
         else:
             events=request('/events',{'dateFormat':'iso'})
             if not isinstance(events,list):raise ValueError('Fallback schedule was not a game list.')
@@ -174,17 +191,17 @@ def download(store, api_key, current=None, get=None, markets=None):
         for event in games:
             cache_key='the_odds_api_game_v2:'+profile+fingerprint+':'+event['id']
             cached=store.get('source',cache_key) or {};fetched=stamp(cached.get('fetched_at'))
-            if fetched and 0<=(current-fetched).total_seconds()<1800:
+            if fetched and fetched.astimezone(ZoneInfo('America/Los_Angeles')).date()==day:
                 body=cached['event'];captured=cached['fetched_at']
             else:
-                report['budget']=reserve(store,api_key,current,remaining,cost=len(markets))
+                report['budget']=reserve(store,api_key,current,remaining,cost=len(markets),daily_allowance=min(180,len(games)*len(markets)))
                 body=request('/events/'+event['id']+'/odds',{'bookmakers':'prizepicks,draftkings',
                     'regions':'us_dfs','markets':','.join(markets),'oddsFormat':'american','dateFormat':'iso'})
                 report['games_requested']+=1
                 if not isinstance(body,dict) or body.get('id')!=event['id'] or {body.get('home_team'),body.get('away_team')}!={event['home_team'],event['away_team']}:
                     raise ValueError('Fallback game identity mismatch; response rejected.')
                 captured=current.isoformat();store.put('source',cache_key,{'fetched_at':captured,'event':body})
-            decoded=decode(body,captured,current);rows.extend(decoded)
+            decoded=decode(body,captured,stamp(captured) or current);rows.extend(decoded)
             fantasy_count=sum(c['Stat Key']=='fantasy_score' for c in decoded)
             report['game_coverage'].append({'event_id':event['id'],'game':event['home_team']+' vs '+event['away_team'],'fantasy_lines':fantasy_count,
                 'market_counts':{m:sum(c['Market ID']=='theodds:'+m for c in decoded) for m in markets}})
@@ -196,7 +213,8 @@ def download(store, api_key, current=None, get=None, markets=None):
     report['lines']=len(rows);report['fantasy_lines']=sum(c['Stat Key']=='fantasy_score' for c in rows)
     report['note']=report.get('note') or ('Saved Standard and provider-encoded Goblin/Demon markets. Full Fantasy coverage is not guaranteed. Unsupported alternate metadata is excluded. Payouts are unavailable; provider prices are not executable odds.')
     store.put('source','the_odds_api_fallback_latest',report)
-    if report['complete']:
-        store.put('source',snapshot_key,{'complete':True,'rows':rows,'report':dict(report)})
+    report['captured_at']=current.isoformat()
+    report['cache_policy']='One capture per Pacific slate date; no automatic paid refresh, including incomplete boards.'
+    store.put('source',snapshot_key,{'captured':True,'complete':report['complete'],'rows':rows,'report':dict(report)})
     return rows,report
 

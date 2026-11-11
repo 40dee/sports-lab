@@ -9068,7 +9068,10 @@ def run_quota_fallback(wf, budget_seconds=1200):
         board.setdefault('v4_summary',[]);board.setdefault('v4_errors',[])
         board['v4_scan_at']=now();wf.store.put('board','board',board)
     ledger=wf.store.get('automation',day) or {}
-    board,feed_errors=import_daily_prizepicks_board(wf,board,ledger,day)
+    # The fallback capture is the daily line source. Do not trigger a second paid provider scan.
+    feed_errors=[]
+    ledger['feed_partial']=not status.get('complete',False)
+    ledger['fantasy_partial']=not status.get('complete',False)
     current_rows=preparation_rows(board.get('v4_rows',[]))
     if current_rows:
         health_before=wf.store.get('health',day) or {}
