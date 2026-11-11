@@ -3,6 +3,22 @@ import unittest
 from streamlit.testing.v1 import AppTest
 
 class NavigationTests(unittest.TestCase):
+    def test_partial_import_holds_all_three_pick_views(self):
+        import pandas as pd
+        app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
+        day=pd.Timestamp.now(tz='America/Los_Angeles').date().isoformat()
+        stamp=pd.Timestamp.now(tz='UTC').isoformat()
+        app.session_state['_sports_lab_offline_records_v1']={
+            ('board_run',day):{'stage':'preparing','import_complete':False,'started_at':stamp},
+            ('board_download',day):{'games_total':10,'games_done':4,'games_with_lines':4,'lines':100,'state':'partial'},
+            ('preparation','last'):{'run_at':stamp,'total':100,'ready':25,'pending':70,'unavailable':5}}
+        for page in ('Plays','Fantasy','Combos'):
+            app.session_state['sports_lab_page_buttons']=page
+            app.run()
+            self.assertFalse(app.exception,list(app.exception))
+            self.assertTrue(any('picks are waiting for the complete board' in x.value for x in app.info))
+            self.assertFalse(any('combo_option_' in str(x) for x in app.markdown))
+
     def test_all_pages_render_without_provider_credentials(self):
         app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
         self.assertFalse(app.exception,list(app.exception))
@@ -33,6 +49,7 @@ class NavigationTests(unittest.TestCase):
                 'injuries_available':True,'blocked':False,'statuses':[]}
         day=fixtures.env['slate_day'](current)
         store.put('board','board',board)
+        store.put('board_run',day,{'stage':'finished','import_complete':True,'board_scan_at':board.get('v4_scan_at')})
         store.put('health',day,{'players':health,'checked_at':current.isoformat(),
             'roster_matched':3,'injury_checked':3,'blocked':0})
         app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
@@ -70,6 +87,7 @@ class NavigationTests(unittest.TestCase):
             frozen.update(id=key,card=dict(card),created_at=(current-pd.Timedelta(hours=1)).isoformat())
             store.put('forecast',key,frozen)
         store.put('board','board',board)
+        store.put('board_run',fixtures.env['slate_day'](current),{'stage':'finished','import_complete':True,'board_scan_at':board.get('v4_scan_at')})
         app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
         app.session_state['_sports_lab_offline_records_v1']=store.records
         app.session_state['v4_rows']=board['v4_rows']
@@ -108,3 +126,4 @@ class NavigationTests(unittest.TestCase):
         self.assertFalse(app.exception,list(app.exception))
         self.assertTrue(any(b.label=='Import and calculate these lines' for b in app.button))
         self.assertTrue(any(b.label=='Check account usage — no quota cost' for b in app.button))
+
