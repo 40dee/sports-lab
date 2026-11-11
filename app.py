@@ -318,6 +318,7 @@ class Store:
             "audit_error",
             "health",
             "coverage",
+            "board_run", "board_run_history",
             "input_health",
             "request_budget",
             "odds_cache", "odds_lock", "odds_fixture", "odds_refresh", "odds_status",
@@ -997,6 +998,8 @@ def combo_directional_grade(combo, grades, reference=None):
 
 
 def combo_live_check(store, combo, reference=None):
+    allowed,note=combo_board_ready(store,reference)
+    if not allowed:return False,note
     current = combo_clock(reference)
     board = store.get('board','board') or {}
     cards = {identity(c):c for c in board.get('v4_rows') or []}
@@ -1073,9 +1076,83 @@ def combo_learning(store, reference=None):
     return reports
 
 
+def board_run_stage(store, stage, import_complete=None):
+    """Persist stage clocks independently of the worker's final summary."""
+    day=slate_day()
+    record=store.get('board_run',day) or {}
+    stamp=now()
+    if stage=='importing':
+        record={'day':day,'started_at':stamp,'stage':stage,'import_complete':False}
+    else:
+        record['stage']=stage
+        if stage=='preparing':record['import_finished_at']=stamp
+        if stage=='finished':record['finished_at']=stamp
+    if import_complete is not None:record['import_complete']=bool(import_complete)
+    board=store.get('board','board') or {}
+    record['board_scan_at']=board.get('v4_scan_at')
+    store.put('board_run',day,record)
+    if record.get('started_at'):
+        store.put('board_run_history',day+':'+record['started_at'],record)
+    return record
+
+
+def combo_board_ready(store, reference=None):
+    """Fail closed for partial imports, active workers and unfinished forecasts."""
+    current=combo_clock(reference)
+    run=store.get('board_run',slate_day(current)) or {}
+    if run.get('stage')!='finished':
+        return False,'Waiting for the board worker to finish importing and preparing projections.'
+    if not run.get('import_complete'):
+        return False,'Board import is incomplete. Combos are held until coverage is verified.'
+    board=store.get('board','board') or {}
+    if board.get('v4_scan_at')!=run.get('board_scan_at'):
+        return False,'The board changed after its completion check. Waiting for verification.'
+    from types import SimpleNamespace
+    coverage=board_coverage(SimpleNamespace(store=store),board,reference=current)
+    if not coverage.get('imported'):
+        return False,'Waiting for a nonempty verified board.'
+    if coverage.get('ready')!=coverage.get('imported') or any(coverage.get(k,0) for k in
+            ('upcoming_pending','upcoming_unavailable','missed_start')):
+        return False,'Waiting for all imported lines to have frozen pregame projections ('+str(coverage.get('ready',0))+'/'+str(coverage['imported'])+' ready).'
+    return True,'Board import and projections complete.'
+
+
+def render_board_run_status(store, st):
+    record=store.get('board_run',slate_day()) or {}
+    if not record:
+        st.caption('Board timing: awaiting the next updated worker run.')
+        return
+    def elapsed(start,end):
+        first,last=utc_timestamp(start),utc_timestamp(end)
+        if pd.isna(first) or pd.isna(last):return '—'
+        seconds=max(0,int((last-first).total_seconds()))
+        return str(seconds//60)+'m '+str(seconds%60)+'s'
+    end=record.get('finished_at') or now()
+    stage=record.get('stage','unknown')
+    st.caption('Board: '+stage+' · Total '+elapsed(record.get('started_at'),end)+
+        ' · Import '+elapsed(record.get('started_at'),record.get('import_finished_at') or end)+
+        ' · Projections '+(elapsed(record.get('import_finished_at'),end) if record.get('import_finished_at') else 'waiting'))
+    with st.expander('Board timing and completion'):
+        for label,key in (('Started','started_at'),('Import finished','import_finished_at'),('Board prepared','finished_at')):
+            value=utc_timestamp(record.get(key))
+            st.write(label+': '+('pending' if pd.isna(value) else value.tz_convert(SLATE_TIMEZONE).strftime('%b %d, %I:%M:%S %p Pacific')))
+        ready,note=combo_board_ready(store)
+        st.success(note) if ready else st.info(note)
+        history=[v for _,v in store.items('board_run_history') if v.get('day')==record.get('day') and v.get('started_at')!=record.get('started_at')]
+        for prior in sorted(history,key=lambda v:v.get('started_at',''),reverse=True)[:5]:
+            st.caption('Earlier pass · '+str(prior.get('started_at'))+' UTC · '+str(prior.get('stage'))+
+                ' · Import '+elapsed(prior.get('started_at'),prior.get('import_finished_at'))+
+                ' · Total '+elapsed(prior.get('started_at'),prior.get('finished_at')))
+        st.caption('Times measure this worker pass, including saved-cache reuse. A finished worker can still have incomplete coverage. If the worker stops unexpectedly, its last stage remains visible; no finish time is invented.')
+
+
 def update_combos(store, generate=False, reference=None):
     current=combo_clock(reference)
     generated=0
+    held_reason=None
+    if generate:
+        allowed,held_reason=combo_board_ready(store,current)
+        generate=allowed
     if generate:
         for tier_mode in ('mixed','standard','goblin','demon'):
             pool, excluded=combo_pool(store,current,tier_mode=tier_mode)
@@ -1103,7 +1180,7 @@ def update_combos(store, generate=False, reference=None):
         if {k:v for k,v in grade.items() if k!='graded_at'} != {k:v for k,v in prior.get(key,{}).items() if k!='graded_at'}:
             store.put('combo_grade',key,grade)
     reviews=combo_learning(store,current)
-    return {'generated':generated,'reviewed_at':current.isoformat(),'learning':reviews}
+    return {'generated':generated,'reviewed_at':current.isoformat(),'learning':reviews,'held_reason':held_reason if not generate else None}
 
 
 def combo_results_rows(store):
@@ -1153,6 +1230,11 @@ def render_combos(wf, st):
     st.caption('PrizePicks · 2–6 different players · Saved paper suggestions, not submitted entries')
     mode=st.segmented_control('Combo view',['Suggestions','Results & learning','Played entries'],default='Suggestions',key='combo_mode') or 'Suggestions'
     if mode=='Suggestions':
+        allowed,note=combo_board_ready(wf.store)
+        if not allowed:
+            st.info(note)
+            st.caption('Saved combo history is preserved. New suggestions wait for the complete board; no extra odds requests are made.')
+            return
         size=st.segmented_control('Players',[2,3,4,5,6],default=2,key='combo_size') or 2
         tier_choice=st.segmented_control('Line types',['Standard only','Goblin only','Demon only','Mixed tiers'],default='Standard only',key='combo_tier_mode') or 'Standard only'
         tier_mode={'Standard only':'standard','Goblin only':'goblin','Demon only':'demon','Mixed tiers':'mixed'}[tier_choice]
@@ -1210,6 +1292,10 @@ def render_combos(wf, st):
         for number,key in enumerate(keys,1):
             combo=wf.store.get('combo',key)
             if not combo:continue
+            allowed_tiers={'standard':{'standard','regular'},'goblin':{'goblin'},'demon':{'demon'}}
+            if tier_mode!='mixed' and any(str(leg['card'].get('Line Type','')).lower() not in allowed_tiers[tier_mode] for leg in combo['legs']):
+                st.warning('Saved suggestion has a different line type and is hidden. Rebuild from the completed board.')
+                continue
             valid,note=combo_live_check(wf.store,combo)
             with st.container(border=True,key='combo_option_'+key):
                 st.markdown(f'**Option {number} · {size} players**')
@@ -8833,14 +8919,15 @@ def refresh_board_health(wf, board):
     return report
 
 
-def board_coverage(wf, board):
+def board_coverage(wf, board, reference=None):
     """Count missed deadlines separately so a shrinking slate cannot look complete."""
+    current=combo_clock(reference)
     index = forecast_index(wf.store.items('forecast'))
     statuses = dict(wf.store.items('calculation_status'))
     cards = {}
     for card in board.get('v4_rows') or []:
         start = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
-        if card.get('Decoded') and market_columns(card) and pd.notna(start) and slate_day(start) == slate_day():
+        if card.get('Decoded') and market_columns(card) and pd.notna(start) and slate_day(start) == slate_day(current):
             cards.setdefault(market_signature(card), card)
     report = {'checked_at': now(), 'imported': len(cards), 'ready': 0,
               'upcoming_pending': 0, 'upcoming_unavailable': 0, 'missed_start': 0}
@@ -8850,13 +8937,13 @@ def board_coverage(wf, board):
         start = pd.to_datetime(card['Start (UTC)'], utc=True)
         if frozen and pd.notna(created) and created < start:
             report['ready'] += 1
-        elif not today_pregame(card['Start (UTC)']):
+        elif not today_pregame(card['Start (UTC)'],current):
             report['missed_start'] += 1
         elif (statuses.get(identity(card)) or {}).get('Status') == 'Unavailable':
             report['upcoming_unavailable'] += 1
         else:
             report['upcoming_pending'] += 1
-    wf.store.put('coverage', slate_day(), report)
+    wf.store.put('coverage', slate_day(current), report)
     return report
 
 
@@ -8935,6 +9022,7 @@ def import_daily_prizepicks_board(wf, board, ledger, day):
 def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     if not wf.store.remote:
         raise RuntimeError('Permanent database required for automatic preparation')
+    board_run_stage(wf.store,'importing')
     day = slate_day()
     ledger = wf.store.get('automation', day) or {'odds_requests': 0, 'feed_requests': 0}
     ledger['feed_cap'] = feed_request_cap()
@@ -9000,6 +9088,9 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     if setting('PRIZEPICKS_API_KEY',''):
         board,feed_errors=import_daily_prizepicks_board(wf,board,ledger,day)
         errors.extend(feed_errors)
+    import_complete=(not ledger.get('feed_partial',True) if setting('PRIZEPICKS_API_KEY','') else
+        bool(ledger.get('games_found')) and ledger.get('games_imported')==ledger.get('games_found') and not errors)
+    board_run_stage(wf.store,'preparing',import_complete)
     # Both checks operate on saved lines and free ESPN inputs, never new odds.
     last_check = wf.store.get('input_health', 'latest') or {}
     checked_at = pd.to_datetime(last_check.get('checked_at'), utc=True, errors='coerce')
@@ -9018,6 +9109,7 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     ledger['targeted_checks']=targeted_checks
     ledger['odds_requests']=wf.store.get('request_budget',day+':oddspapi',ledger.get('odds_requests',0))
     report = prepare_saved_board(wf, board, budget_seconds=budget_seconds, max_picks=10000)
+    board_run_stage(wf.store,'finished')
     ledger['combos'] = update_combos(wf.store, generate=True)
     ledger['coverage'] = board_coverage(wf, board)
     ledger.update(last_run=now(), errors=errors, preparation=report)
@@ -9039,6 +9131,7 @@ def primary_odds_quota_exhausted(store):
 
 def run_quota_fallback(wf, budget_seconds=1200):
     from odds_fallback import download, BOARD_MARKETS
+    board_run_stage(wf.store,'importing')
     day=slate_day();board=wf.store.get('board','board') or {}
     saved_status=wf.store.get('source','the_odds_api_fallback_latest') or {}
     checked=utc_timestamp(saved_status.get('checked_at'))
@@ -9072,6 +9165,7 @@ def run_quota_fallback(wf, budget_seconds=1200):
     feed_errors=[]
     ledger['feed_partial']=not status.get('complete',False)
     ledger['fantasy_partial']=not status.get('complete',False)
+    board_run_stage(wf.store,'preparing',status.get('complete',False))
     current_rows=preparation_rows(board.get('v4_rows',[]))
     if current_rows:
         health_before=wf.store.get('health',day) or {}
@@ -9079,8 +9173,10 @@ def run_quota_fallback(wf, budget_seconds=1200):
         health['players']={**(health_before.get('players') or {}),**health['players']}
         wf.store.put('health',day,health)
         preparation=prepare_saved_board(wf,{'v4_rows':current_rows},budget_seconds=budget_seconds,max_picks=10000)
+        board_run_stage(wf.store,'finished')
         combos=update_combos(wf.store,generate=True)
     else:
+        board_run_stage(wf.store,'finished')
         preparation={'ready':0,'total':0,'attempted':0,'pending':0,'state':'paused'}
         combos={'generated':0}
     ledger.update(last_run=now(),active_odds_provider='The Odds API',fallback=status,
@@ -10101,6 +10197,7 @@ def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
     st.caption("Model picks · Research · Results")
     app_page = (st.segmented_control("Navigation", ["Plays", "Fantasy", "Combos", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
+    render_board_run_status(workflow.store,st)
     st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
         st.session_state.pop("selected_prop_card", None)
@@ -10475,4 +10572,5 @@ def _resume_grading_fragment():
     st.rerun()
 
 _resume_grading_fragment()
+
 
