@@ -35,7 +35,7 @@ class RefreshTests(unittest.TestCase):
   self.assertFalse(self.get.called);self.assertFalse(self.reserve.called)
  def test_overpriced_page_does_not_reserve_or_download(self):
   self.install(self.response(body={'quoted_credits':6}))
-  with self.assertRaisesRegex(ValueError,'one-credit'):env['prizepicks_projection_page'](self.store,{'limit':200})
+  with self.assertRaisesRegex(ValueError,'compact-page credit ceiling'):env['prizepicks_projection_page'](self.store,{'limit':200})
   self.assertEqual(self.get.call_count,1);self.assertFalse(self.reserve.called)
  def test_compact_quote_precedes_download_and_updates_remaining_credits(self):
   self.install(self.response(body={'quoted_credits':1}),self.response(body={'meta':{'mode':'live'},'data':[]},headers={'X-Credits-Remaining':'1','X-Credits-Cost':'1'}))
@@ -44,6 +44,18 @@ class RefreshTests(unittest.TestCase):
   self.assertTrue(self.get.call_args_list[0].args[0].endswith('/credit-costs'))
   self.assertTrue(self.get.call_args_list[1].args[0].endswith('/projections'))
   self.assertEqual(self.store.get('source','pp_health')['remaining'],'1')
+ def test_full_compact_page_quotes_ten_credits_before_download(self):
+  health=self.store.get('source','pp_health');health['remaining']='20';self.store.put('source','pp_health',health)
+  self.install(self.response(body={'quoted_credits':10}),self.response(body={'meta':{'mode':'live'},'data':[]},headers={'X-Credits-Remaining':'10','X-Credits-Cost':'10'}))
+  env['prizepicks_projection_page'](self.store,{'view':'compact','limit':1000})
+  self.assertEqual(self.get.call_count,2);self.reserve.assert_called_once()
+  self.assertEqual(self.get.call_args_list[1].kwargs['params']['limit'],1000)
+  self.assertEqual(self.store.get('source','pp_health')['remaining'],'10')
+ def test_full_page_stops_when_remaining_balance_cannot_cover_quote(self):
+  self.install(self.response(body={'quoted_credits':10}))
+  with self.assertRaisesRegex(ValueError,'Insufficient'):
+   env['prizepicks_projection_page'](self.store,{'view':'compact','limit':1000})
+  self.assertEqual(self.get.call_count,1);self.reserve.assert_not_called()
  def test_failed_page_sets_cooldown_before_another_attempt(self):
   self.install(self.response(body={'quoted_credits':1}),self.response(status=429))
   with self.assertRaisesRegex(ValueError,'429'):env['prizepicks_projection_page'](self.store,{'view':'compact','limit':100})
