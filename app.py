@@ -1174,8 +1174,8 @@ def render_board_run_status(store, st):
     if download.get('current_game'):st.caption('Current game: '+str(download['current_game']))
     for missing in download.get('missing_markets') or []:
         st.caption('Unresolved provider markets: '+missing)
-    for skipped in download.get('skipped_markets') or []:
-        st.caption('Skipped — not supplied by the provider at capture: '+skipped)
+    if download.get('skipped_markets'):
+        st.caption('Unavailable provider markets skipped; details are in Board timing and completion.')
     if download.get('pages') is not None:
         st.caption(f"PrizePicks feed: {download['pages']} saved pages · {download.get('feed_rows',0)} rows · "+('pagination complete' if download.get('pagination_complete') else 'pagination incomplete'))
     preparation=store.get('preparation','last') or {}
@@ -1188,6 +1188,8 @@ def render_board_run_status(store, st):
         if preparation.get('current'):st.caption('Calculating: '+str(preparation['current']))
     else:st.caption('Projections: waiting for this pass to finish importing and checking inputs.')
     with st.expander('Board timing and completion'):
+        for skipped in download.get('skipped_markets') or []:
+            st.caption('Skipped — not supplied by the provider at capture: '+skipped)
         for label,key in (('Started','started_at'),('Import finished','import_finished_at'),('Board prepared','finished_at')):
             value=utc_timestamp(record.get(key))
             st.write(label+': '+('pending' if pd.isna(value) else value.tz_convert(SLATE_TIMEZONE).strftime('%b %d, %I:%M:%S %p Pacific')))
@@ -9237,12 +9239,12 @@ def primary_odds_quota_exhausted(store):
 
 
 def run_quota_fallback(wf, budget_seconds=1200):
-    from odds_fallback import download, BOARD_MARKETS
+    from odds_fallback import download, BOARD_MARKETS, COVERAGE_VERSION, prune_unavailable_lines
     board_run_stage(wf.store,'importing')
     day=slate_day();board=wf.store.get('board','board') or {}
     saved_status=wf.store.get('source','the_odds_api_fallback_latest') or {}
     checked=utc_timestamp(saved_status.get('checked_at'))
-    if saved_status.get('complete') and saved_status.get('coverage_version')==2 and saved_status.get('requested_markets')==list(BOARD_MARKETS) and pd.notna(checked) and slate_day(checked)==day and board.get('v4_rows'):
+    if saved_status.get('complete') and saved_status.get('coverage_version')==COVERAGE_VERSION and saved_status.get('requested_markets')==list(BOARD_MARKETS) and pd.notna(checked) and slate_day(checked)==day and board.get('v4_rows'):
         rows=[];status=dict(saved_status,http_requests=0,games_requested=0,reused_snapshot=True)
     else:
         rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''),markets=BOARD_MARKETS)
@@ -9255,6 +9257,11 @@ def run_quota_fallback(wf, budget_seconds=1200):
         skipped_markets=[g.get('game','Unknown game')+': '+', '.join(m for m,state in (g.get('market_status') or {}).items() if state in ('not_supplied_at_capture','no_outcomes_at_capture'))
             for g in game_coverage if any(state in ('not_supplied_at_capture','no_outcomes_at_capture') for state in (g.get('market_status') or {}).values())])
     previous=board.get('v4_rows') or []
+    filtered=prune_unavailable_lines(previous,status)
+    if len(filtered)!=len(previous):
+        board['v4_rows']=filtered
+        wf.store.put('board','board',board)
+    previous=filtered
     for card in rows:
         teams={wf.e['engine_team_key'](n) for n in card['Game'].split(' vs ')}
         # Preserve the unique saved fixture identity for existing exact-market
