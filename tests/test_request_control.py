@@ -161,7 +161,7 @@ class FreshnessTests(unittest.TestCase):
        upcoming_nba=discovery,refresh_board_health=lambda *_:{},
        refresh_saved_game_lines=lambda wf,board,*_:(board,[]),
        prepare_saved_board=lambda *_args,**_kw:{},update_combos=lambda *_args,**_kw:{},
-       board_coverage=lambda *_:{},board_run_stage=lambda *_:{})
+       board_coverage=lambda *_:{},board_run_stage=lambda *_:{},board_download_progress=lambda *_,**kw:None)
    env['automatic_board_run'](SimpleNamespace(store=store),refresh=False)
    self.assertEqual(calls,['schedule'])
    self.assertIsNotNone(store.get('odds_fixture','f1'))
