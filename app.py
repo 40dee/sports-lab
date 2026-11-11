@@ -1142,10 +1142,12 @@ def combo_board_ready(store, reference=None):
     coverage=board_coverage(SimpleNamespace(store=store),board,reference=current)
     if not coverage.get('imported'):
         return False,'Waiting for a nonempty verified board.'
-    if coverage.get('ready')!=coverage.get('imported') or any(coverage.get(k,0) for k in
-            ('upcoming_pending','upcoming_unavailable','missed_start')):
+    # Attempted lines without a usable projection are excluded from picks;
+    # they must not hold the ready board indefinitely.
+    if not coverage.get('ready') or coverage.get('ready',0)+coverage.get('upcoming_unavailable',0)!=coverage.get('imported') or any(coverage.get(k,0) for k in
+            ('upcoming_pending','missed_start')):
         return False,'Waiting for all imported lines to have frozen pregame projections ('+str(coverage.get('ready',0))+'/'+str(coverage['imported'])+' ready).'
-    return True,'Board import and projections complete.'
+    return True,'Board import and projections complete; unavailable projections excluded.'
 
 
 def render_board_run_status(store, st):
@@ -3546,6 +3548,8 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
             key = identity(card)
             if saved_prediction(index, card):
                 continue
+            if (states.get(key) or {}).get('Status') == 'Unavailable':
+                continue
             retry = pd.to_datetime((states.get(key) or {}).get('retry_at'), utc=True, errors='coerce')
             if pd.notna(retry) and retry > pd.Timestamp.now(tz='UTC'):
                 continue
@@ -3602,7 +3606,7 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
     report['unavailable'] = sum(not saved_prediction(index, c) and
         (states.get(identity(c)) or {}).get('Status') == 'Unavailable' for c in rows)
     report['pending'] = len(rows) - report['ready'] - report['unavailable']
-    report['state'] = 'complete' if report['ready'] == len(rows) else 'retry pending' if not report['pending'] else 'queued'
+    report['state'] = 'complete' if not report['pending'] else 'queued'
     report['finished_at'] = now()
     report['elapsed_seconds']=round(max(0,clock()-began),2)
     report['newly_ready']=max(0,report['ready']-initial_ready)
@@ -10698,5 +10702,6 @@ def _resume_grading_fragment():
     st.rerun()
 
 _resume_grading_fragment()
+
 
 
