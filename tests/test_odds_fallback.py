@@ -51,7 +51,7 @@ class FallbackTests(TestCase):
         store=Store();game=event();get=Mock(side_effect=[response([game]),response(game,492)])
         rows,report=f.download(store,'key',NOW,get)
         self.assertEqual(len(rows),1);self.assertEqual(report['games_requested'],1)
-        self.assertEqual(set(get.call_args.kwargs['params']['markets'].split(',')),set(f.MARKETS))
+        self.assertEqual(set(get.call_args.kwargs['params']['markets'].split(',')),{'player_fantasy_points'})
         rows,report=f.download(store,'key',NOW,get)
         self.assertEqual(report['http_requests'],0);self.assertEqual(get.call_count,2)
         self.assertNotIn('apiKey',str(store.query('SELECT payload FROM sports_records',fetch=True)))
