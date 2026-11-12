@@ -56,7 +56,9 @@ class PreparationSpeedTests(unittest.TestCase):
         report=env['prepare_saved_board'](wf,{'v4_rows':cards},max_picks=10)
         self.assertEqual(wf.calculate.call_count,2)
         self.assertEqual(report['ready'],1)
-        self.assertEqual(report['unavailable'],3)
+        self.assertEqual(report['unavailable'],0)
+        self.assertEqual(report['excluded_unavailable'],3)
+        self.assertEqual(report['pending'],0)
         self.assertEqual(report['newly_ready'],1)
         self.assertIsNone(wf._preparation_event_index)
 
@@ -68,5 +70,32 @@ class PreparationSpeedTests(unittest.TestCase):
             player=Mock(),event_for=Mock(),calculate=Mock(side_effect=ValueError('Unknown market error')))
         report=env['prepare_saved_board'](wf,{'v4_rows':cards},max_picks=10)
         self.assertEqual(wf.calculate.call_count,3)
-        self.assertEqual(report['unavailable'],3)
+        self.assertEqual(report['unavailable'],0)
+        self.assertEqual(report['excluded_unavailable'],3)
+        self.assertEqual(report['pending'],0)
 
+
+    def test_previously_unavailable_line_is_removed_without_calculation_or_audit_deletion(self):
+        env=preparation_env();store=f.Memory()
+        card=f.populated(1).get('board','board')['v4_rows'][0]
+        board={'v4_rows':[card],'v4_scan_at':f.REF}
+        store.put('board','board',board)
+        key=env['identity'](card)
+        store.put('calculation_status',key,{'Status':'Unavailable','reason':'No usable history'})
+        historical={'card':dict(card,Player='Historical Player')}
+        store.put('forecast','historical',historical)
+        store.put('grade','historical',{'status':'WIN'})
+        env['saved_forecast_records']=lambda _: []
+        wf=SimpleNamespace(store=store,e={'fetch_player_history':Mock(),'current_season':lambda:'2026-27'},
+            player=Mock(),event_for=Mock(),calculate=Mock())
+        report=env['prepare_saved_board'](wf,board,max_picks=10)
+        wf.calculate.assert_not_called()
+        wf.e['fetch_player_history'].assert_not_called()
+        self.assertEqual(store.get('board','board')['v4_rows'],[])
+        self.assertEqual(store.get('board','board')['v4_scan_at'],f.REF)
+        self.assertEqual(report['total'],0)
+        self.assertEqual(report['excluded_unavailable'],1)
+        self.assertEqual(store.get('forecast','historical'),historical)
+        self.assertEqual(store.get('grade','historical'),{'status':'WIN'})
+        archive=store.get('source','unavailable_board_lines:'+env['slate_day']())
+        self.assertEqual(archive['items'][key]['card'],card)

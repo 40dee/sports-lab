@@ -3680,7 +3680,7 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
                 state = {'Status': 'Unavailable', **details,
                          'Player': card.get('Player'), 'Stat': card.get('Stat'),
                          'Platform': card.get('Platform'),
-                         'updated_at': now(), 'retry_at': (pd.Timestamp.now(tz='UTC') + pd.Timedelta(minutes=15)).isoformat()}
+                         'updated_at': now(), 'excluded_from_board': True}
             states[key] = state
             wf.store.put('calculation_status', key, state)
             report['attempted'] += 1
@@ -3697,6 +3697,28 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
             wf.availability = original_availability
         wf._preparation_existing = previous_snapshot
         wf._preparation_event_index=previous_event_index
+    # Failed calculations leave the active board instead of waiting for retries.
+    # Archive source rows and reasons; original forecasts and grades are untouched.
+    removed={identity(c):c for c in rows if not saved_prediction(index,c)
+             and (states.get(identity(c)) or {}).get('Status')=='Unavailable'}
+    report['excluded_unavailable']=len(removed)
+    if removed:
+        archive_key='unavailable_board_lines:'+slate_day()
+        archive=wf.store.get('source',archive_key) or {'day':slate_day(),'items':{}}
+        archived=dict(archive.get('items') or {})
+        for key,card in removed.items():
+            archived.setdefault(key,{'card':dict(card),'reason':(states.get(key) or {}).get('reason'),
+                                     'removed_at':now()})
+        archive.update(items=archived,updated_at=now())
+        wf.store.put('source',archive_key,archive)
+        active=wf.store.get('board','board')
+        if active:
+            active=dict(active)
+            active['v4_rows']=[c for c in active.get('v4_rows',[]) if identity(c) not in removed]
+            wf.store.put('board','board',active)
+        board['v4_rows']=[c for c in board.get('v4_rows',[]) if identity(c) not in removed]
+        rows=[c for c in rows if identity(c) not in removed]
+        report['total']=len(rows)
     report['ready'] = sum(bool(saved_prediction(index, c)) for c in rows)
     report['unavailable'] = sum(not saved_prediction(index, c) and
         (states.get(identity(c)) or {}).get('Status') == 'Unavailable' for c in rows)
@@ -3755,7 +3777,9 @@ def preparation_panel(wf, st, rows):
     st.progress(ready / len(current) if current else 0, text=f'{ready}/{len(current)} ready')
     last = wf.store.get('preparation', 'last') or {}
     if last.get('unavailable'):
-        st.caption(f"Last batch: {last['unavailable']} unavailable; retried after 15 minutes while preparation is active.")
+        st.caption(f"Last batch: {last['unavailable']} unavailable lines will be removed from the active board.")
+    if last.get('excluded_unavailable'):
+        st.caption(f"{last['excluded_unavailable']} unavailable lines removed from the active board; saved audit history is preserved.")
     with st.expander('Unavailable props — failure reasons'):
         failures = []
         statuses = dict(wf.store.items('calculation_status'))
@@ -9450,6 +9474,7 @@ def run_quota_fallback(wf, budget_seconds=1200):
         wf.store.put('health',day,health)
         ledger['player_health']={k:v for k,v in health.items() if k!='players'}
         preparation=prepare_saved_board(wf,{'v4_rows':current_rows},budget_seconds=budget_seconds,max_picks=10000)
+        board=wf.store.get('board','board') or board
         board_run_stage(wf.store,'finished')
         combos=update_combos(wf.store,generate=True)
     else:
