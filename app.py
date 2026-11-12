@@ -10563,7 +10563,7 @@ def render_app_pages():
         render_saved_workspace(controls=(app_page == "Settings"))
         if app_page == "Settings":
             st.subheader("NBA data and board setup")
-            st.caption("App build: navigation-4 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1 · shared-odds-1 · saved-board-review-1 · monthly-budget-1 · manual-lines-1 · compact-reads-1 · model-labels-2")
+            st.caption("App build: navigation-5 · compact-results-1 · detail-layout-2 · audit-status-3 · results-graph-1 · fantasy-view-1 · compact-fantasy-1 · side-rules-1 · combos-1 · shared-odds-1 · saved-board-review-1 · monthly-budget-1 · manual-lines-1 · compact-reads-1 · model-labels-2")
             st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
             st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
             from the_odds_api import render_probe as render_the_odds_api_probe
@@ -10707,6 +10707,10 @@ def render_app_pages():
         board_allowed,board_note=combo_board_ready(workflow.store) if app_page in ('Plays','Fantasy','Combos') else (True,'')
         if board_allowed and app_page in ('Plays','Fantasy','Combos'):
             st.session_state['_ui_verified_board_day']=slate_day()
+            shown_run=workflow.store.get('board_run',slate_day()) or {}
+            shown_preparation=workflow.store.get('preparation','last') or {}
+            st.session_state['_ui_displayed_board_revision']=(shown_run.get('board_scan_at'),
+                shown_preparation.get('ready'),shown_preparation.get('total'))
         if not board_allowed:
             st.info('Today’s picks are waiting for the complete board. '+board_note)
             st.caption('Saved plays and results remain available. Progress updates automatically; browsing does not download provider lines.')
@@ -10897,8 +10901,11 @@ def poll_saved_board_updates():
     active_progress=run.get('stage') in ('importing','preparing') and previous_progress is not None and progress!=previous_progress
     # An existing verified page stays still during background preparation.
     # First-time imports may update progress; publish a finished board once.
-    initial_progress=active_progress and st.session_state.get('_ui_verified_board_day')!=day
-    if (changed and run.get('stage')=='finished') or initial_progress:
+    page=st.session_state.get('sports_lab_page','Plays')
+    live_page=page in ('Plays','Fantasy','Combos')
+    initial_progress=active_progress and live_page and st.session_state.get('_ui_verified_board_day')!=day
+    publication=changed and run.get('stage')=='finished'
+    if publication or initial_progress:
         if isinstance(cache,dict):
             namespaces={'board','coverage','health','combo_suggestions','automation',
                         'board_run','board_download','preparation','grade','audit_error','grade_run'}
@@ -10907,7 +10914,9 @@ def poll_saved_board_updates():
                         ('compact_forecast','coverage_forecast','research_forecast')):
                     cache.pop(key,None)
         st.session_state['_board_live_stage']=(run.get('stage'),run.get('finished_at'))
-        st.rerun()
+        revision=(run.get('board_scan_at'),preparation.get('ready'),preparation.get('total'))
+        if initial_progress or (live_page and revision!=st.session_state.get('_ui_displayed_board_revision')):
+            st.rerun()
 
 
 render_app_pages()

@@ -47,12 +47,13 @@ class SmoothReadTests(unittest.TestCase):
   self.store._read_cache={};self.store.research_forecast_items()
   self.store.put('forecast','second',dict(self.frozen,id='second'))
   self.assertEqual(len(self.store.research_forecast_items()),2)
- def poll(self,stage,verified=True):
+ def poll(self,stage,verified=True,page='Plays',same_revision=False):
   run={'started_at':'start','stage':stage,'finished_at':'finish' if stage=='finished' else None}
   values={('board_run','day'):run,('preparation','last'):{'ready':3,'unavailable':0,'state':'running'}}
   store=SimpleNamespace(get=lambda ns,key:values.get((ns,key)),_read_cache={
    ('items','source',None):'keep',('items','paper_forecast',None):'keep',('get','board','board'):'replace'})
-  state={'_ui_polled_board_token':('start','preparing',None),'_ui_polled_progress':(2,0,'running')}
+  state={'sports_lab_page':page,'_ui_polled_board_token':('start','preparing',None),'_ui_polled_progress':(2,0,'running')}
+  if same_revision:state['_ui_displayed_board_revision']=(None,3,None)
   if verified:state['_ui_verified_board_day']='day'
   st=SimpleNamespace(session_state=state,rerun=Mock())
   node=copy.deepcopy(next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='poll_saved_board_updates'));node.decorator_list=[]
@@ -67,4 +68,9 @@ class SmoothReadTests(unittest.TestCase):
   self.assertNotIn(('get','board','board'),store._read_cache)
   self.assertEqual(store._read_cache[('items','source',None)],'keep')
   self.assertEqual(store._read_cache[('items','paper_forecast',None)],'keep')
+ def test_publication_does_not_interrupt_results_or_settings(self):
+  for page in ('Results','Settings','Saved'):
+   st,store=self.poll('finished',page=page);st.rerun.assert_not_called()
+ def test_unchanged_board_does_not_reload_live_page(self):
+  st,store=self.poll('finished',same_revision=True);st.rerun.assert_not_called()
 if __name__=='__main__':unittest.main()
