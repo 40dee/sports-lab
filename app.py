@@ -9123,6 +9123,21 @@ def board_coverage(wf, board, reference=None):
             report['missed_start'] += 1
         else:
             report['upcoming_pending'] += 1
+    if report['upcoming_pending'] and not getattr(wf.store,'ui_read_projection',False):
+        full_index=forecast_index(saved_forecast_records(wf.store))
+        differences=[]
+        for card in cards.values():
+            if saved_prediction(index,card):
+                continue
+            frozen=saved_prediction(full_index,card)
+            if frozen:
+                differences.append({'player':card.get('Player'),'platform':card.get('Platform'),
+                    'line':card.get('Line'),'board_start':card.get('Start (UTC)'),
+                    'frozen_start':(frozen.get('card') or {}).get('Start (UTC)'),
+                    'created_at':frozen.get('created_at'),'event_id':frozen.get('event_id'),
+                    'same_market':market_signature(card)==market_signature(frozen.get('card') or {})})
+        print('SPORTS_LAB_COVERAGE_DIAGNOSTIC',encode({'scoped_missing':report['upcoming_pending'],
+            'found_in_history':len(differences),'samples':differences[:8]}),flush=True)
     wf.store.put('coverage', slate_day(current), report)
     return report
 
