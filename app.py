@@ -8550,7 +8550,7 @@ def render_fantasy_plays(wf, st):
                 **({'review_note':'Saved forecast only: line, availability or offered direction needs verification.'}
                    if market_signature(item['card']) not in eligible_signatures else {})) for item in upcoming_all]
         if upcoming_all and not upcoming:
-            st.warning('All saved Fantasy forecasts are currently review-only. The cards below still show their original MORE/LESS projections; they are not verified live PrizePicks offers.')
+            st.warning('Showing saved pregame projections for review in All saved lines; these are not current slip recommendations. The cards retain their original MORE/LESS projections, not verified live PrizePicks offers.')
             reasons = {}
             for item in upcoming_all:
                 candidate = current_cards.get(market_signature(item['card']), item['card'])
