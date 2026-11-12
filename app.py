@@ -8550,7 +8550,21 @@ def render_fantasy_plays(wf, st):
                 **({'review_note':'Saved forecast only: line, availability or offered direction needs verification.'}
                    if market_signature(item['card']) not in eligible_signatures else {})) for item in upcoming_all]
         if upcoming_all and not upcoming:
-            st.warning('No selectable Fantasy picks passed current line checks. Showing saved pregame projections for review in All saved lines; these are not current slip recommendations.')
+            st.warning('All saved Fantasy forecasts are currently review-only. The cards below still show their original MORE/LESS projections; they are not verified live PrizePicks offers.')
+            reasons = {}
+            for item in upcoming_all:
+                candidate = current_cards.get(market_signature(item['card']), item['card'])
+                fresh, detail = line_freshness(candidate, refresh_checks=line_checks)
+                if not fresh:
+                    reason = detail
+                elif not pick_is_selectable(candidate, item['frozen'].get('result') or {}):
+                    reason = pick_side_note(candidate, item['frozen'].get('result') or {})
+                else:
+                    reason = 'Line identity or other selection verification needs review'
+                reasons[reason] = reasons.get(reason, 0) + 1
+            with st.expander('Why are these picks not selectable?'):
+                for reason, count in sorted(reasons.items(), key=lambda pair: -pair[1]):
+                    st.write(f'{count} lines: {reason}')
         if len(upcoming_all) > len(upcoming):
             st.caption(f'{len(upcoming_all)-len(upcoming)} saved Fantasy estimates are passes, stale, or have unverified offered sides; they are excluded from entry-ready suggestions. Saved projections remain available for review.')
         queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming_all))
