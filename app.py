@@ -3703,6 +3703,7 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
              and (states.get(identity(c)) or {}).get('Status')=='Unavailable'}
     report['excluded_unavailable']=len(removed)
     if removed:
+        failed_markets={market_signature(c) for c in removed.values()}
         archive_key='unavailable_board_lines:'+slate_day()
         archive=wf.store.get('source',archive_key) or {'day':slate_day(),'items':{}}
         archived=dict(archive.get('items') or {})
@@ -3714,10 +3715,16 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
         active=wf.store.get('board','board')
         if active:
             active=dict(active)
-            active['v4_rows']=[c for c in active.get('v4_rows',[]) if identity(c) not in removed]
+            for card in active.get('v4_rows',[]):
+                if market_signature(card) in failed_markets:
+                    key=identity(card)
+                    archived.setdefault(key,{'card':dict(card),'removed_at':now()})
+            archive['items']=archived
+            wf.store.put('source',archive_key,archive)
+            active['v4_rows']=[c for c in active.get('v4_rows',[]) if market_signature(c) not in failed_markets]
             wf.store.put('board','board',active)
-        board['v4_rows']=[c for c in board.get('v4_rows',[]) if identity(c) not in removed]
-        rows=[c for c in rows if identity(c) not in removed]
+        board['v4_rows']=[c for c in board.get('v4_rows',[]) if market_signature(c) not in failed_markets]
+        rows=[c for c in rows if market_signature(c) not in failed_markets]
         report['total']=len(rows)
     report['ready'] = sum(bool(saved_prediction(index, c)) for c in rows)
     report['unavailable'] = sum(not saved_prediction(index, c) and

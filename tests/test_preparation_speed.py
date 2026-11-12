@@ -78,7 +78,8 @@ class PreparationSpeedTests(unittest.TestCase):
     def test_previously_unavailable_line_is_removed_without_calculation_or_audit_deletion(self):
         env=preparation_env();store=f.Memory()
         card=f.populated(1).get('board','board')['v4_rows'][0]
-        board={'v4_rows':[card],'v4_scan_at':f.REF}
+        duplicate=dict(card,**{'Line Type':'Corrected label'})
+        board={'v4_rows':[card,duplicate],'v4_scan_at':f.REF}
         store.put('board','board',board)
         key=env['identity'](card)
         store.put('calculation_status',key,{'Status':'Unavailable','reason':'No usable history'})
@@ -86,6 +87,7 @@ class PreparationSpeedTests(unittest.TestCase):
         store.put('forecast','historical',historical)
         store.put('grade','historical',{'status':'WIN'})
         env['saved_forecast_records']=lambda _: []
+        env['preparation_rows']=lambda _: [card]
         wf=SimpleNamespace(store=store,e={'fetch_player_history':Mock(),'current_season':lambda:'2026-27'},
             player=Mock(),event_for=Mock(),calculate=Mock())
         report=env['prepare_saved_board'](wf,board,max_picks=10)
