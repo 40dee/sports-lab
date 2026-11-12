@@ -268,4 +268,9 @@ class CompactReadTests(unittest.TestCase):
   self.assertEqual(len(self.store.forecast_items()),3)
   self.store.put('forecast','new',{'id':'new','card':{'Start (UTC)':'2026-11-10T03:00:00Z'},'result':{}})
   self.assertEqual({key for key,_ in self.store.slate_forecast_items('2026-11-09')},{'new','today'})
+  metadata=dict(self.store.coverage_forecast_items('2026-11-09'))
+  self.assertEqual(set(metadata),{'new','today'})
+  self.assertNotIn('result',metadata['today'])
+  self.assertEqual(metadata['today']['card']['Start (UTC)'],'2026-11-10T02:00:00Z')
+  self.assertEqual(self.store.get('forecast','today')['result']['projection'],1.)
 
