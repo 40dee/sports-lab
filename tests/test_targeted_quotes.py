@@ -53,7 +53,15 @@ class TargetedQuoteTests(unittest.TestCase):
    self.assertEqual(len(rows),1)
    f.refresh_upcoming_quotes(self.store,self.key,[self.card],current,self.get)
   self.assertEqual(self.get.call_count,3)
-  self.assertEqual(len(self.store.query("SELECT key FROM sports_records WHERE namespace='quote_refresh'",fetch=True)),3)
+  self.assertEqual(len(self.store.query("SELECT key FROM sports_records WHERE namespace='quote_refresh' AND key NOT LIKE '%:latest'",fetch=True)),3)
+ def test_rechecks_before_thirty_minute_expiration(self):
+  self.card['Start (UTC)']=(NOW+timedelta(minutes=85)).isoformat()
+  self.body['commence_time']=self.card['Start (UTC)']
+  for offset in (0,10,20,30,40,50,60):
+   current=NOW+timedelta(minutes=offset)
+   self.body['bookmakers'][0]['markets'][0]['last_update']=current.isoformat()
+   f.refresh_upcoming_quotes(self.store,self.key,[self.card],current,self.get)
+  self.assertEqual(self.get.call_count,4)
  def test_fresh_early_event_does_not_block_later_games(self):
   cards=[dict(self.card,**{'Odds checked (UTC)':NOW.isoformat()})]
   bodies={}
@@ -96,3 +104,4 @@ class TargetedQuoteTests(unittest.TestCase):
   f.refresh_upcoming_quotes(self.store,self.key,[card],current,self.get)
   self.get.assert_not_called()
 if __name__=='__main__':unittest.main()
+

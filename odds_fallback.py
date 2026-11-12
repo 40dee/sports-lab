@@ -336,7 +336,7 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
         if (card.get('Line Source')!='The Odds API' or not event.isalnum() or not start
                 or start.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()!=day):continue
         lead=(start-current).total_seconds()
-        if lead<=300 or (not afternoon and lead>3600):continue
+        if lead<=300 or (not afternoon and lead>5400):continue
         groups.setdefault(event,[]).append(card)
     rows=[]
     attempted=0
@@ -347,12 +347,13 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
         afternoon_claim=prefix+'afternoon'
         captured=store.get('quote_refresh',afternoon_claim) or {}
         afternoon_due=afternoon and not captured
-        recent=stamp(captured.get('checked_at'))
-        if captured.get('state') in ('updated','reused_recent') and recent and 0<=(current-recent).total_seconds()<1500:
+        latest=store.get('quote_refresh',prefix+'latest') or captured
+        recent=stamp(latest.get('checked_at'))
+        if latest.get('state') in ('updated','reused_recent') and recent and 0<=(current-recent).total_seconds()<1200:
             continue
         # A recent verified quote can satisfy the daily afternoon sweep without
         # downloading it twice or changing its original source timestamp.
-        if all(t and 0<=(current-t).total_seconds()<1500 for t in observed):
+        if all(t and 0<=(current-t).total_seconds()<1200 for t in observed):
             if afternoon_due:
                 store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING',
                     ('quote_refresh',afternoon_claim,json.dumps({'state':'reused_recent','checked_at':min(observed).isoformat()}),current.isoformat()))
@@ -361,8 +362,10 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
         if afternoon_due:
             window='afternoon'
         else:
-            if afternoon and lead>3600:continue
-            window='final' if lead<=1800 else 'early'
+            if afternoon and lead>5400:continue
+            # Rolling checks prevent a once-only early/final claim from
+            # blocking another refresh after the quote expires.
+            window='near:'+str(int(current.timestamp())//1200)
         claim=prefix+window
         prior=store.get('quote_refresh',claim)
         if prior:continue
@@ -396,6 +399,7 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
             if any(v not in ('available','not_supplied_at_capture','no_outcomes_at_capture') for v in states.values()):
                 raise ValueError('Quote response incomplete or stale; existing lines retained.')
             rows.extend(decoded);report['events_updated'].append(event)
+            store.put('quote_refresh',prefix+'latest',{'state':'updated','checked_at':current.isoformat()})
             store.put('quote_refresh',claim,{'state':'updated','checked_at':current.isoformat(),
                 'lines':len(decoded),'market_status':states})
         except (ValueError,TypeError,KeyError,requests.RequestException):
@@ -404,3 +408,4 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
             store.put('quote_refresh',claim,{'state':'failed','checked_at':current.isoformat(),'note':note})
     store.put('source','the_odds_api_quote_refresh_latest',report)
     return rows,report
+

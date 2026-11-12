@@ -8686,7 +8686,7 @@ def render_fantasy_plays(wf, st):
             dict(item,card=current_cards.get(market_signature(item['card']),item['card']),
                 **({'review_note':'Saved forecast only: line, availability or offered direction needs verification.'}
                    if market_signature(item['card']) not in eligible_signatures else {})) for item in upcoming_all]
-        if upcoming_all and not upcoming:
+        if upcoming_all and not upcoming and fantasy_board_view=='All saved lines':
             st.warning('Showing saved pregame projections for review in All saved lines; these are not current slip recommendations. The cards retain their original MORE/LESS projections, not verified live PrizePicks offers.')
             reasons = {}
             for item in upcoming_all:
@@ -8706,7 +8706,9 @@ def render_fantasy_plays(wf, st):
             st.caption(f'{len(upcoming_all)-len(upcoming)} saved Fantasy estimates are passes, stale, or have unverified offered sides; they are excluded from entry-ready suggestions. Saved projections remain available for review.')
         queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming_all))
         if queued: st.caption(f'{queued} imported Fantasy lines are awaiting verified projections.')
-        if not visible:
+        if not visible and upcoming_all:
+            st.info('No current selectable Fantasy lines passed verification. Saved forecasts remain available for review; calculation completion does not confirm live offers.')
+        if not visible and not upcoming_all:
             payload=pp_cached_combined() or {}
             source_day=str(payload.get('fetched_at') or '')[:10]
             st.info('No current Fantasy Score lines have been imported for today. '+
@@ -9600,7 +9602,7 @@ if '--auto-board' in sys.argv:
         explicit_refresh='--refresh' in sys.argv
         scheduled='--scheduled' in sys.argv
         if scheduled:
-            # GitHub wakes every 30 minutes; bootstrap at 10:00 Pacific.
+            # GitHub wakes every 10 minutes; bootstrap at 10:00 Pacific.
             # Local-time comparison handles daylight saving automatically.
             current=pd.Timestamp.now(tz='UTC')
             today=slate_day(current)
@@ -10990,6 +10992,7 @@ def _resume_grading_fragment():
     st.rerun()
 
 _resume_grading_fragment()
+
 
 
 

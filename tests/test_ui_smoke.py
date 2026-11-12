@@ -102,6 +102,7 @@ class NavigationTests(unittest.TestCase):
         app.session_state['_sports_lab_offline_records_v1']=store.records
         app.session_state['v4_rows']=board['v4_rows']
         app.session_state['sports_lab_page_buttons']='Fantasy'
+        app.session_state['fantasy_board_scope_v2']='All saved lines'
         app.run()
         self.assertFalse(app.exception,list(app.exception))
         self.assertTrue(any('Showing saved pregame projections for review' in item.value for item in app.warning))
@@ -136,4 +137,5 @@ class NavigationTests(unittest.TestCase):
         self.assertFalse(app.exception,list(app.exception))
         self.assertTrue(any(b.label=='Import and calculate these lines' for b in app.button))
         self.assertTrue(any(b.label=='Check account usage — no quota cost' for b in app.button))
+
 

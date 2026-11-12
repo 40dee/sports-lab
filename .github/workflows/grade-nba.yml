@@ -14,8 +14,8 @@ on:
         type: boolean
         default: false
   schedule:
-    # Every 30 minutes; the app decides whether a game-window run is due.
-    - cron: '0,30 * * * *'
+    # Every 10 minutes; the app decides whether a game-window run is due.
+    - cron: '*/10 * * * *'
 permissions:
   contents: read
 concurrency:
@@ -55,3 +55,4 @@ jobs:
       - name: Grade completed games
         if: ${{ !cancelled() }}
         run: python app.py --maintenance
+
