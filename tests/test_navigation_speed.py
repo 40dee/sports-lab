@@ -2,7 +2,7 @@ import ast,unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
-TREE=ast.parse(Path(__file__).with_name('app.py').read_text())
+TREE=ast.parse(Path(__file__).resolve().parents[1].joinpath('app.py').read_text())
 class NavigationSpeedTests(unittest.TestCase):
  def env(self,ui=True,scan='scan1',checked='2026-11-12T02:50Z'):
   run={'stage':'finished','import_complete':True,'board_scan_at':'scan1','finished_at':'2026-11-12T02:40Z'}
