@@ -2000,7 +2000,7 @@ class Workflow:
             existing=prepared_index.get(signature)
         else:
             existing = next((frozen for _, frozen in
-                unique_forecasts(self.store.forecast_items())
+                unique_forecasts(saved_forecast_records(self.store))
                 if market_signature(frozen["card"], frozen.get("event_id")) == signature), None)
         if existing is not None:
             return existing
@@ -2139,7 +2139,7 @@ class Workflow:
         for card in rows:
             if card.get("Decoded"):
                 unique.setdefault(market_signature(card), card)
-        saved_index = forecast_index(self.store.forecast_items())
+        saved_index = forecast_index(saved_forecast_records(self.store))
 
         outcomes = []
 
@@ -2208,7 +2208,7 @@ class Workflow:
                   "due": 0, "checked_ids": []}
         skip_ids = set(skip_ids or [])
         settled = {key for key, _ in self.store.items("grade")}
-        records = [(key, frozen) for key, frozen in unique_forecasts(self.store.forecast_items())
+        records = [(key, frozen) for key, frozen in unique_forecasts(saved_forecast_records(self.store))
                    if key not in settled and key not in skip_ids]
         current = pd.Timestamp.now(tz="UTC")
         due = []
@@ -2577,7 +2577,7 @@ class Workflow:
         prices = dict(self.store.items("paper_forecast"))
         rows = []
 
-        for key, frozen in unique_forecasts(self.store.forecast_items()):
+        for key, frozen in unique_forecasts(saved_forecast_records(self.store)):
             result = frozen["result"]
             card = frozen["card"]
             grade = grades.get(key, {})
@@ -2744,7 +2744,7 @@ class Workflow:
         grades = dict(self.store.items("grade"))
         buckets = {}
 
-        for key, frozen in unique_forecasts(self.store.forecast_items()):
+        for key, frozen in unique_forecasts(saved_forecast_records(self.store)):
             card = frozen["card"]
             result = frozen["result"]
 
@@ -2902,7 +2902,7 @@ class Workflow:
         rows = []
         grades = dict(self.store.items("grade"))
 
-        for key, frozen in unique_forecasts(self.store.forecast_items(), across_platforms=across_platforms):
+        for key, frozen in unique_forecasts(saved_forecast_records(self.store), across_platforms=across_platforms):
             grade = grades.get(key)
             card = frozen["card"]
             result = frozen["result"]
@@ -2940,7 +2940,7 @@ class Workflow:
         grades = dict(self.store.items("grade"))
         reviews = self.store.items("model_review")
 
-        for key, frozen in unique_forecasts(self.store.forecast_items()):
+        for key, frozen in unique_forecasts(saved_forecast_records(self.store)):
             result = frozen["result"]
             card = frozen["card"]
             grade = grades.get(key)
