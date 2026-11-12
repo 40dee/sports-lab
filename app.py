@@ -2208,7 +2208,7 @@ class Workflow:
                   "due": 0, "checked_ids": []}
         skip_ids = set(skip_ids or [])
         settled = {key for key, _ in self.store.items("grade")}
-        records = [(key, frozen) for key, frozen in unique_forecasts(self.store.items("forecast"))
+        records = [(key, frozen) for key, frozen in unique_forecasts(self.store.forecast_items())
                    if key not in settled and key not in skip_ids]
         current = pd.Timestamp.now(tz="UTC")
         due = []
