@@ -3439,7 +3439,9 @@ def unique_forecasts(records, across_platforms=False):
 def forecast_index(records):
     # Retain original IDs, plus a narrowly bounded fixture lookup for providers
     # that reverse team order or report tipoff a few minutes apart.
-    lookup = dict(records)
+    class ForecastLookup(dict):
+        pass
+    lookup = ForecastLookup(records)
     earliest = {}
     candidates = {}
     for key, frozen in unique_forecasts(records):
@@ -3449,7 +3451,7 @@ def forecast_index(records):
             group=(('fixture_candidates',signature[0][1]),)+signature[1:]
             candidates.setdefault(group,[]).append(frozen)
     lookup.update(earliest)
-    lookup.update(candidates)
+    lookup.fixture_candidates=candidates
     return lookup
 
 
@@ -3466,7 +3468,7 @@ def saved_prediction(index, card):
     start=utc_timestamp(card.get('Start (UTC)'))
     group=(('fixture_candidates',signature[0][1]),)+signature[1:]
     matches=[]
-    for frozen in index.get(group,[]):
+    for frozen in getattr(index,'fixture_candidates',{}).get(group,[]):
         original=utc_timestamp((frozen.get('card') or {}).get('Start (UTC)'))
         created=utc_timestamp(frozen.get('created_at'))
         if (pd.notna(start) and pd.notna(original) and pd.notna(created)

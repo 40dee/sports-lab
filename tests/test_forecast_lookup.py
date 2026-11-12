@@ -14,6 +14,9 @@ class ForecastLookupTests(unittest.TestCase):
   self.f={'id':'original','card':dict(self.card),'event_id':'123','created_at':'2026-11-12T18:00Z','result':{'projection':14}}
  def find(self,card,records=None):
   return env['saved_prediction'](env['forecast_index'](records or [('original',self.f)]),card)
+ def test_public_mapping_values_remain_forecasts_for_board_consumers(self):
+  index=env['forecast_index']([('original',self.f)])
+  self.assertTrue(all(isinstance(f,dict) and 'card' in f for f in index.values()))
  def test_reversed_teams_and_ten_minute_provider_tipoff_reuse_original(self):
   c=dict(self.card,Game='Team B vs Team A',**{'Start (UTC)':'2026-11-13T00:10Z'})
   self.assertIs(self.find(c),self.f)
