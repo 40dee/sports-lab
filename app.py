@@ -1169,6 +1169,17 @@ def combo_board_ready(store, reference=None):
     current=combo_clock(reference)
     run=store.get('board_run',slate_day(current)) or {}
     if run.get('stage')!='finished':
+        # Browsing can keep the last verified, unchanged snapshot visible while
+        # a background pass checks it. Workers still wait for their own completion.
+        if getattr(store,'ui_read_projection',False):
+            board=store.get('board','board') or {}
+            previous=store.get('coverage',slate_day(current)) or {}
+            if (board.get('v4_scan_at') and previous.get('board_scan_at')==board.get('v4_scan_at')
+                    and pd.notna(utc_timestamp(previous.get('checked_at')))
+                    and previous.get('ready',0)>0
+                    and previous.get('ready',0)+previous.get('upcoming_unavailable',0)==previous.get('imported')
+                    and not any(previous.get(k,0) for k in ('upcoming_pending','missed_start'))):
+                return True,'Showing the verified saved board while background checks run.'
         return False,'Waiting for the board worker to finish importing and preparing projections.'
     if not run.get('import_complete'):
         return False,'Board import is incomplete. Combos are held until coverage is verified.'
