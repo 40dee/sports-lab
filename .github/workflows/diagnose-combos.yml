@@ -1,0 +1,46 @@
+name: Diagnose saved combo eligibility
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/diagnose-combos.yml
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Diagnose saved board without provider calls
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          source=Path('app.py').read_text()
+          nodes=[]
+          for node in ast.parse(source).body:
+              if isinstance(node,ast.If) and "'--rebuild-compact-fantasy'" in (ast.get_source_segment(source,node.test) or ''):break
+              nodes.append(node)
+          env={'__name__':'sports_lab_diagnostic','__file__':'app.py'}
+          exec(compile(ast.Module(body=nodes,type_ignores=[]),'app.py','exec'),env)
+          store=env['CompactViewStore'](env['workflow_store'])
+          current=env['combo_clock']()
+          board=store.get('board','board') or {}
+          print('BOARD_ROWS',len(board.get('v4_rows') or []))
+          print('READY_GATE',env['combo_board_ready'](store,current))
+          print('RUN_STATE',store.get('board_run',env['slate_day'](current)))
+          for mode in ('standard','goblin','demon','mixed'):
+              pool,excluded=env['combo_pool'](store,current,tier_mode=mode)
+              print('COMBO_POOL',mode,'eligible',len(pool),'excluded',env['encode'](excluded))
+          PY
