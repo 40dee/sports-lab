@@ -42,7 +42,19 @@ class LiveProgressTests(unittest.TestCase):
         self.assertEqual(st.progress.call_args_list[0].args,(1.,))
         self.assertEqual(st.progress.call_args_list[1].args,(.25,))
         self.assertIn('25/100',st.progress.call_args_list[1].kwargs['text'])
-        st.info.assert_called_once_with('held')
+        st.info.assert_called_once_with('Board worker is preparing.')
+
+    def test_finished_progress_does_not_load_forecasts_before_page_body(self):
+        env=dict(f.env)
+        node=next(n for n in f.tree.body if isinstance(n,ast.FunctionDef) and n.name=='render_board_run_status')
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
+        env['slate_day']=lambda:'2026-11-09'
+        env['combo_board_ready']=Mock(side_effect=AssertionError('Progress must not scan forecasts'))
+        store=f.Memory()
+        store.put('board_run','2026-11-09',{'stage':'finished','started_at':f.REF,'finished_at':f.REF})
+        st=Mock();st.expander.return_value.__enter__=Mock();st.expander.return_value.__exit__=Mock()
+        env['render_board_run_status'](store,st)
+        env['combo_board_ready'].assert_not_called()
 
     def test_fragment_reads_new_worker_records_and_invalidates_cached_lists(self):
         env=dict(f.env)
