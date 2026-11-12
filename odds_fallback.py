@@ -321,12 +321,14 @@ def download(store, api_key, current=None, get=None, markets=None):
 
 
 def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
-    """Prepare up to two hours ahead, then recheck closer to tipoff; bounded credits."""
+    """Refresh the whole saved slate from 14:30 Pacific, then verify near tipoff."""
     current=current or datetime.now(timezone.utc);get=get or requests.get
     report={'http_requests':0,'events_updated':[],'errors':[],'checked_at':current.isoformat()}
     if not api_key or not getattr(store,'remote',False):return [],report
     fingerprint=hashlib.sha256(api_key.encode()).hexdigest()[:20]
-    day=current.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()
+    local=current.astimezone(ZoneInfo('America/Los_Angeles'))
+    day=local.date().isoformat()
+    afternoon=(local.hour,local.minute)>=(14,30)
     groups={}
     for card in cards:
         event=str(card.get('Provider Event ID') or '')
@@ -334,23 +336,41 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
         if (card.get('Line Source')!='The Odds API' or not event.isalnum() or not start
                 or start.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()!=day):continue
         lead=(start-current).total_seconds()
-        if not 300<lead<=7200:continue
+        if lead<=300 or (not afternoon and lead>3600):continue
         groups.setdefault(event,[]).append(card)
     rows=[]
     attempted=0
     for event,group in sorted(groups.items(),key=lambda item:item[1][0]['Start (UTC)']):
         start=stamp(group[0]['Start (UTC)'])
         observed=[stamp(c.get('Odds checked (UTC)')) for c in group]
-        # No refresh if every quote is still within the near-tipoff limit.
-        if all(t and 0<=(current-t).total_seconds()<1500 for t in observed):continue
+        prefix=day+':'+fingerprint+':'+event+':'
+        afternoon_claim=prefix+'afternoon'
+        captured=store.get('quote_refresh',afternoon_claim) or {}
+        afternoon_due=afternoon and not captured
+        recent=stamp(captured.get('checked_at'))
+        if captured.get('state') in ('updated','reused_recent') and recent and 0<=(current-recent).total_seconds()<1500:
+            continue
+        # A recent verified quote can satisfy the daily afternoon sweep without
+        # downloading it twice or changing its original source timestamp.
+        if all(t and 0<=(current-t).total_seconds()<1500 for t in observed):
+            if afternoon_due:
+                store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING',
+                    ('quote_refresh',afternoon_claim,json.dumps({'state':'reused_recent','checked_at':min(observed).isoformat()}),current.isoformat()))
+            continue
         lead=(start-current).total_seconds()
-        window='prepare' if lead>3600 else 'final' if lead<=1800 else 'early'
-        claim=day+':'+fingerprint+':'+event+':'+window
+        if afternoon_due:
+            window='afternoon'
+        else:
+            if afternoon and lead>3600:continue
+            window='final' if lead<=1800 else 'early'
+        claim=prefix+window
         prior=store.get('quote_refresh',claim)
         if prior:continue
-        # Fresh/already checked events do not consume a slot for a later game.
-        if attempted>=4:break
-        attempted+=1
+        # The afternoon sweep includes every upcoming game, including late starts.
+        # Only subsequent near-tipoff checks are limited to four events per pass.
+        if not afternoon_due:
+            if attempted>=4:continue
+            attempted+=1
         claimed=store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING RETURNING key',
             ('quote_refresh',claim,json.dumps({'state':'reserved'}),current.isoformat()),fetch=True)
         if not claimed:continue

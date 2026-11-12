@@ -29,8 +29,9 @@ class TargetedQuoteTests(unittest.TestCase):
   self.assertEqual(rows[0]['Odds checked (UTC)'],NOW.isoformat());self.assertEqual(self.card,old)
   self.run_check();self.assertEqual(self.get.call_count,1)
  def test_fresh_started_and_far_games_do_not_spend(self):
-  for delta in (timedelta(minutes=-5),timedelta(hours=3)):
-   self.run_check([dict(self.card,**{'Start (UTC)':(NOW+delta).isoformat()})])
+  self.run_check([dict(self.card,**{'Start (UTC)':(NOW-timedelta(minutes=5)).isoformat()})])
+  morning=NOW.replace(hour=18,minute=0)
+  f.refresh_upcoming_quotes(self.store,self.key,[dict(self.card,**{'Start (UTC)':(morning+timedelta(hours=3)).isoformat()})],morning,self.get)
   self.run_check([dict(self.card,**{'Odds checked (UTC)':NOW.isoformat()})]);self.get.assert_not_called()
  def test_exhausted_balance_blocks_before_request(self):
   self.store.put('source','the_odds_api_quota:'+self.fingerprint,{'credits_remaining':0})
@@ -67,4 +68,31 @@ class TargetedQuoteTests(unittest.TestCase):
   rows,report=self.run_check(cards)
   self.assertEqual(self.get.call_count,4)
   self.assertEqual(set(report['events_updated']),set(bodies))
+ def test_1430_sweep_includes_all_late_games_once_without_four_game_cutoff(self):
+  current=datetime(2026,11,12,22,30,tzinfo=timezone.utc)
+  cards=[];bodies={}
+  for i in range(6):
+   event='sweep'+str(i)
+   card=dict(self.card,**{'Provider Event ID':event,'Start (UTC)':(current+timedelta(minutes=100+i*45)).isoformat(),
+                          'Odds checked (UTC)':(current-timedelta(hours=4)).isoformat()})
+   cards.append(card)
+   body=json.loads(json.dumps(self.body));body.update(id=event,commence_time=card['Start (UTC)'])
+   body['bookmakers'][0]['markets'][0]['last_update']=current.isoformat();bodies[event]=body
+  self.get.side_effect=lambda url,**kw:SimpleNamespace(status_code=200,headers={'x-requests-remaining':'260'},json=lambda:bodies[url.split('/')[-2]])
+  rows,report=f.refresh_upcoming_quotes(self.store,self.key,cards,current,self.get)
+  self.assertEqual(set(report['events_updated']),set(bodies))
+  self.assertEqual(self.get.call_count,6)
+  f.refresh_upcoming_quotes(self.store,self.key,cards,current+timedelta(minutes=10),self.get)
+  self.assertEqual(self.get.call_count,6)
+ def test_fresh_quote_satisfies_afternoon_sweep_without_new_request(self):
+  current=datetime(2026,11,12,22,30,tzinfo=timezone.utc)
+  card=dict(self.card,**{'Start (UTC)':(current+timedelta(hours=5)).isoformat(),'Odds checked (UTC)':(current-timedelta(minutes=10)).isoformat()})
+  f.refresh_upcoming_quotes(self.store,self.key,[card],current,self.get)
+  f.refresh_upcoming_quotes(self.store,self.key,[card],current+timedelta(minutes=30),self.get)
+  self.get.assert_not_called()
+ def test_does_not_start_partial_afternoon_sweep_at_1415(self):
+  current=datetime(2026,11,12,22,15,tzinfo=timezone.utc)
+  card=dict(self.card,**{'Start (UTC)':(current+timedelta(minutes=115)).isoformat()})
+  f.refresh_upcoming_quotes(self.store,self.key,[card],current,self.get)
+  self.get.assert_not_called()
 if __name__=='__main__':unittest.main()
