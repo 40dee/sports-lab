@@ -68,7 +68,7 @@ class LiveProgressTests(unittest.TestCase):
         st.rerun.assert_not_called()
         store.put('board_run','2026-11-09',{'stage':'finished','finished_at':f.REF})
         env['render_live_board_status'](store,st)
-        st.rerun.assert_called_once()
+        st.rerun.assert_not_called()
 
     def test_progress_writes_do_not_change_board_or_combo_readiness(self):
         store=f.populated(3);before=store.get('board','board')

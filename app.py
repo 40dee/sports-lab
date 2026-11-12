@@ -202,7 +202,7 @@ class Store:
         )
         if namespace=='forecast' and self._read_cache is not None:
             for cache_key in list(self._read_cache):
-                if cache_key[0] in ('compact_forecast','coverage_forecast') and cache_key[1]=='forecast':
+                if cache_key[0] in ('compact_forecast','coverage_forecast','research_forecast') and cache_key[1]=='forecast':
                     self._read_cache.pop(cache_key,None)
         # Update this record in cached lists. A single new forecast must not
         # force a download of every historic forecast on the next render.
@@ -267,7 +267,7 @@ class Store:
             return [(key, json.loads(payload)) for key, payload in rows]
         return self._cached_read("items", namespace, None, load)
 
-    def forecast_items(self, day=None, metadata_only=False, upcoming_after=None):
+    def forecast_items(self, day=None, metadata_only=False, upcoming_after=None, research_only=False):
         def load():
             # Strip bulky evidence inside the database, before network transfer.
             # Keyset pagination bounds each libSQL HTTP response in memory.
@@ -280,6 +280,27 @@ class Store:
                 expression=("jsonb_build_object('id',payload::jsonb->'id','card',payload::jsonb->'card','created_at',payload::jsonb->'created_at','event_id',payload::jsonb->'event_id')::text" if postgres
                     else "json_object('id',json_extract(payload,'$.id'),'card',json_extract(payload,'$.card'),'created_at',json_extract(payload,'$.created_at'),'event_id',json_extract(payload,'$.event_id'))")
                 portrait='NULL'
+            if research_only:
+                # Results need identity and two prediction values, not complete
+                # model evidence, history windows, portraits or source snapshots.
+                card_fields=('Fixture ID','Platform','Player','Stat Key','Period','Line','Line Type',
+                             'Game','Start (UTC)','Stat')
+                def projection(fields,prefix=''):
+                    pairs=[]
+                    for field in fields:
+                        escaped=field.replace("'","''")
+                        value=("payload::jsonb" + ("->'"+prefix+"'" if prefix else "")+"->'"+escaped+"'"
+                               if postgres else "json_extract(payload,'$."+(prefix+"." if prefix else "")+'"'+field+'"'+ "')")
+                        pairs.extend(("'"+escaped+"'",value))
+                    return ('jsonb_build_object' if postgres else 'json_object')+'('+','.join(pairs)+')'
+                fields=projection(('id','created_at','event_id'))
+                card=projection(card_fields,'card')
+                result=projection(('direction','projection'),'result')
+                if postgres:
+                    expression="("+fields+" || jsonb_build_object('card',"+card+",'result',"+result+"))::text"
+                else:
+                    expression="json_set("+fields+",'$.card',"+card+",'$.result',"+result+")"
+                portrait='NULL'
             where='';bounds=()
             if day is not None:
                 start=pd.Timestamp(day,tz=SLATE_TIMEZONE)
@@ -291,7 +312,7 @@ class Store:
                 where=' AND '+field+'>=? AND '+field+'<?'
                 bounds=(lower,upper)
             result=[];after=''
-            page_size=1000 if day is not None else 200
+            page_size=1000 if day is not None or research_only else 200
             while True:
                 page=self.query('SELECT key,'+expression+','+portrait+' FROM sports_records '
                     'WHERE namespace=? AND key>?'+where+' ORDER BY key LIMIT '+str(page_size),('forecast',after)+bounds,True)
@@ -303,7 +324,10 @@ class Store:
                     result.append((key,record))
                 if len(page)<page_size:return result
                 after=page[-1][0]
-        return self._cached_read('coverage_forecast' if metadata_only else 'compact_forecast','forecast',(day,upcoming_after) if upcoming_after is not None else day,load)
+        return self._cached_read('research_forecast' if research_only else 'coverage_forecast' if metadata_only else 'compact_forecast','forecast',(day,upcoming_after) if upcoming_after is not None else day,load)
+
+    def research_forecast_items(self):
+        return self.forecast_items(research_only=True)
 
     def slate_forecast_items(self, day):
         return self.forecast_items(day=day)
@@ -1138,9 +1162,11 @@ def render_live_board_status(store, st):
     token=(run.get('stage'),run.get('finished_at'))
     prior=st.session_state.get('_board_live_stage')
     st.session_state['_board_live_stage']=token
-    if prior is not None and token!=prior and token[0]=='finished':
-        if isinstance(cache,dict):cache.clear()
-        st.rerun()
+    if prior is not None and token!=prior and token[0]=='finished' and isinstance(cache,dict):
+        for key in list(cache):
+            if key[1] in {'board','coverage','health','combo_suggestions','automation'} or (
+                    key[1]=='forecast' and key[0] in ('compact_forecast','coverage_forecast','research_forecast')):
+                cache.pop(key,None)
 
 
 def board_run_stage(store, stage, import_complete=None):
@@ -2933,7 +2959,9 @@ class Workflow:
         rows = []
         grades = dict(self.store.items("grade"))
 
-        for key, frozen in unique_forecasts(saved_forecast_records(self.store), across_platforms=across_platforms):
+        reader=getattr(self.store,"research_forecast_items",None)
+        records=reader() if callable(reader) else saved_forecast_records(self.store)
+        for key, frozen in unique_forecasts(records, across_platforms=across_platforms):
             grade = grades.get(key)
             card = frozen["card"]
             result = frozen["result"]
@@ -3779,7 +3807,7 @@ def preparation_panel(wf, st, rows):
     if not wf.store.remote:
         st.warning('Temporary session only. Keep this page open and download a backup before leaving. Background preparation is unavailable until permanent storage is restored.')
     current = preparation_rows(rows)
-    index = forecast_index(wf.store.items('forecast'))
+    index = forecast_index(saved_forecast_records(wf.store,combo_clock(),coverage=True))
     ready = sum(bool(saved_prediction(index, c)) for c in current)
     st.progress(ready / len(current) if current else 0, text=f'{ready}/{len(current)} ready')
     last = wf.store.get('preparation', 'last') or {}
@@ -4318,10 +4346,10 @@ def render_workflow(wf, st, rows, mode="settings"):
                 except Exception as error:
                     st.error(str(error))
 
-    if mode == "settings" or rows:
-        if mode == "settings":
-            preparation_panel(wf, st, rows)
-        saved_index = forecast_index(wf.store.items("forecast")) if rows else {}
+    if mode == "settings":
+        preparation_panel(wf, st, rows)
+    if (mode == "settings" or rows) and st.checkbox("Show calculated board table", key="show_calculated_board_table"):
+        saved_index = forecast_index(saved_forecast_records(wf.store,combo_clock())) if rows else {}
         calculated = wf.board(
             [card for card in preparation_rows(rows)
              if saved_prediction(saved_index, card)],
@@ -10526,10 +10554,10 @@ def render_app_pages():
     if st.session_state.get("last_ui_page") != app_page:
         st.session_state.pop("selected_prop_card", None)
         st.session_state["last_ui_page"] = app_page
-    # One fragment owns navigation, status and page content. Nested timed
-    # fragments and an emptied parent placeholder can discard the page body
-    # independently of the still-visible progress panel.
-    with st.container(key="sports_lab_page_body"):
+    # A single placeholder clears the previous page before slow reads begin.
+    # This runs at app scope; timed fragments never own or empty the page body.
+    page_body=st.empty()
+    with page_body.container():
         loading = st.empty()
         loading.caption("Opening " + app_page + "…")
         render_saved_workspace(controls=(app_page == "Settings"))
@@ -10677,6 +10705,8 @@ def render_app_pages():
 
         # ---------------- RESULTS AND PLAYER LINES ----------------
         board_allowed,board_note=combo_board_ready(workflow.store) if app_page in ('Plays','Fantasy','Combos') else (True,'')
+        if board_allowed and app_page in ('Plays','Fantasy','Combos'):
+            st.session_state['_ui_verified_board_day']=slate_day()
         if not board_allowed:
             st.info('Today’s picks are waiting for the complete board. '+board_note)
             st.caption('Saved plays and results remain available. Progress updates automatically; browsing does not download provider lines.')
@@ -10865,8 +10895,18 @@ def poll_saved_board_updates():
     st.session_state['_ui_polled_progress']=progress
     changed=previous is not None and token!=previous
     active_progress=run.get('stage') in ('importing','preparing') and previous_progress is not None and progress!=previous_progress
-    if changed or active_progress:
-        if isinstance(cache,dict):cache.clear()
+    # An existing verified page stays still during background preparation.
+    # First-time imports may update progress; publish a finished board once.
+    initial_progress=active_progress and st.session_state.get('_ui_verified_board_day')!=day
+    if (changed and run.get('stage')=='finished') or initial_progress:
+        if isinstance(cache,dict):
+            namespaces={'board','coverage','health','combo_suggestions','automation',
+                        'board_run','board_download','preparation','grade','audit_error','grade_run'}
+            for key in list(cache):
+                if key[1] in namespaces or (key[1]=='forecast' and key[0] in
+                        ('compact_forecast','coverage_forecast','research_forecast')):
+                    cache.pop(key,None)
+        st.session_state['_board_live_stage']=(run.get('stage'),run.get('finished_at'))
         st.rerun()
 
 
