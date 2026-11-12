@@ -1,9 +1,6 @@
 name: Prepare NBA board now
 on:
   workflow_dispatch:
-  schedule:
-    # Every 30 minutes; the app's daily budget and refresh ledger prevent repeated paid imports.
-    - cron: '*/30 * * * *'
   push:
     branches: [main]
     paths:
