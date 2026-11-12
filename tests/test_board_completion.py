@@ -41,6 +41,23 @@ class BoardCompletionTests(unittest.TestCase):
         store=self.ready();board=store.get('board','board')
         board['v4_scan_at']='new';store.put('board','board',board)
         self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
+
+    def test_skipped_market_stays_excluded_after_its_game_starts(self):
+        store=self.ready()
+        board=store.get('board','board')
+        skipped=dict(board['v4_rows'][0])
+        skipped['Start (UTC)']='2026-11-09T17:00:00Z'
+        skipped['Fixture ID']='earlier-game'
+        board['v4_rows'].append(skipped)
+        store.put('board','board',board)
+        key=fixture.env['identity'](skipped)
+        # A truly unprocessed past game must still fail the completion check.
+        self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
+        store.put('calculation_status',key,{'Status':'Unavailable'})
+        self.assertTrue(fixture.env['combo_board_ready'](store,fixture.REF)[0])
+        coverage=fixture.env['board_coverage'](SimpleNamespace(store=store),board,fixture.REF)
+        self.assertEqual(coverage['missed_start'],0)
+        self.assertEqual(coverage['upcoming_unavailable'],1)
         store.put('board','board',{'v4_rows':[]})
         self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
 
@@ -81,7 +98,7 @@ class BoardCompletionTests(unittest.TestCase):
         self.assertIn('Total 7m 0s',st.caption.call_args_list[0].args[0])
         self.assertIn('Import 2m 0s',st.caption.call_args_list[0].args[0])
         self.assertIn('Projections 5m 0s',st.caption.call_args_list[0].args[0])
-        st.info.assert_called_once_with('incomplete')
+        st.info.assert_not_called()
 
     def test_all_four_tier_buckets_stay_separate(self):
         store=fixture.populated(6);board=store.get('board','board')
