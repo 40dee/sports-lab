@@ -7620,7 +7620,9 @@ def render_saved_workspace(controls=True):
         if remote.get("v4_rows"):
             remote_stamp = str(remote.get("v4_scan_at") or "")
             session_stamp = str(st.session_state.get("v4_scan_at") or "")
-            if "v4_rows" not in st.session_state or remote_stamp > session_stamp:
+            if ("v4_rows" not in st.session_state or remote_stamp > session_stamp
+                    or (remote_stamp == session_stamp and
+                        len(remote.get("v4_rows") or []) != len(st.session_state.get("v4_rows") or []))):
                 st.session_state.update(validate_board(remote))
         elif "v4_rows" not in st.session_state:
             local = workspace_load("board")
