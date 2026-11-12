@@ -8548,6 +8548,14 @@ def fantasy_saved_records(records, grades, reference=None):
     return sorted(values, key=lambda item:(item['start'],str(item['card'].get('Player')),float(item['card']['Line'])), reverse=True)
 
 
+def earliest_game_first(cards):
+    """Stable display order: earliest tipoff first, existing rank within each game."""
+    def key(card):
+        start = utc_timestamp(card.get('Start (UTC)'))
+        return start.value if pd.notna(start) else float('inf')
+    return sorted(cards, key=key)
+
+
 def current_fantasy_records(rows, records, grades, reference=None):
     """Join current board quotes to immutable predictions; retired quotes stay in history."""
     index = forecast_index(records)
@@ -8559,7 +8567,8 @@ def current_fantasy_records(rows, records, grades, reference=None):
         if frozen:
             key = frozen.get('id') or identity(frozen.get('card') or {})
             joined.append((key, dict(frozen, card=card)))
-    return fantasy_saved_records(joined, grades, reference)
+    values = fantasy_saved_records(joined, grades, reference)
+    return sorted(values, key=lambda item: utc_timestamp(item['start']).value)
 
 
 def fantasy_saved_summary(rows, records, grades, reference=None):
@@ -10283,6 +10292,8 @@ def ui_board(page):
                     f'{hidden} alternate threshold(s) hidden from display only. '
                     'Turn off grouping to see all lines; saved picks and grading are unchanged.'
                 )
+    if page != 'Saved':
+        records = earliest_game_first(records)
     stamp = st.session_state.get('v4_scan_at')
     if stamp:
         st.caption('Base board scan (UTC): ' + str(stamp) + ' · Native feeds may have separate timestamps. Browsing uses saved data.')
