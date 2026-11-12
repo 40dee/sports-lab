@@ -9989,6 +9989,20 @@ def ui_board(page):
         st.caption('Saved lines stay fixed. Comparisons use the latest imported board; opening this page does not refresh prices.')
     else:
         records = rows
+        # Keep every not-yet-started game visible, including late tipoffs.
+        # This is a display filter only; eligibility and MORE/LESS stay unchanged.
+        upcoming_games = sorted({(str(c.get('Game') or 'NBA game'), str(c.get('Start (UTC)')))
+                                 for c in rows if today_pregame(c.get('Start (UTC)'))}, key=lambda item:item[1])
+        if upcoming_games:
+            st.caption(f'{len(upcoming_games)} upcoming games still on the saved board (including late games).')
+        else:
+            st.warning('No unstarted games remain on the saved board. A new import is needed; older games cannot be treated as live.')
+        game_window = st.segmented_control('Game window', ['All upcoming', 'Later games'],
+                                           default='All upcoming', key='mobile_game_window') or 'All upcoming'
+        if game_window == 'Later games':
+            cutoff = pd.Timestamp.now(tz='UTC') + pd.Timedelta(minutes=60)
+            records = [c for c in records if pd.notna(utc_timestamp(c.get('Start (UTC)')))
+                       and utc_timestamp(c.get('Start (UTC)')) > cutoff]
     unique = {}
     for card in records:
         if not card.get('Decoded') or not market_columns(card):
