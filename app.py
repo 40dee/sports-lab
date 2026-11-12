@@ -2965,6 +2965,7 @@ class Workflow:
             grade = grades.get(key)
             card = frozen["card"]
             result = frozen["result"]
+            start=utc_timestamp(card.get("Start (UTC)"))
 
             rows.append({
                 "ID": key,
@@ -2987,8 +2988,7 @@ class Workflow:
                 ),
                 "Created (UTC)": frozen["created_at"],
                 "Event": frozen["event_id"],
-                "Game date": pd.to_datetime(card.get("Start (UTC)"), utc=True, errors="coerce").tz_convert("America/Los_Angeles").strftime("%Y-%m-%d")
-                    if pd.notna(pd.to_datetime(card.get("Start (UTC)"), utc=True, errors="coerce")) else "Unknown",
+                "Game date": start.tz_convert("America/Los_Angeles").strftime("%Y-%m-%d") if pd.notna(start) else "Unknown",
             })
 
         return rows
