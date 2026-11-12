@@ -1,254 +1,31 @@
-
-name: Update NBA team stats
-
+name: Validate model inputs
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/nba-team-stats.yml
   schedule:
     - cron: "17 * * * *"
-
 permissions:
-  contents: write
-
+  contents: read
 concurrency:
-  group: nba-team-stats
+  group: sports-lab-input-checks
   cancel-in-progress: false
-
 jobs:
-  update:
-    runs-on: ubuntu-latest
+  validate:
+    runs-on: ubuntu-24.04
     timeout-minutes: 8
-
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Fetch and validate NBA statistics
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          import json
-          import pathlib
-          import random
-          import sys
-          import time
-          import urllib.parse
-          import urllib.request
-          from datetime import datetime, timezone
-
-          now = datetime.now(timezone.utc)
-          year = now.year if now.month >= 10 else now.year - 1
-          season = f"{year}-{str(year + 1)[-2:]}"
-
-          params = {
-              "MeasureType": "Advanced",
-              "PerMode": "PerGame",
-              "LeagueID": "00",
-              "Season": season,
-              "SeasonType": "Regular Season",
-              "LastNGames": 0,
-              "Month": 0,
-              "OpponentTeamID": 0,
-              "PaceAdjust": "N",
-              "PlusMinus": "N",
-              "Rank": "Y",
-              "Period": 0,
-          }
-
-          url = (
-              "https://stats.nba.com/stats/leaguedashteamstats?"
-              + urllib.parse.urlencode(params)
-          )
-
-          headers = {
-              "User-Agent": (
-                  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) "
-                  "Chrome/120.0.0.0 Safari/537.36"
-              ),
-              "Referer": "https://www.nba.com/",
-              "Origin": "https://www.nba.com",
-              "Accept": "application/json, text/plain, */*",
-              "x-nba-stats-origin": "stats",
-              "x-nba-stats-token": "true",
-          }
-
-          required = {
-              "TEAM_ID", "TEAM_NAME", "GP",
-              "OFF_RATING", "DEF_RATING", "PACE",
-              "OFF_RATING_RANK", "DEF_RATING_RANK",
-              "PACE_RANK",
-          }
-
-          target = pathlib.Path("data/nba_team_advanced.json")
-
-          def validate(payload):
-              actual_season = payload.get(
-                  "parameters", {}
-              ).get("Season")
-
-              if actual_season not in (None, season):
-                  raise ValueError("Unexpected NBA season")
-
-              table = next(
-                  (
-                      item
-                      for item in payload.get("resultSets", [])
-                      if required.issubset(
-                          item.get("headers", [])
-                      )
-                  ),
-                  None,
-              )
-
-              if table is None:
-                  raise ValueError(
-                      "Required advanced team statistics missing"
-                  )
-
-              columns = table["headers"]
-              values = table["rowSet"]
-
-              if any(
-                  len(row) != len(columns)
-                  for row in values
-              ):
-                  raise ValueError("Incomplete statistics row")
-
-              rows = [
-                  dict(zip(columns, row))
-                  for row in values
-              ]
-
-              if (
-                  len(rows) != 30
-                  or len({
-                      row["TEAM_ID"] for row in rows
-                  }) != 30
-              ):
-                  raise ValueError(
-                      "Expected exactly 30 unique NBA teams"
-                  )
-
-              for row in rows:
-                  if any(
-                      row[field] is None
-                      for field in required
-                  ):
-                      raise ValueError(
-                          "Missing required team statistic"
-                      )
-
-                  if float(row["GP"]) <= 0:
-                      raise ValueError(
-                          "Team has no completed games"
-                      )
-
-                  for field in (
-                      "OFF_RATING",
-                      "DEF_RATING",
-                      "PACE",
-                  ):
-                      if not (
-                          0 < float(row[field]) < 300
-                      ):
-                          raise ValueError(
-                              f"Invalid value for {field}"
-                          )
-
-              return rows
-
-          rows = None
-
-          for attempt in range(1, 4):
-              try:
-                  print(
-                      f"NBA Stats attempt {attempt}/3",
-                      flush=True,
-                  )
-
-                  request = urllib.request.Request(
-                      url,
-                      headers=headers,
-                  )
-
-                  with urllib.request.urlopen(
-                      request,
-                      timeout=25,
-                  ) as response:
-                      payload = json.load(response)
-
-                  rows = validate(payload)
-
-                  print(
-                      "NBA statistics successfully validated.",
-                      flush=True,
-                  )
-                  break
-
-              except Exception as exc:
-                  print(
-                      f"Attempt {attempt}/3 failed: "
-                      f"{type(exc).__name__}: {exc}",
-                      flush=True,
-                  )
-
-                  if attempt < 3:
-                      time.sleep(
-                          5 * attempt + random.uniform(0, 2)
-                      )
-
-          if rows is None:
-              print(
-                  "::warning::NBA Stats unavailable. "
-                  "Existing statistics remain unchanged.",
-                  flush=True,
-              )
-              sys.exit(0)
-
-          output = {
-              "season": season,
-              "source": "NBA Stats",
-              "fetched_at": datetime.now(
-                  timezone.utc
-              ).isoformat(),
-              "teams": rows,
-          }
-
-          target.parent.mkdir(
-              parents=True,
-              exist_ok=True,
-          )
-
-          temporary = target.with_suffix(".json.tmp")
-
-          temporary.write_text(
-              json.dumps(output, indent=2),
-              encoding="utf-8",
-          )
-
-          temporary.replace(target)
-
-          print(
-              f"Saved validated statistics for "
-              f"{len(rows)} NBA teams.",
-              flush=True,
-          )
-          PY
-
-      - name: Save updated statistics
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if [ -f data/nba_team_advanced.json ]; then
-          git add data/nba_team_advanced.json
-          else
-            echo "::error::NBA statistics file was not created."
-            exit 1
-          fi
-          if ! git diff --cached --quiet; then
-            git commit -m "Update NBA team efficiency statistics"
-            git push
-          else
-            echo "No NBA statistics changes to commit."
-          fi
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Validate and save the team's actual projection inputs
+        run: python app.py --check-inputs

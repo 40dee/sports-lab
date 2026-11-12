@@ -2018,6 +2018,11 @@ class Workflow:
                 unique_forecasts(saved_forecast_records(self.store))
                 if market_signature(frozen["card"], frozen.get("event_id")) == signature), None)
         if existing is not None:
+            if market_signature(existing.get('card') or {})!=market_signature(card) and getattr(self,'_lookup_diagnostic_count',0)<3:
+                self._lookup_diagnostic_count=getattr(self,'_lookup_diagnostic_count',0)+1
+                print('SPORTS_LAB_REUSED_EVENT',encode({'event_id':str(event['id']),
+                    'requested':{k:card.get(k) for k in ('Game','Player','Start (UTC)','Stat','Line','Platform')},
+                    'original':{k:(existing.get('card') or {}).get(k) for k in ('Game','Player','Start (UTC)','Stat','Line','Platform')}}),flush=True)
             return existing
 
         value = {
@@ -3388,7 +3393,8 @@ def market_signature(card, event_id=None, across_platforms=False):
         last, first = player.split(',', 1)
         player = first + ' ' + last
     start = utc_timestamp(card.get('Start (UTC)'))
-    game = clean(card.get('Game'))
+    teams=str(card.get('Game') or '').split(' vs ')
+    game = '|'.join(sorted(clean(team) for team in teams)) if len(teams)==2 else clean(card.get('Game'))
     # Refuse to merge unknown events or unknown players on weak metadata.
     if not player or (not event_id and (not game or pd.isna(start))):
         return ('unverified', identity(card))
@@ -3420,17 +3426,46 @@ def unique_forecasts(records, across_platforms=False):
 
 
 def forecast_index(records):
-    # Keep old IDs working for watchlists while aliasing new scans to old picks.
+    # Retain original IDs, plus a narrowly bounded fixture lookup for providers
+    # that reverse team order or report tipoff a few minutes apart.
     lookup = dict(records)
     earliest = {}
+    candidates = {}
     for key, frozen in unique_forecasts(records):
-        earliest.setdefault(market_signature(frozen['card']), frozen)
+        signature=market_signature(frozen['card'])
+        earliest.setdefault(signature,frozen)
+        if signature[0][0]=='fixture' and frozen.get('event_id'):
+            group=(('fixture_candidates',signature[0][1]),)+signature[1:]
+            candidates.setdefault(group,[]).append(frozen)
     lookup.update(earliest)
+    lookup.update(candidates)
     return lookup
 
 
 def saved_prediction(index, card):
-    return index.get(market_signature(card)) or index.get(identity(card))
+    signature=market_signature(card)
+    exact=index.get(signature)
+    if exact:
+        return exact
+    direct=index.get(identity(card))
+    if direct and market_signature(direct.get('card') or {})==signature:
+        return direct
+    if signature[0][0]!='fixture':
+        return None
+    start=utc_timestamp(card.get('Start (UTC)'))
+    group=(('fixture_candidates',signature[0][1]),)+signature[1:]
+    matches=[]
+    for frozen in index.get(group,[]):
+        original=utc_timestamp((frozen.get('card') or {}).get('Start (UTC)'))
+        created=utc_timestamp(frozen.get('created_at'))
+        if (pd.notna(start) and pd.notna(original) and pd.notna(created)
+                and abs((original-start).total_seconds())<=900
+                and created<min(start,original)):
+            matches.append(frozen)
+    # Never choose between ambiguous events, or use a post-tipoff prediction.
+    if len({str(f.get('event_id')) for f in matches})!=1:
+        return None
+    return min(matches,key=lambda f:utc_timestamp(f['created_at']))
 
 
 class TursoStore(Store):
@@ -9389,12 +9424,18 @@ def run_quota_fallback(wf, budget_seconds=1200):
     ledger['feed_partial']=not status.get('complete',False)
     ledger['fantasy_partial']=not status.get('complete',False)
     board_run_stage(wf.store,'preparing',status.get('complete',False))
+    last_check=wf.store.get('input_health','latest') or {}
+    checked_at=utc_timestamp(last_check.get('checked_at'))
+    if pd.isna(checked_at) or (pd.Timestamp.now(tz='UTC')-checked_at).total_seconds()>=3600:
+        last_check=refresh_input_checks(wf)
+    ledger['input_health']=last_check
     current_rows=preparation_rows(board.get('v4_rows',[]))
     if current_rows:
         health_before=wf.store.get('health',day) or {}
         health=refresh_board_health(wf,{'v4_rows':current_rows})
         health['players']={**(health_before.get('players') or {}),**health['players']}
         wf.store.put('health',day,health)
+        ledger['player_health']={k:v for k,v in health.items() if k!='players'}
         preparation=prepare_saved_board(wf,{'v4_rows':current_rows},budget_seconds=budget_seconds,max_picks=10000)
         board_run_stage(wf.store,'finished')
         combos=update_combos(wf.store,generate=True)
