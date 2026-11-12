@@ -88,8 +88,17 @@ def compact_forecast(value):
 
 class CompactViewStore:
     """UI-only read projection. Writes and individual reads use the full store."""
+    ui_read_projection = True
     def __init__(self,store):self._store=store
     def __getattr__(self,name):return getattr(self._store,name)
+    def slate_forecast_items(self,day):
+        # Browsing needs only future games; Saved and Results retain all history.
+        reader=getattr(self._store,'forecast_items',None)
+        if callable(reader):
+            after=pd.Timestamp.now(tz='UTC').floor('5min').isoformat()
+            return reader(day=day,upcoming_after=after)
+        return [(key,value) for key,value in self.items('forecast')
+                if today_pregame((value.get('card') or {}).get('Start (UTC)'))]
     def items(self,namespace):
         if namespace!='forecast':return self._store.items(namespace)
         if hasattr(self._store,'forecast_items'):return self._store.forecast_items()
@@ -258,7 +267,7 @@ class Store:
             return [(key, json.loads(payload)) for key, payload in rows]
         return self._cached_read("items", namespace, None, load)
 
-    def forecast_items(self, day=None, metadata_only=False):
+    def forecast_items(self, day=None, metadata_only=False, upcoming_after=None):
         def load():
             # Strip bulky evidence inside the database, before network transfer.
             # Keyset pagination bounds each libSQL HTTP response in memory.
@@ -275,6 +284,7 @@ class Store:
             if day is not None:
                 start=pd.Timestamp(day,tz=SLATE_TIMEZONE)
                 lower=start.tz_convert('UTC').isoformat()
+                if upcoming_after is not None:lower=max(lower,upcoming_after)
                 upper=(start+pd.DateOffset(days=1)).tz_convert('UTC').isoformat()
                 field=("payload::jsonb#>>'{card,Start (UTC)}'" if postgres
                     else "json_extract(payload,'$.card.\"Start (UTC)\"')")
@@ -293,7 +303,7 @@ class Store:
                     result.append((key,record))
                 if len(page)<page_size:return result
                 after=page[-1][0]
-        return self._cached_read('coverage_forecast' if metadata_only else 'compact_forecast','forecast',day,load)
+        return self._cached_read('coverage_forecast' if metadata_only else 'compact_forecast','forecast',(day,upcoming_after) if upcoming_after is not None else day,load)
 
     def slate_forecast_items(self, day):
         return self.forecast_items(day=day)
@@ -1166,7 +1176,12 @@ def combo_board_ready(store, reference=None):
     if board.get('v4_scan_at')!=run.get('board_scan_at'):
         return False,'The board changed after its completion check. Waiting for verification.'
     from types import SimpleNamespace
-    coverage=board_coverage(SimpleNamespace(store=store),board,reference=current)
+    coverage=store.get('coverage',slate_day(current)) or {} if getattr(store,'ui_read_projection',False) else {}
+    verified=utc_timestamp(coverage.get('checked_at'))
+    finished=utc_timestamp(run.get('finished_at'))
+    if (coverage.get('board_scan_at')!=board.get('v4_scan_at') or pd.isna(verified)
+            or pd.isna(finished) or verified<finished):
+        coverage=board_coverage(SimpleNamespace(store=store),board,reference=current)
     if not coverage.get('imported'):
         return False,'Waiting for a nonempty verified board.'
     # Attempted lines without a usable projection are excluded from picks;
@@ -9092,7 +9107,7 @@ def board_coverage(wf, board, reference=None):
         start = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
         if card.get('Decoded') and market_columns(card) and pd.notna(start) and slate_day(start) == slate_day(current):
             cards.setdefault(market_signature(card), card)
-    report = {'checked_at': now(), 'imported': len(cards), 'ready': 0,
+    report = {'checked_at': now(), 'board_scan_at':board.get('v4_scan_at'), 'imported': len(cards), 'ready': 0,
               'upcoming_pending': 0, 'upcoming_unavailable': 0, 'missed_start': 0}
     for card in cards.values():
         frozen = saved_prediction(index, card)
@@ -10400,7 +10415,7 @@ def render_native_kalshi_refresh():
 
 
 # Navigation widgets rerun only this fragment, avoiding database startup.
-@st.fragment(run_every=15)
+@st.fragment
 def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
     st.caption("Model picks · Research · Results")
@@ -10729,7 +10744,33 @@ def render_app_pages():
         loading.empty()
 
 
+
+@st.fragment(run_every=15)
+def poll_saved_board_updates():
+    """Poll small status records; never periodically rerender finished pages."""
+    store=workflow.store
+    cache=getattr(store,'_read_cache',None)
+    day=slate_day()
+    if isinstance(cache,dict):
+        for ns,key in (('board_run',day),('preparation','last')):
+            cache.pop(('get',ns,key),None)
+    run=store.get('board_run',day) or {}
+    preparation=store.get('preparation','last') or {}
+    token=(run.get('started_at'),run.get('stage'),run.get('finished_at'))
+    previous=st.session_state.get('_ui_polled_board_token')
+    st.session_state['_ui_polled_board_token']=token
+    progress=(preparation.get('ready'),preparation.get('unavailable'),preparation.get('state'))
+    previous_progress=st.session_state.get('_ui_polled_progress')
+    st.session_state['_ui_polled_progress']=progress
+    changed=previous is not None and token!=previous
+    active_progress=run.get('stage') in ('importing','preparing') and previous_progress is not None and progress!=previous_progress
+    if changed or active_progress:
+        if isinstance(cache,dict):cache.clear()
+        st.rerun()
+
+
 render_app_pages()
+poll_saved_board_updates()
 
 # ================= END OF APP.PY =================
 
