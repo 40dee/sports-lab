@@ -1195,8 +1195,13 @@ def render_board_run_status(store, st):
         for label,key in (('Started','started_at'),('Import finished','import_finished_at'),('Board prepared','finished_at')):
             value=utc_timestamp(record.get(key))
             st.write(label+': '+('pending' if pd.isna(value) else value.tz_convert(SLATE_TIMEZONE).strftime('%b %d, %I:%M:%S %p Pacific')))
-        ready,note=combo_board_ready(store)
-        st.success(note) if ready else st.info(note)
+        # This runs every five seconds, before the page body is rendered.
+        # Never load and revalidate every forecast here. The actual pick views
+        # still run combo_board_ready before showing selectable plays.
+        if stage == 'finished':
+            st.caption('Worker finished. Pick eligibility is checked in the selected view.')
+        else:
+            st.info('Board worker is ' + str(stage) + '.')
         history=[v for _,v in store.items('board_run_history') if v.get('day')==record.get('day') and v.get('started_at')!=record.get('started_at')]
         for prior in sorted(history,key=lambda v:v.get('started_at',''),reverse=True)[:5]:
             st.caption('Earlier pass · '+str(prior.get('started_at'))+' UTC · '+str(prior.get('stage'))+
