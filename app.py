@@ -192,7 +192,9 @@ class Store:
             (namespace, key, encode(value), now()), fetch=True,
         )
         if namespace=='forecast' and self._read_cache is not None:
-            self._read_cache.pop(('compact_forecast','forecast',None),None)
+            for cache_key in list(self._read_cache):
+                if cache_key[:2]==('compact_forecast','forecast'):
+                    self._read_cache.pop(cache_key,None)
         # Update this record in cached lists. A single new forecast must not
         # force a download of every historic forecast on the next render.
         if self._read_cache is not None:
@@ -256,7 +258,7 @@ class Store:
             return [(key, json.loads(payload)) for key, payload in rows]
         return self._cached_read("items", namespace, None, load)
 
-    def forecast_items(self):
+    def forecast_items(self, day=None):
         def load():
             # Strip bulky evidence inside the database, before network transfer.
             # Keyset pagination bounds each libSQL HTTP response in memory.
@@ -265,10 +267,19 @@ class Store:
                 else "json_remove(payload,'$.snapshot','$.result.game_context','$.result.roster')")
             portrait=("COALESCE(payload::jsonb#>'{result,roster,athlete,headshot}',payload::jsonb#>'{snapshot,roster,headshot}')::text" if postgres
                 else "COALESCE(json_extract(payload,'$.result.roster.athlete.headshot'),json_extract(payload,'$.snapshot.roster.headshot'))")
+            where='';bounds=()
+            if day is not None:
+                start=pd.Timestamp(day,tz=SLATE_TIMEZONE)
+                lower=start.tz_convert('UTC').isoformat()
+                upper=(start+pd.DateOffset(days=1)).tz_convert('UTC').isoformat()
+                field=("payload::jsonb#>>'{card,Start (UTC)}'" if postgres
+                    else "json_extract(payload,'$.card.\"Start (UTC)\"')")
+                where=' AND '+field+'>=? AND '+field+'<?'
+                bounds=(lower,upper)
             result=[];after=''
             while True:
                 page=self.query('SELECT key,'+expression+','+portrait+' FROM sports_records '
-                    'WHERE namespace=? AND key>? ORDER BY key LIMIT 200',('forecast',after),True)
+                    'WHERE namespace=? AND key>?'+where+' ORDER BY key LIMIT 200',('forecast',after)+bounds,True)
                 for key,payload,photo in page:
                     record=json.loads(payload)
                     if photo:
@@ -277,7 +288,10 @@ class Store:
                     result.append((key,record))
                 if len(page)<200:return result
                 after=page[-1][0]
-        return self._cached_read('compact_forecast','forecast',None,load)
+        return self._cached_read('compact_forecast','forecast',day,load)
+
+    def slate_forecast_items(self, day):
+        return self.forecast_items(day=day)
 
     def export(self):
         rows = self.query(
@@ -833,8 +847,11 @@ def combo_clock(reference=None):
     return pd.Timestamp.now(tz='UTC') if reference is None else pd.to_datetime(reference, utc=True)
 
 
-def saved_forecast_records(store):
+def saved_forecast_records(store, reference=None):
     """Paged compact reads keep bulky evidence out of board preparation."""
+    if reference is not None:
+        scoped=getattr(store,'slate_forecast_items',None)
+        if callable(scoped):return scoped(slate_day(reference))
     reader=getattr(store,'forecast_items',None)
     return reader() if callable(reader) else store.items('forecast')
 
@@ -843,7 +860,7 @@ def combo_pool(store, reference=None, tier_mode="mixed"):
     current = combo_clock(reference)
     board = store.get('board', 'board') or {}
     health = (store.get('health', slate_day(current)) or {}).get('players') or {}
-    index = forecast_index(saved_forecast_records(store))
+    index = forecast_index(saved_forecast_records(store,current))
     line_checks=dict(store.items('odds_refresh'))
     pool, excluded, seen = [], {}, set()
     def reject(reason): excluded[reason] = excluded.get(reason, 0) + 1
@@ -8482,7 +8499,8 @@ def render_fantasy_plays(wf, st):
     [data-baseweb="popover"] [role="option"]{background:#181621!important;color:#f1f6fc!important;font-size:14px;}
     [data-baseweb="popover"] [role="option"]:hover,[data-baseweb="popover"] [role="option"][aria-selected="true"]{background:#342744!important;color:#fff!important;}
     </style>''', unsafe_allow_html=True)
-    records = wf.store.items('forecast')
+    records = (wf.store.items('forecast') if st.session_state.get('fantasy_view_buttons')=='Saved forecasts'
+               else saved_forecast_records(wf.store,combo_clock()))
     grades = dict(wf.store.items('grade'))
     board = wf.store.get('board', 'board') or {}
     rows = board.get('v4_rows') or st.session_state.get('v4_rows', [])
@@ -9032,7 +9050,7 @@ def refresh_board_health(wf, board):
 def board_coverage(wf, board, reference=None):
     """Count missed deadlines separately so a shrinking slate cannot look complete."""
     current=combo_clock(reference)
-    index = forecast_index(saved_forecast_records(wf.store))
+    index = forecast_index(saved_forecast_records(wf.store,current))
     statuses = dict(wf.store.items('calculation_status'))
     cards = {}
     for card in board.get('v4_rows') or []:
@@ -9047,10 +9065,12 @@ def board_coverage(wf, board, reference=None):
         start = pd.to_datetime(card['Start (UTC)'], utc=True)
         if frozen and pd.notna(created) and created < start:
             report['ready'] += 1
+        elif (statuses.get(identity(card)) or {}).get('Status') == 'Unavailable':
+            # An already-skipped market stays skipped after tipoff; it must
+            # not turn into a missed deadline that hides all remaining games.
+            report['upcoming_unavailable'] += 1
         elif not today_pregame(card['Start (UTC)'],current):
             report['missed_start'] += 1
-        elif (statuses.get(identity(card)) or {}).get('Status') == 'Unavailable':
-            report['upcoming_unavailable'] += 1
         else:
             report['upcoming_pending'] += 1
     wf.store.put('coverage', slate_day(current), report)
@@ -9901,7 +9921,8 @@ def ui_detail(card, forecasts):
 def ui_board(page):
     # Browsing renders saved forecasts only; worker controls live in Settings.
     rows = st.session_state.get('v4_rows', [])
-    forecasts = forecast_index(workflow_store.items('forecast'))
+    forecasts = forecast_index(workflow_store.items('forecast') if page=='Saved'
+                               else saved_forecast_records(workflow_store,combo_clock()))
     health = workflow_store.get('health', slate_day()) or {}
     coverage = workflow_store.get('coverage', slate_day()) or {}
     line_checks=dict(workflow_store.items('odds_refresh'))
