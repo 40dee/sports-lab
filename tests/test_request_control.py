@@ -260,3 +260,12 @@ class CompactReadTests(unittest.TestCase):
   self.store.put('forecast','new',{'id':'new','result':{'projection':12.}})
   self.assertEqual(len(self.store.forecast_items()),206)
 
+ def test_slate_reads_only_current_pacific_games_and_invalidates_on_write(self):
+  self.store._read_cache={}
+  for key,start in [('old','2026-11-09T06:59:59Z'),('today','2026-11-10T02:00:00Z'),('next','2026-11-10T08:00:00Z')]:
+   self.store.put('forecast',key,{'id':key,'card':{'Start (UTC)':start},'result':{'projection':1.}})
+  self.assertEqual([key for key,_ in self.store.slate_forecast_items('2026-11-09')],['today'])
+  self.assertEqual(len(self.store.forecast_items()),3)
+  self.store.put('forecast','new',{'id':'new','card':{'Start (UTC)':'2026-11-10T03:00:00Z'},'result':{}})
+  self.assertEqual({key for key,_ in self.store.slate_forecast_items('2026-11-09')},{'new','today'})
+
