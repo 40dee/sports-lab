@@ -29,7 +29,7 @@ class TargetedQuoteTests(unittest.TestCase):
   self.assertEqual(rows[0]['Odds checked (UTC)'],NOW.isoformat());self.assertEqual(self.card,old)
   self.run_check();self.assertEqual(self.get.call_count,1)
  def test_fresh_started_and_far_games_do_not_spend(self):
-  for delta in (timedelta(minutes=-5),timedelta(hours=2)):
+  for delta in (timedelta(minutes=-5),timedelta(hours=3)):
    self.run_check([dict(self.card,**{'Start (UTC)':(NOW+delta).isoformat()})])
   self.run_check([dict(self.card,**{'Odds checked (UTC)':NOW.isoformat()})]);self.get.assert_not_called()
  def test_exhausted_balance_blocks_before_request(self):
@@ -41,4 +41,30 @@ class TargetedQuoteTests(unittest.TestCase):
  def test_stale_provider_quote_is_not_rejuvenated(self):
   self.body['bookmakers'][0]['markets'][0]['last_update']=(NOW-timedelta(hours=4)).isoformat()
   rows,r=self.run_check();self.assertEqual(rows,[]);self.assertTrue(r['errors'])
+ def test_preparation_starts_100_minutes_ahead_then_rechecks_before_tipoff(self):
+  self.card['Start (UTC)']=(NOW+timedelta(minutes=100)).isoformat()
+  self.body['commence_time']=self.card['Start (UTC)']
+  for offset in (0,60,90):
+   current=NOW+timedelta(minutes=offset)
+   self.body['bookmakers'][0]['markets'][0]['last_update']=current.isoformat()
+   rows,report=f.refresh_upcoming_quotes(self.store,self.key,[self.card],current,self.get)
+   self.assertEqual(report['events_updated'],['abc123'])
+   self.assertEqual(len(rows),1)
+   f.refresh_upcoming_quotes(self.store,self.key,[self.card],current,self.get)
+  self.assertEqual(self.get.call_count,3)
+  self.assertEqual(len(self.store.query("SELECT key FROM sports_records WHERE namespace='quote_refresh'",fetch=True)),3)
+ def test_fresh_early_event_does_not_block_later_games(self):
+  cards=[dict(self.card,**{'Odds checked (UTC)':NOW.isoformat()})]
+  bodies={}
+  for i in range(4):
+   event='later'+str(i)
+   card=dict(self.card,**{'Provider Event ID':event,'Start (UTC)':(NOW+timedelta(minutes=35+i*10)).isoformat()})
+   cards.append(card)
+   body=json.loads(json.dumps(self.body))
+   body.update(id=event,commence_time=card['Start (UTC)'])
+   bodies[event]=body
+  self.get.side_effect=lambda url,**kw:SimpleNamespace(status_code=200,headers={'x-requests-remaining':'280'},json=lambda:bodies[url.split('/')[-2]])
+  rows,report=self.run_check(cards)
+  self.assertEqual(self.get.call_count,4)
+  self.assertEqual(set(report['events_updated']),set(bodies))
 if __name__=='__main__':unittest.main()

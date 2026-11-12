@@ -321,7 +321,7 @@ def download(store, api_key, current=None, get=None, markets=None):
 
 
 def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
-    """At most two event checks per run and two pre-tipoff windows per game."""
+    """Prepare up to two hours ahead, then recheck closer to tipoff; bounded credits."""
     current=current or datetime.now(timezone.utc);get=get or requests.get
     report={'http_requests':0,'events_updated':[],'errors':[],'checked_at':current.isoformat()}
     if not api_key or not getattr(store,'remote',False):return [],report
@@ -334,18 +334,23 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
         if (card.get('Line Source')!='The Odds API' or not event.isalnum() or not start
                 or start.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()!=day):continue
         lead=(start-current).total_seconds()
-        if not 300<lead<=3600:continue
+        if not 300<lead<=7200:continue
         groups.setdefault(event,[]).append(card)
     rows=[]
-    for event,group in sorted(groups.items(),key=lambda item:item[1][0]['Start (UTC)'])[:2]:
+    attempted=0
+    for event,group in sorted(groups.items(),key=lambda item:item[1][0]['Start (UTC)']):
         start=stamp(group[0]['Start (UTC)'])
         observed=[stamp(c.get('Odds checked (UTC)')) for c in group]
         # No refresh if every quote is still within the near-tipoff limit.
         if all(t and 0<=(current-t).total_seconds()<1500 for t in observed):continue
-        window='final' if (start-current).total_seconds()<=1800 else 'early'
+        lead=(start-current).total_seconds()
+        window='prepare' if lead>3600 else 'final' if lead<=1800 else 'early'
         claim=day+':'+fingerprint+':'+event+':'+window
         prior=store.get('quote_refresh',claim)
         if prior:continue
+        # Fresh/already checked events do not consume a slot for a later game.
+        if attempted>=4:break
+        attempted+=1
         claimed=store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING RETURNING key',
             ('quote_refresh',claim,json.dumps({'state':'reserved'}),current.isoformat()),fetch=True)
         if not claimed:continue
