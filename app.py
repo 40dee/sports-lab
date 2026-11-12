@@ -3258,7 +3258,7 @@ class Workflow:
 
     def maintenance(self, interactive=False):
         count = self.grade(
-            limit=max(1, len(unique_forecasts(self.store.items("forecast")))),
+            limit=max(1, len(unique_forecasts(self.store.forecast_items(metadata_only=True)))),
             time_budget=15 if interactive else 480,
         )
 
