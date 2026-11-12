@@ -10323,20 +10323,20 @@ def render_native_kalshi_refresh():
 
 
 # Navigation widgets rerun only this fragment, avoiding database startup.
-@st.fragment
+@st.fragment(run_every=15)
 def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
     st.caption("Model picks · Research · Results")
     app_page = (st.segmented_control("Navigation", ["Plays", "Fantasy", "Combos", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
-    st.fragment(run_every=5)(render_live_board_status)(workflow.store,st)
+    render_live_board_status(workflow.store,st)
     st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
         st.session_state.pop("selected_prop_card", None)
         st.session_state["last_ui_page"] = app_page
-    # Replace the previous page body before doing any page-specific reads.
-    page_body = st.empty()
-    page_body.empty()
-    with page_body.container(key="sports_lab_page_body_" + app_page.lower()):
+    # One fragment owns navigation, status and page content. Nested timed
+    # fragments and an emptied parent placeholder can discard the page body
+    # independently of the still-visible progress panel.
+    with st.container(key="sports_lab_page_body_" + app_page.lower()):
         loading = st.empty()
         loading.caption("Opening " + app_page + "…")
         render_saved_workspace(controls=(app_page == "Settings"))
