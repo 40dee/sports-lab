@@ -10470,8 +10470,8 @@ def render_native_kalshi_refresh():
             st.error(str(error))
 
 
-# Navigation widgets rerun only this fragment, avoiding database startup.
-@st.fragment
+# Navigation uses a normal app rerun so Streamlit removes the previous page's
+# trailing blocks. Only the lightweight status poll is a timed fragment.
 def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
     st.caption("Model picks · Research · Results")
@@ -10484,7 +10484,7 @@ def render_app_pages():
     # One fragment owns navigation, status and page content. Nested timed
     # fragments and an emptied parent placeholder can discard the page body
     # independently of the still-visible progress panel.
-    with st.container(key="sports_lab_page_body_" + app_page.lower()):
+    with st.container(key="sports_lab_page_body"):
         loading = st.empty()
         loading.caption("Opening " + app_page + "…")
         render_saved_workspace(controls=(app_page == "Settings"))
