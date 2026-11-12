@@ -7613,12 +7613,21 @@ def validate_board(board):
 
 
 def render_saved_workspace(controls=True):
-    if "v4_rows" not in st.session_state:
-        try:
-            board = workspace_load("board")
-            if board:
-                st.session_state.update(validate_board(board))
-        except Exception as error:
+    # Scheduled workers write the shared store, not Streamlit's local SQLite file.
+    # Always prefer the newer shared board so browser sessions see imported plays.
+    try:
+        remote = workflow_store.get("board", "board") or {}
+        if remote.get("v4_rows"):
+            remote_stamp = str(remote.get("v4_scan_at") or "")
+            session_stamp = str(st.session_state.get("v4_scan_at") or "")
+            if "v4_rows" not in st.session_state or remote_stamp > session_stamp:
+                st.session_state.update(validate_board(remote))
+        elif "v4_rows" not in st.session_state:
+            local = workspace_load("board")
+            if local:
+                st.session_state.update(validate_board(local))
+    except Exception as error:
+        if "v4_rows" not in st.session_state:
             st.warning(f"Saved board could not be restored: {error}")
 
     if not controls:
