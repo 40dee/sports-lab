@@ -1,6 +1,9 @@
 name: Prepare NBA board now
 on:
   workflow_dispatch:
+  schedule:
+    # Every 30 minutes; the app's daily budget and refresh ledger prevent repeated paid imports.
+    - cron: '*/30 * * * *'
   push:
     branches: [main]
     paths:
@@ -24,7 +27,7 @@ jobs:
       ODDSPAPI_DAILY_REQUEST_CAP: ${{ vars.ODDSPAPI_DAILY_REQUEST_CAP || '34' }}
       ODDSPAPI_MONTHLY_REQUEST_CAP: ${{ vars.ODDSPAPI_MONTHLY_REQUEST_CAP || '' }}
       PRIZEPICKS_DAILY_REQUEST_CAP: ${{ vars.PRIZEPICKS_DAILY_REQUEST_CAP || '10' }}
-      REFRESH: 'true'
+      REFRESH: 'false'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
