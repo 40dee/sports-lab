@@ -70,6 +70,16 @@ class NavigationTests(unittest.TestCase):
         self.assertFalse(app.exception,list(app.exception))
         self.assertTrue(any('Player 0' in item.value for item in app.markdown))
 
+        # A completed board must retain the combo body across page refreshes,
+        # even if there are no saved qualifying suggestions.
+        for page in ('Combos', 'Plays', 'Combos', 'Combos'):
+            app.session_state['sports_lab_page_buttons']=page
+            app.run()
+            self.assertFalse(app.exception,list(app.exception))
+            if page == 'Combos':
+                self.assertTrue(any(item.value=='Combos' for item in app.subheader))
+                self.assertTrue(any(button.label=='Build from saved board' for button in app.button))
+
     def test_stale_upcoming_fantasy_remains_visible_for_review(self):
         import pandas as pd
         import test_combo_regression as fixtures
