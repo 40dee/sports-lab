@@ -193,7 +193,7 @@ class Store:
         )
         if namespace=='forecast' and self._read_cache is not None:
             for cache_key in list(self._read_cache):
-                if cache_key[:2]==('compact_forecast','forecast'):
+                if cache_key[0] in ('compact_forecast','coverage_forecast') and cache_key[1]=='forecast':
                     self._read_cache.pop(cache_key,None)
         # Update this record in cached lists. A single new forecast must not
         # force a download of every historic forecast on the next render.
@@ -258,7 +258,7 @@ class Store:
             return [(key, json.loads(payload)) for key, payload in rows]
         return self._cached_read("items", namespace, None, load)
 
-    def forecast_items(self, day=None):
+    def forecast_items(self, day=None, metadata_only=False):
         def load():
             # Strip bulky evidence inside the database, before network transfer.
             # Keyset pagination bounds each libSQL HTTP response in memory.
@@ -267,6 +267,10 @@ class Store:
                 else "json_remove(payload,'$.snapshot','$.result.game_context','$.result.roster')")
             portrait=("COALESCE(payload::jsonb#>'{result,roster,athlete,headshot}',payload::jsonb#>'{snapshot,roster,headshot}')::text" if postgres
                 else "COALESCE(json_extract(payload,'$.result.roster.athlete.headshot'),json_extract(payload,'$.snapshot.roster.headshot'))")
+            if metadata_only:
+                expression=("jsonb_build_object('id',payload::jsonb->'id','card',payload::jsonb->'card','created_at',payload::jsonb->'created_at','event_id',payload::jsonb->'event_id')::text" if postgres
+                    else "json_object('id',json_extract(payload,'$.id'),'card',json_extract(payload,'$.card'),'created_at',json_extract(payload,'$.created_at'),'event_id',json_extract(payload,'$.event_id'))")
+                portrait='NULL'
             where='';bounds=()
             if day is not None:
                 start=pd.Timestamp(day,tz=SLATE_TIMEZONE)
@@ -277,21 +281,25 @@ class Store:
                 where=' AND '+field+'>=? AND '+field+'<?'
                 bounds=(lower,upper)
             result=[];after=''
+            page_size=1000 if day is not None else 200
             while True:
                 page=self.query('SELECT key,'+expression+','+portrait+' FROM sports_records '
-                    'WHERE namespace=? AND key>?'+where+' ORDER BY key LIMIT 200',('forecast',after)+bounds,True)
+                    'WHERE namespace=? AND key>?'+where+' ORDER BY key LIMIT '+str(page_size),('forecast',after)+bounds,True)
                 for key,payload,photo in page:
                     record=json.loads(payload)
                     if photo:
                         try:record['portrait']=json.loads(photo)
                         except (ValueError,TypeError):record['portrait']=photo
                     result.append((key,record))
-                if len(page)<200:return result
+                if len(page)<page_size:return result
                 after=page[-1][0]
-        return self._cached_read('compact_forecast','forecast',day,load)
+        return self._cached_read('coverage_forecast' if metadata_only else 'compact_forecast','forecast',day,load)
 
     def slate_forecast_items(self, day):
         return self.forecast_items(day=day)
+
+    def coverage_forecast_items(self, day):
+        return self.forecast_items(day=day,metadata_only=True)
 
     def export(self):
         rows = self.query(
@@ -847,9 +855,11 @@ def combo_clock(reference=None):
     return pd.Timestamp.now(tz='UTC') if reference is None else pd.to_datetime(reference, utc=True)
 
 
-def saved_forecast_records(store, reference=None):
+def saved_forecast_records(store, reference=None, coverage=False):
     """Paged compact reads keep bulky evidence out of board preparation."""
     if reference is not None:
+        metadata=getattr(store,'coverage_forecast_items',None)
+        if coverage and callable(metadata):return metadata(slate_day(reference))
         scoped=getattr(store,'slate_forecast_items',None)
         if callable(scoped):return scoped(slate_day(reference))
     reader=getattr(store,'forecast_items',None)
@@ -9050,7 +9060,7 @@ def refresh_board_health(wf, board):
 def board_coverage(wf, board, reference=None):
     """Count missed deadlines separately so a shrinking slate cannot look complete."""
     current=combo_clock(reference)
-    index = forecast_index(saved_forecast_records(wf.store,current))
+    index = forecast_index(saved_forecast_records(wf.store,current,coverage=True))
     statuses = dict(wf.store.items('calculation_status'))
     cards = {}
     for card in board.get('v4_rows') or []:
