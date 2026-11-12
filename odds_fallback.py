@@ -319,3 +319,63 @@ def download(store, api_key, current=None, get=None, markets=None):
     return rows,report
 
 
+
+def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
+    """At most two event checks per run and two pre-tipoff windows per game."""
+    current=current or datetime.now(timezone.utc);get=get or requests.get
+    report={'http_requests':0,'events_updated':[],'errors':[],'checked_at':current.isoformat()}
+    if not api_key or not getattr(store,'remote',False):return [],report
+    fingerprint=hashlib.sha256(api_key.encode()).hexdigest()[:20]
+    day=current.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()
+    groups={}
+    for card in cards:
+        event=str(card.get('Provider Event ID') or '')
+        start=stamp(card.get('Start (UTC)'))
+        if (card.get('Line Source')!='The Odds API' or not event.isalnum() or not start
+                or start.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat()!=day):continue
+        lead=(start-current).total_seconds()
+        if not 300<lead<=3600:continue
+        groups.setdefault(event,[]).append(card)
+    rows=[]
+    for event,group in sorted(groups.items(),key=lambda item:item[1][0]['Start (UTC)'])[:2]:
+        start=stamp(group[0]['Start (UTC)'])
+        observed=[stamp(c.get('Odds checked (UTC)')) for c in group]
+        # No refresh if every quote is still within the near-tipoff limit.
+        if all(t and 0<=(current-t).total_seconds()<1500 for t in observed):continue
+        window='final' if (start-current).total_seconds()<=1800 else 'early'
+        claim=day+':'+fingerprint+':'+event+':'+window
+        prior=store.get('quote_refresh',claim)
+        if prior:continue
+        claimed=store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING RETURNING key',
+            ('quote_refresh',claim,json.dumps({'state':'reserved'}),current.isoformat()),fetch=True)
+        if not claimed:continue
+        try:
+            account=store.get('source','the_odds_api_quota:'+fingerprint) or {}
+            if 'credits_remaining' not in account:raise ValueError('Verified backup credit balance unavailable.')
+            reserve(store,api_key,current,int(account['credits_remaining']),cost=len(BOARD_MARKETS),daily_allowance=180)
+            report['http_requests']+=1
+            response=get(BASE+'/events/'+event+'/odds',params={'apiKey':api_key,
+                'bookmakers':'prizepicks,draftkings','regions':'us_dfs','markets':','.join(BOARD_MARKETS),
+                'oddsFormat':'american','dateFormat':'iso'},timeout=20)
+            info=quota(response)
+            if 'credits_remaining' in info:
+                store.put('source','the_odds_api_quota:'+fingerprint,dict(info,checked_at=current.isoformat()))
+            if response.status_code!=200:raise ValueError('Quote check returned HTTP '+str(response.status_code)+'.')
+            body=response.json()
+            expected=set(group[0]['Game'].split(' vs '))
+            if (not isinstance(body,dict) or body.get('id')!=event or
+                {body.get('home_team'),body.get('away_team')}!=expected or stamp(body.get('commence_time'))!=start):
+                raise ValueError('Quote event identity mismatch; response rejected.')
+            decoded=decode(body,current.isoformat(),current)
+            counts,states=market_coverage(body,decoded,BOARD_MARKETS)
+            if any(v not in ('available','not_supplied_at_capture','no_outcomes_at_capture') for v in states.values()):
+                raise ValueError('Quote response incomplete or stale; existing lines retained.')
+            rows.extend(decoded);report['events_updated'].append(event)
+            store.put('quote_refresh',claim,{'state':'updated','checked_at':current.isoformat(),
+                'lines':len(decoded),'market_status':states})
+        except (ValueError,TypeError,KeyError,requests.RequestException):
+            note='Targeted quote check could not verify current lines; existing timestamps retained.'
+            report['errors'].append(note)
+            store.put('quote_refresh',claim,{'state':'failed','checked_at':current.isoformat(),'note':note})
+    store.put('source','the_odds_api_quote_refresh_latest',report)
+    return rows,report

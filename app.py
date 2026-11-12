@@ -9303,7 +9303,7 @@ def primary_odds_quota_exhausted(store):
 
 
 def run_quota_fallback(wf, budget_seconds=1200):
-    from odds_fallback import download, BOARD_MARKETS, COVERAGE_VERSION, prune_unavailable_lines
+    from odds_fallback import download, BOARD_MARKETS, COVERAGE_VERSION, prune_unavailable_lines, refresh_upcoming_quotes
     board_run_stage(wf.store,'importing')
     day=slate_day();board=wf.store.get('board','board') or {}
     saved_status=wf.store.get('source','the_odds_api_fallback_latest') or {}
@@ -9312,6 +9312,13 @@ def run_quota_fallback(wf, budget_seconds=1200):
         rows=[];status=dict(saved_status,http_requests=0,games_requested=0,reused_snapshot=True)
     else:
         rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''),markets=BOARD_MARKETS)
+    refreshed,quote_report=refresh_upcoming_quotes(wf.store,setting('THE_ODDS_API_KEY',''),board.get('v4_rows') or [])
+    status=dict(status,targeted_refresh=quote_report)
+    if quote_report['events_updated']:
+        changed=set(quote_report['events_updated'])
+        rows=[c for c in rows if str(c.get('Provider Event ID')) not in changed]+refreshed
+        board['v4_rows']=[c for c in board.get('v4_rows',[]) if not (
+            c.get('Line Source')=='The Odds API' and str(c.get('Provider Event ID')) in changed)]
     game_coverage=status.get('game_coverage') or []
     board_download_progress(wf.store,provider='The Odds API',state='saved snapshot' if status.get('reused_snapshot') else status.get('state'),
         games_total=status.get('games_available'),games_done=len(game_coverage),
