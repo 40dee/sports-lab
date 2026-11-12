@@ -9099,7 +9099,7 @@ def board_coverage(wf, board, reference=None):
 
 
 def scheduled_board_refresh_due(current, starts, ledger):
-    """Start the daily board at 14:30 Pacific, or before an earlier tipoff."""
+    """Start the daily board at 10:00 Pacific, or two hours before an earlier tipoff."""
     if ledger.get('refreshes') or not starts:
         return False
     current = utc_timestamp(current)
@@ -9109,7 +9109,7 @@ def scheduled_board_refresh_due(current, starts, ledger):
         return False
     local = current.tz_convert(SLATE_TIMEZONE)
     minutes = (min(upcoming) - current).total_seconds() / 60
-    return (local.hour, local.minute) >= (14, 30) or 0 < minutes <= 60
+    return (local.hour, local.minute) >= (10, 0) or 0 < minutes <= 120
 
 
 def import_daily_prizepicks_board(wf, board, ledger, day):
@@ -9420,7 +9420,7 @@ if '--auto-board' in sys.argv:
         explicit_refresh='--refresh' in sys.argv
         scheduled='--scheduled' in sys.argv
         if scheduled:
-            # GitHub wakes every 30 minutes; bootstrap at 14:30 Pacific.
+            # GitHub wakes every 30 minutes; bootstrap at 10:00 Pacific.
             # Local-time comparison handles daylight saving automatically.
             current=pd.Timestamp.now(tz='UTC')
             today=slate_day(current)
