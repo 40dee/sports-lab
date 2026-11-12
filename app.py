@@ -8548,6 +8548,20 @@ def fantasy_saved_records(records, grades, reference=None):
     return sorted(values, key=lambda item:(item['start'],str(item['card'].get('Player')),float(item['card']['Line'])), reverse=True)
 
 
+def current_fantasy_records(rows, records, grades, reference=None):
+    """Join current board quotes to immutable predictions; retired quotes stay in history."""
+    index = forecast_index(records)
+    joined = []
+    for card in rows:
+        if not fantasy_weights(card):
+            continue
+        frozen = saved_prediction(index, card)
+        if frozen:
+            key = frozen.get('id') or identity(frozen.get('card') or {})
+            joined.append((key, dict(frozen, card=card)))
+    return fantasy_saved_records(joined, grades, reference)
+
+
 def fantasy_saved_summary(rows, records, grades, reference=None):
     current = pd.Timestamp.now(tz='UTC') if reference is None else utc_timestamp(reference)
     day = slate_day(current)
@@ -8648,7 +8662,8 @@ def render_fantasy_plays(wf, st):
     board = wf.store.get('board', 'board') or {}
     rows = board.get('v4_rows') or st.session_state.get('v4_rows', [])
     summary, saved = fantasy_saved_summary(rows, records, grades)
-    upcoming_all = [item for item in saved if item['upcoming'] and item['date'] == slate_day()]
+    upcoming_all = [item for item in current_fantasy_records(rows, records, grades)
+                    if item['upcoming'] and item['date'] == slate_day()]
     current_cards={market_signature(c):c for c in rows}
     line_checks=dict(wf.store.items('odds_refresh'))
     upcoming=[]
@@ -8665,7 +8680,7 @@ def render_fantasy_plays(wf, st):
         st.caption('⚠ Feed incomplete · Saved projections shown; full Fantasy coverage is not confirmed.')
     date = None
     if mode == 'Upcoming':
-        fantasy_board_view=st.segmented_control('Fantasy board',['All saved lines','Selectable only'],default='All saved lines',key='fantasy_board_scope') or 'All saved lines'
+        fantasy_board_view=st.segmented_control('Fantasy board',['Selectable only','All saved lines'],default='Selectable only',key='fantasy_board_scope_v2') or 'All saved lines'
         eligible_signatures={market_signature(item['card']) for item in upcoming}
         visible = upcoming if fantasy_board_view=='Selectable only' else [
             dict(item,card=current_cards.get(market_signature(item['card']),item['card']),
@@ -8731,7 +8746,7 @@ def render_fantasy_plays(wf, st):
     st.caption(f'{len(visible)} lines · {sum(item["outcome"] in ("WIN","LOSS","TIE","DNP") for item in visible)} settled · Started games show saved pregame forecasts')
     page_size = 12
     pages = max(1, math.ceil(len(visible)/page_size))
-    filters = (mode, date, search, tier_choice, st.session_state.get("fantasy_board_scope"))
+    filters = (mode, date, search, tier_choice, st.session_state.get("fantasy_board_scope_v2"))
     if st.session_state.get('_fantasy_filters') != filters or st.session_state.get('fantasy_cards_page',1) > pages:
         st.session_state.pop('fantasy_cards_page',None)
         st.session_state['_fantasy_filters'] = filters
