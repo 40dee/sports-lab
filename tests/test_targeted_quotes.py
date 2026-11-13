@@ -23,6 +23,21 @@ class TargetedQuoteTests(unittest.TestCase):
   self.body={'id':'abc123','home_team':'A','away_team':'B','commence_time':self.card['Start (UTC)'],'bookmakers':[{'key':'prizepicks','markets':[{'key':'player_points','last_update':NOW.isoformat(),'outcomes':[{'name':'Over','description':'Player','point':20.5},{'name':'Under','description':'Player','point':20.5}]}]}]}
   self.get=Mock(return_value=SimpleNamespace(status_code=200,headers={'x-requests-remaining':'328'},json=lambda:self.body))
  def run_check(self,cards=None):return f.refresh_upcoming_quotes(self.store,self.key,cards or [self.card],NOW,self.get)
+ def test_fantasy_only_refresh_fits_four_credit_balance_and_keeps_full_refresh_separate(self):
+  self.store.put('source','the_odds_api_quota:'+self.fingerprint,{'credits_remaining':4})
+  # A full-market attempt cannot afford the request.
+  rows,report=self.run_check();self.get.assert_not_called()
+  market=self.body['bookmakers'][0]['markets'][0]
+  market['key']='player_fantasy_points'
+  self.get.return_value.headers={'x-requests-remaining':'2'}
+  rows,report=f.refresh_upcoming_quotes(self.store,self.key,[self.card],NOW,self.get,markets=f.FANTASY_MARKETS)
+  self.assertEqual(report['events_updated'],['abc123'])
+  self.assertEqual(len(rows),1)
+  self.assertEqual(self.get.call_args.kwargs['params']['markets'],','.join(f.FANTASY_MARKETS))
+  month=NOW.strftime('%Y-%m')+':the_odds_api:'+self.fingerprint
+  self.assertEqual(self.store.get('request_budget',month),498)
+  f.refresh_upcoming_quotes(self.store,self.key,[self.card],NOW,self.get,markets=f.FANTASY_MARKETS)
+  self.assertEqual(self.get.call_count,1)
  def test_stale_near_tipoff_refreshed_once_preserving_old_card(self):
   old=dict(self.card);rows,r=self.run_check()
   self.assertEqual(r['events_updated'],['abc123']);self.assertEqual(len(rows),1)
