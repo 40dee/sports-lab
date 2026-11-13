@@ -10,61 +10,58 @@ class BoardCompletionTests(unittest.TestCase):
     def ready(self):
         return fixture.populated(3)
 
-    def test_complete_board_allows_and_missing_or_active_run_blocks(self):
-        store=self.ready()
-        self.assertTrue(fixture.env['combo_board_ready'](store,fixture.REF)[0])
-        for stage in ('importing','preparing','failed',None):
-            store.put('board_run','2026-11-09',{'stage':stage,'import_complete':True})
-            self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
-
-    def test_partial_import_never_generates_or_overwrites_old_suggestions(self):
-        store=self.ready()
-        store.put('combo_suggestions','2026-11-09',{'old':'preserve'})
-        store.put('board_run','2026-11-09',{'stage':'finished','import_complete':False})
-        report=fixture.env['update_combos'](store,True,fixture.REF)
-        self.assertEqual(report['generated'],0)
-        self.assertIn('incomplete',report['held_reason'])
-        self.assertEqual(store.get('combo_suggestions','2026-11-09'),{'old':'preserve'})
-        self.assertEqual(store.items('combo'),[])
-
-    def test_pending_blocks_but_unavailable_is_excluded(self):
-        store=self.ready()
-        first=next(iter(store.items('forecast')))[0]
-        del store.records['forecast',first]
+    def test_ready_board_survives_active_failed_and_partial_import(self):
+        for stage in ('importing','preparing','finished','failed'):
+            store=self.ready()
+            store.put('board_run','2026-11-09',{'stage':stage,'import_complete':False})
+            self.assertTrue(fixture.env['combo_board_ready'](store,fixture.REF)[0])
+        store.put('board_run','2026-11-09',{})
         self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
-        store.put('calculation_status',first,{'Status':'Unavailable'})
+
+    def test_pending_game_does_not_enter_combos_or_hold_other_games(self):
+        store=fixture.populated(6)
+        missing=[k for k,v in store.items('forecast') if v['event_id']=='0']
+        for key in missing:del store.records['forecast',key]
+        store.put('board_run','2026-11-09',{'stage':'finished','import_complete':False})
+        self.assertTrue(fixture.env['combo_board_ready'](store,fixture.REF)[0])
+        report=fixture.env['update_combos'](store,True,fixture.REF)
+        self.assertGreater(report['generated'],0)
+        for _,combo in store.items('combo'):
+            self.assertTrue(all(leg['forecast_id'] not in missing for leg in combo['legs']))
+        # Completion flags cannot make an empty projection set usable.
+        store.records={k:v for k,v in store.records.items() if k[0]!='forecast'}
+        self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
+
+    def test_changed_board_revalidates_exact_rows_and_empty_board_blocks(self):
+        store=self.ready();board=store.get('board','board')
+        board['v4_scan_at']='new'
+        board['v4_rows'][0]['Line']=99.5
+        store.put('board','board',board)
         self.assertTrue(fixture.env['combo_board_ready'](store,fixture.REF)[0])
         pool,_=fixture.env['combo_pool'](store,fixture.REF)
-        self.assertTrue(all(item['forecast_id']!=first for item in pool))
-
-    def test_changed_board_and_empty_board_block(self):
-        store=self.ready();board=store.get('board','board')
-        board['v4_scan_at']='new';store.put('board','board',board)
+        self.assertTrue(all(item['card']['Line']!=99.5 for item in pool))
+        store.put('board','board',{'v4_rows':[]})
         self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
 
-    def test_skipped_market_stays_excluded_after_its_game_starts(self):
-        store=self.ready()
-        board=store.get('board','board')
+    def test_missed_and_unavailable_rows_do_not_hide_ready_games(self):
+        store=self.ready();board=store.get('board','board')
         skipped=dict(board['v4_rows'][0])
         skipped['Start (UTC)']='2026-11-09T17:00:00Z'
         skipped['Fixture ID']='earlier-game'
-        board['v4_rows'].append(skipped)
-        store.put('board','board',board)
-        key=fixture.env['identity'](skipped)
-        # A truly unprocessed past game must still fail the completion check.
-        self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
-        store.put('calculation_status',key,{'Status':'Unavailable'})
+        board['v4_rows'].append(skipped);store.put('board','board',board)
+        self.assertTrue(fixture.env['combo_board_ready'](store,fixture.REF)[0])
+        store.put('calculation_status',fixture.env['identity'](skipped),{'Status':'Unavailable'})
         self.assertTrue(fixture.env['combo_board_ready'](store,fixture.REF)[0])
         coverage=fixture.env['board_coverage'](SimpleNamespace(store=store),board,fixture.REF)
         self.assertEqual(coverage['missed_start'],0)
         self.assertEqual(coverage['upcoming_unavailable'],1)
-        store.put('board','board',{'v4_rows':[]})
-        self.assertFalse(fixture.env['combo_board_ready'](store,fixture.REF)[0])
 
-    def test_saved_combo_cannot_be_recorded_during_new_import(self):
+    def test_saved_combo_still_checks_its_own_lines_during_import(self):
         store=self.ready();pool,_=fixture.env['combo_pool'](store,fixture.REF)
         combo=fixture.env['combo_snapshot'](pool,'balanced-v1',fixture.REF)
         store.put('board_run','2026-11-09',{'stage':'importing'})
+        self.assertTrue(fixture.env['combo_live_check'](store,combo,fixture.REF)[0])
+        board=store.get('board','board');board['v4_rows']=[];store.put('board','board',board)
         self.assertFalse(fixture.env['combo_live_check'](store,combo,fixture.REF)[0])
 
     def test_stage_timestamps_persist_without_changing_source_or_spending(self):
