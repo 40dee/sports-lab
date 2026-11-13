@@ -8676,7 +8676,7 @@ def render_fantasy_plays(wf, st):
         st.caption('⚠ Feed incomplete · Saved projections shown; full Fantasy coverage is not confirmed.')
     date = None
     if mode == 'Upcoming':
-        fantasy_board_view=st.segmented_control('Fantasy board',['Selectable only','All saved lines'],default='Selectable only',key='fantasy_board_scope_v2') or 'All saved lines'
+        fantasy_board_view=st.segmented_control('Fantasy board',['Selectable only','All saved lines'],default='All saved lines',key='fantasy_board_scope_v3') or 'All saved lines'
         eligible_signatures={market_signature(item['card']) for item in upcoming}
         visible = upcoming if fantasy_board_view=='Selectable only' else [
             dict(item,card=current_cards.get(market_signature(item['card']),item['card']),
@@ -8744,7 +8744,7 @@ def render_fantasy_plays(wf, st):
     st.caption(f'{len(visible)} lines · {sum(item["outcome"] in ("WIN","LOSS","TIE","DNP") for item in visible)} settled · Started games show saved pregame forecasts')
     page_size = 12
     pages = max(1, math.ceil(len(visible)/page_size))
-    filters = (mode, date, search, tier_choice, st.session_state.get("fantasy_board_scope_v2"))
+    filters = (mode, date, search, tier_choice, st.session_state.get("fantasy_board_scope_v3"))
     if st.session_state.get('_fantasy_filters') != filters or st.session_state.get('fantasy_cards_page',1) > pages:
         st.session_state.pop('fantasy_cards_page',None)
         st.session_state['_fantasy_filters'] = filters
