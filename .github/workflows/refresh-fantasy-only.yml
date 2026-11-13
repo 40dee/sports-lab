@@ -8,7 +8,7 @@ permissions:
   contents: read
 concurrency:
   group: sports-lab-worker
-  cancel-in-progress: false
+  cancel-in-progress: true
 jobs:
   fantasy:
     runs-on: ubuntu-24.04
