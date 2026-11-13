@@ -43,6 +43,10 @@ jobs:
           for mode in ('standard','goblin','demon','mixed'):
               pool,excluded=env['combo_pool'](store,current,tier_mode=mode)
               print('COMBO_POOL',mode,'eligible',len(pool),'excluded',env['encode'](excluded))
+          helper=next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name=='ui_number')
+          exec(compile(ast.Module(body=[helper],type_ignores=[]),'app.py','exec'),env)
+          for key,value in store.items('source'):
+              if key.startswith('the_odds_api_quota:'):print('PROVIDER_BALANCE',env['encode'](value))
           rows=board.get('v4_rows') or []
           records=env['saved_forecast_records'](store,current)
           items=env['current_fantasy_records'](rows,records,{},current)
