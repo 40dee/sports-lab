@@ -320,8 +320,11 @@ def download(store, api_key, current=None, get=None, markets=None):
 
 
 
-def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
+def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None, markets=None):
     """Refresh the whole saved slate from 14:30 Pacific, then verify near tipoff."""
+    markets=tuple(markets or BOARD_MARKETS)
+    if not markets or any(m not in BOARD_MARKETS for m in markets) or len(set(markets))!=len(markets):
+        raise ValueError('Unsupported or duplicate refresh markets.')
     current=current or datetime.now(timezone.utc);get=get or requests.get
     report={'http_requests':0,'events_updated':[],'errors':[],'checked_at':current.isoformat()}
     if not api_key or not getattr(store,'remote',False):return [],report
@@ -343,7 +346,8 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
     for event,group in sorted(groups.items(),key=lambda item:item[1][0]['Start (UTC)']):
         start=stamp(group[0]['Start (UTC)'])
         observed=[stamp(c.get('Odds checked (UTC)')) for c in group]
-        prefix=day+':'+fingerprint+':'+event+':'
+        profile='' if markets==BOARD_MARKETS else hashlib.sha256(','.join(markets).encode()).hexdigest()[:12]+':'
+        prefix=day+':'+fingerprint+':'+event+':'+profile
         afternoon_claim=prefix+'afternoon'
         captured=store.get('quote_refresh',afternoon_claim) or {}
         afternoon_due=afternoon and not captured
@@ -380,10 +384,10 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
         try:
             account=store.get('source','the_odds_api_quota:'+fingerprint) or {}
             if 'credits_remaining' not in account:raise ValueError('Verified backup credit balance unavailable.')
-            reserve(store,api_key,current,int(account['credits_remaining']),cost=len(BOARD_MARKETS),daily_allowance=180)
+            reserve(store,api_key,current,int(account['credits_remaining']),cost=len(markets),daily_allowance=180)
             report['http_requests']+=1
             response=get(BASE+'/events/'+event+'/odds',params={'apiKey':api_key,
-                'bookmakers':'prizepicks,draftkings','regions':'us_dfs','markets':','.join(BOARD_MARKETS),
+                'bookmakers':'prizepicks,draftkings','regions':'us_dfs','markets':','.join(markets),
                 'oddsFormat':'american','dateFormat':'iso'},timeout=20)
             info=quota(response)
             if 'credits_remaining' in info:
@@ -395,7 +399,7 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None):
                 {body.get('home_team'),body.get('away_team')}!=expected or stamp(body.get('commence_time'))!=start):
                 raise ValueError('Quote event identity mismatch; response rejected.')
             decoded=decode(body,current.isoformat(),current)
-            counts,states=market_coverage(body,decoded,BOARD_MARKETS)
+            counts,states=market_coverage(body,decoded,markets)
             if any(v not in ('available','not_supplied_at_capture','no_outcomes_at_capture') for v in states.values()):
                 raise ValueError('Quote response incomplete or stale; existing lines retained.')
             rows.extend(decoded);report['events_updated'].append(event)
