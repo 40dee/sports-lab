@@ -44,3 +44,4 @@ jobs:
       - name: Grade completed games
         if: ${{ !cancelled() }}
         run: python app.py --maintenance
+# Resume saved board after releasing independently verified games (2026-11-13).
