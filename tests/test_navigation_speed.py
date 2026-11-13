@@ -22,18 +22,24 @@ class NavigationSpeedTests(unittest.TestCase):
    env,store,verify=self.env(**kwargs);env['combo_board_ready'](store);verify.assert_called_once()
  def test_worker_still_performs_full_validation(self):
   env,store,verify=self.env(ui=False);env['combo_board_ready'](store);verify.assert_called_once()
- def test_background_checks_keep_unchanged_verified_board_visible_only_in_ui(self):
+ def test_background_checks_keep_ready_rows_visible(self):
   for ui in (True,False):
    env,store,verify=self.env(ui=ui)
    store.get('board_run','day')['stage']='preparing'
-   self.assertEqual(env['combo_board_ready'](store)[0],ui)
-   verify.assert_not_called()
- def test_active_worker_cannot_show_changed_or_incomplete_snapshot(self):
-  for changes in ({'board_scan_at':'old'},{'upcoming_pending':1},{'ready':0}):
-   env,store,verify=self.env()
-   store.get('board_run','day')['stage']='preparing'
-   store.get('coverage','day').update(changes)
-   self.assertFalse(env['combo_board_ready'](store)[0])
+   self.assertTrue(env['combo_board_ready'](store)[0])
+   if ui:verify.assert_not_called()
+   else:verify.assert_called_once()
+ def test_active_worker_rechecks_changed_snapshot_and_excludes_pending(self):
+  env,store,verify=self.env()
+  store.get('board_run','day')['stage']='preparing'
+  store.get('coverage','day')['board_scan_at']='old'
+  self.assertTrue(env['combo_board_ready'](store)[0]);verify.assert_called_once()
+  env,store,verify=self.env()
+  store.get('board_run','day')['stage']='preparing'
+  store.get('coverage','day')['upcoming_pending']=1
+  self.assertTrue(env['combo_board_ready'](store)[0])
+  store.get('coverage','day')['ready']=0
+  self.assertFalse(env['combo_board_ready'](store)[0])
  def test_navigation_has_no_periodic_whole_page_timer(self):
   node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='render_app_pages')
   self.assertTrue(all(not isinstance(d,ast.Call) or not any(k.arg=='run_every' for k in d.keywords) for d in node.decorator_list))
