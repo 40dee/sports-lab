@@ -1191,42 +1191,29 @@ def board_run_stage(store, stage, import_complete=None):
 
 
 def combo_board_ready(store, reference=None):
-    """Fail closed for partial imports, active workers and unfinished forecasts."""
+    """Release frozen rows independently; individual pick checks remain mandatory."""
     current=combo_clock(reference)
     run=store.get('board_run',slate_day(current)) or {}
-    if run.get('stage')!='finished':
-        # Browsing can keep the last verified, unchanged snapshot visible while
-        # a background pass checks it. Workers still wait for their own completion.
-        if getattr(store,'ui_read_projection',False):
-            board=store.get('board','board') or {}
-            previous=store.get('coverage',slate_day(current)) or {}
-            if (board.get('v4_scan_at') and previous.get('board_scan_at')==board.get('v4_scan_at')
-                    and pd.notna(utc_timestamp(previous.get('checked_at')))
-                    and previous.get('ready',0)>0
-                    and previous.get('ready',0)+previous.get('upcoming_unavailable',0)==previous.get('imported')
-                    and not any(previous.get(k,0) for k in ('upcoming_pending','missed_start'))):
-                return True,'Showing the verified saved board while background checks run.'
-        return False,'Waiting for the board worker to finish importing and preparing projections.'
-    if not run.get('import_complete'):
-        return False,'Board import is incomplete. Combos are held until coverage is verified.'
+    if run.get('stage') not in ('importing','preparing','finished','failed'):
+        return False,'Waiting for a recorded board worker pass.'
     board=store.get('board','board') or {}
-    if board.get('v4_scan_at')!=run.get('board_scan_at'):
-        return False,'The board changed after its completion check. Waiting for verification.'
     from types import SimpleNamespace
-    coverage=store.get('coverage',slate_day(current)) or {} if getattr(store,'ui_read_projection',False) else {}
+    # Recompute against the current board, never an older completion snapshot.
+    # This only reads saved projections; it makes no provider requests.
+    coverage=(store.get('coverage',slate_day(current)) or {}) if getattr(store,'ui_read_projection',False) else {}
     verified=utc_timestamp(coverage.get('checked_at'))
     finished=utc_timestamp(run.get('finished_at'))
     if (coverage.get('board_scan_at')!=board.get('v4_scan_at') or pd.isna(verified)
-            or pd.isna(finished) or verified<finished):
+            or (run.get('stage')=='finished' and (pd.isna(finished) or verified<finished))):
         coverage=board_coverage(SimpleNamespace(store=store),board,reference=current)
-    if not coverage.get('imported'):
-        return False,'Waiting for a nonempty verified board.'
-    # Attempted lines without a usable projection are excluded from picks;
-    # they must not hold the ready board indefinitely.
-    if not coverage.get('ready') or coverage.get('ready',0)+coverage.get('upcoming_unavailable',0)!=coverage.get('imported') or any(coverage.get(k,0) for k in
-            ('upcoming_pending','missed_start')):
-        return False,'Waiting for all imported lines to have frozen pregame projections ('+str(coverage.get('ready',0))+'/'+str(coverage['imported'])+' ready).'
-    return True,'Board import and projections complete; unavailable projections excluded.'
+    if not coverage.get('imported') or not coverage.get('ready'):
+        return False,'Waiting for a usable frozen pregame projection.'
+    unfinished=coverage.get('upcoming_pending',0)+coverage.get('missed_start',0)
+    if unfinished or not run.get('import_complete') or run.get('stage')!='finished':
+        return True,('Showing ready projections; unfinished games and lines are excluded '
+                     'while background preparation continues. Board coverage: '
+                     +str(coverage['ready'])+'/'+str(coverage['imported'])+' ready.')
+    return True,'Ready projections available; unavailable projections excluded.'
 
 
 def render_board_run_status(store, st):
@@ -10743,10 +10730,13 @@ def render_app_pages():
             st.info('Today’s picks are waiting for the complete board. '+board_note)
             st.caption('Saved plays and results remain available. Progress updates automatically; browsing does not download provider lines.')
         elif app_page == 'Combos':
+            if 'unfinished' in board_note: st.caption(board_note)
             render_combos(workflow, st)
         elif app_page == 'Fantasy':
+            if 'unfinished' in board_note: st.caption(board_note)
             render_fantasy_plays(workflow, st)
         elif app_page in ("Plays", "Saved"):
+            if "unfinished" in board_note: st.caption(board_note)
             ui_board(app_page)
 
         if app_page == "Settings":
