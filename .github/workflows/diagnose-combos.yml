@@ -60,6 +60,15 @@ jobs:
               reason=detail if not fresh else ('SELECTABLE' if env['pick_is_selectable'](card,item['frozen'].get('result') or {}) else env['pick_side_note'](card,item['frozen'].get('result') or {}))
               reasons[reason]+=1
           print('FANTASY_REASONS',dict(reasons))
+          print('FANTASY_RECOVERY',env['encode'](store.get('source','fantasy_only_refresh_latest')))
+          samples=[]
+          for item in items:
+              card=item['card'];result=item['frozen'].get('result') or {}
+              if item['upcoming'] and card.get('Platform')=='prizepicks' and card.get('Line Type')=='Standard':
+                  fresh,note=env['line_freshness'](card,current,checks)
+                  samples.append({'player':card.get('Player'),'game':card.get('Game'),'line':card.get('Line'),'projection':item['projection'],'direction':result.get('direction'),'fresh':fresh,'note':note})
+          print('FANTASY_PROJECTIONS',env['encode'](sorted(samples,key=lambda v:(not v['fresh'],v['game'],v['player']))[:30]))
+
           print('QUOTE_REFRESH',env['encode'](store.get('source','the_odds_api_quote_refresh_latest')))
           for key,value in store.items('quote_refresh'):
               if str(key).startswith(env['slate_day'](current)):print('QUOTE_CHECK',key,env['encode'](value))
