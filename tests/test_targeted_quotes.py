@@ -27,6 +27,8 @@ class TargetedQuoteTests(unittest.TestCase):
   self.store.put('source','the_odds_api_quota:'+self.fingerprint,{'credits_remaining':4})
   # A full-market attempt cannot afford the request.
   rows,report=self.run_check();self.get.assert_not_called()
+  day=NOW.astimezone(f.ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d')+':the_odds_api:'+self.fingerprint
+  self.store.put('request_budget',day,180)
   market=self.body['bookmakers'][0]['markets'][0]
   market['key']='player_fantasy_points'
   self.get.return_value.headers={'x-requests-remaining':'2'}
@@ -36,6 +38,7 @@ class TargetedQuoteTests(unittest.TestCase):
   self.assertEqual(self.get.call_args.kwargs['params']['markets'],','.join(f.FANTASY_MARKETS))
   month=NOW.strftime('%Y-%m')+':the_odds_api:'+self.fingerprint
   self.assertEqual(self.store.get('request_budget',month),498)
+  self.assertEqual(self.store.get('request_budget',day),182)
   f.refresh_upcoming_quotes(self.store,self.key,[self.card],NOW,self.get,markets=f.FANTASY_MARKETS)
   self.assertEqual(self.get.call_count,1)
  def test_stale_near_tipoff_refreshed_once_preserving_old_card(self):
