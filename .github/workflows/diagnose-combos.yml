@@ -43,4 +43,20 @@ jobs:
           for mode in ('standard','goblin','demon','mixed'):
               pool,excluded=env['combo_pool'](store,current,tier_mode=mode)
               print('COMBO_POOL',mode,'eligible',len(pool),'excluded',env['encode'](excluded))
+          rows=board.get('v4_rows') or []
+          records=env['saved_forecast_records'](store,current)
+          items=env['current_fantasy_records'](rows,records,{},current)
+          from collections import Counter
+          reasons=Counter()
+          checks=dict(store.items('odds_refresh'))
+          for item in items:
+              if not item['upcoming']:continue
+              card=item['card']
+              fresh,detail=env['line_freshness'](card,current,checks)
+              reason=detail if not fresh else ('SELECTABLE' if env['pick_is_selectable'](card,item['frozen'].get('result') or {}) else env['pick_side_note'](card,item['frozen'].get('result') or {}))
+              reasons[reason]+=1
+          print('FANTASY_REASONS',dict(reasons))
+          print('QUOTE_REFRESH',env['encode'](store.get('source','the_odds_api_quote_refresh_latest')))
+          for key,value in store.items('quote_refresh'):
+              if str(key).startswith(env['slate_day'](current)):print('QUOTE_CHECK',key,env['encode'](value))
           PY
