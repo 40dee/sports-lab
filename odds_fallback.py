@@ -59,7 +59,7 @@ def reserve(store, key, current, remaining_hint, cost=COST, daily_allowance=None
     monthly=int(store.get('request_budget',month,used) or used)
     today=int(store.get('request_budget',day,0) or 0)
     days=calendar.monthrange(current.year,current.month)[1]-current.day+1
-    daily_cap=min(24,max(0,(500-monthly+today)//max(1,days))) if daily_allowance is None else min(180,max(0,int(daily_allowance)))
+    daily_cap=min(24,max(0,(500-monthly+today)//max(1,days))) if daily_allowance is None else min(500,max(0,int(daily_allowance)))
     if monthly+cost>500 or today+cost>daily_cap:
         raise ValueError('Free fallback credit allowance reached; saved plays retained.')
     rows=store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET '
@@ -384,7 +384,7 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None, marke
         try:
             account=store.get('source','the_odds_api_quota:'+fingerprint) or {}
             if 'credits_remaining' not in account:raise ValueError('Verified backup credit balance unavailable.')
-            reserve(store,api_key,current,int(account['credits_remaining']),cost=len(markets),daily_allowance=180)
+            reserve(store,api_key,current,int(account['credits_remaining']),cost=len(markets),daily_allowance=184 if markets==FANTASY_MARKETS else 180)
             report['http_requests']+=1
             response=get(BASE+'/events/'+event+'/odds',params={'apiKey':api_key,
                 'bookmakers':'prizepicks,draftkings','regions':'us_dfs','markets':','.join(markets),
@@ -406,8 +406,10 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None, marke
             store.put('quote_refresh',prefix+'latest',{'state':'updated','checked_at':current.isoformat()})
             store.put('quote_refresh',claim,{'state':'updated','checked_at':current.isoformat(),
                 'lines':len(decoded),'market_status':states})
-        except (ValueError,TypeError,KeyError,requests.RequestException):
+        except (ValueError,TypeError,KeyError,requests.RequestException) as error:
             note='Targeted quote check could not verify current lines; existing timestamps retained.'
+            if isinstance(error,ValueError) and not isinstance(error,requests.RequestException) and str(error).startswith(('Free fallback','Verified backup','Quote ')):
+                note+=' '+str(error)
             report['errors'].append(note)
             store.put('quote_refresh',claim,{'state':'failed','checked_at':current.isoformat(),'note':note})
     store.put('source','the_odds_api_quote_refresh_latest',report)
