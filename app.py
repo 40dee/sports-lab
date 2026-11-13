@@ -4680,7 +4680,13 @@ def reserve_odds_request(store, reference=None):
     reserved=store.query('UPDATE sports_records SET payload=CAST(CAST(payload AS INTEGER)+1 AS TEXT),updated=? '
         'WHERE namespace=? AND key=? AND CAST(payload AS INTEGER)<? RETURNING payload',
         (now(),'request_budget',monthly['key'],monthly['limit']),fetch=True)
-    if not reserved:raise ValueError('Monthly OddsPAPI allowance exhausted; use saved or manually entered lines.')
+    if not reserved:
+        # The daily reservation was committed separately. Refund it when the
+        # monthly guard rejects the request, or today's budget is overstated.
+        store.query('UPDATE sports_records SET payload=CAST(CAST(payload AS INTEGER)-1 AS TEXT),updated=? '
+            'WHERE namespace=? AND key=? AND CAST(payload AS INTEGER)>0',
+            (now(),'request_budget',key))
+        raise ValueError('Monthly OddsPAPI allowance exhausted; use saved or manually entered lines.')
     return int(rows[0][0])
 
 
