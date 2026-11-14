@@ -14,7 +14,8 @@ def main():
     sql = """SELECT namespace,key,payload,updated FROM sports_records
         WHERE (namespace='preparation' AND key='last')
         OR (namespace IN ('board_run','board_download','coverage','automation') AND key=?)
-        LIMIT 5"""
+        OR (namespace='board' AND key='board')
+        LIMIT 6"""
     body = json.dumps({"requests": [
         {"type":"execute","stmt":{"sql":sql,"args":[{"type":"text","value":day}],"want_rows":True}},
         {"type":"close"}]}).encode()
@@ -57,6 +58,14 @@ def main():
         "last_completed_pass": {key:(ledger.get("preparation") or {}).get(key) for key in ("ready","total","pending","unavailable","finished_at")},
         "provider_capture_complete": (ledger.get("fallback") or {}).get("complete")
     }
+    games = {}
+    for card in (records.get("board", {}).get("v4_rows") or []):
+        game = str(card.get("Game", "Unknown"))
+        item = games.setdefault(game, {"lines": 0, "fantasy": 0, "latest_quote": ""})
+        item["lines"] += 1
+        item["fantasy"] += int("fantasy" in str(card.get("Stat", "")).lower() or "fantasy" in str(card.get("Stat Key", "")).lower())
+        item["latest_quote"] = max(item["latest_quote"], str(card.get("Odds checked (UTC)") or ""))
+    report["games"] = games
     print("BOARD_PROGRESS_JSON " + json.dumps(report, sort_keys=True))
     return 0
 
