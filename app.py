@@ -9472,12 +9472,8 @@ def primary_odds_quota_exhausted(store):
     from odds_fallback import primary_exhausted
     account=odds_account_snapshot(store)
     budget=odds_monthly_budget(store,account)
-    if primary_exhausted(account,budget):
-        return True
-    day=slate_day()
-    cap=min(budget['daily_cap'],int(store.get('request_budget',day+':oddspapi_cap',budget['daily_cap'])))
-    used=int(store.get('request_budget',day+':oddspapi',0))
-    return used >= cap
+    # Daily pacing is a spending guard, not permission to consume backup credits.
+    return primary_exhausted(account,budget)
 
 
 def newer_quote_rows(previous, incoming, family):
@@ -9593,11 +9589,11 @@ def automatic_board_run_with_fallback(wf, refresh=True, budget_seconds=1200):
         report=automatic_board_run(wf,refresh,budget_seconds)
     except ValueError as error:
         if any(reason in str(error) for reason in (
-            'Monthly OddsPAPI allowance exhausted', 'Daily OddsPAPI request guard reached')):
+            'Monthly OddsPAPI allowance exhausted',)):
             return run_quota_fallback(wf,budget_seconds)
         raise
     if any(reason in str(v) for v in report.get('errors',[]) for reason in (
-        'Monthly OddsPAPI allowance exhausted', 'Daily OddsPAPI request guard reached')):
+        'Monthly OddsPAPI allowance exhausted',)):
         return run_quota_fallback(wf,budget_seconds)
     report['active_odds_provider']='OddsPAPI'
     return report
