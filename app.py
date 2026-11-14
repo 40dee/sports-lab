@@ -8770,7 +8770,7 @@ def render_fantasy_plays(wf, st):
                     st.write(f'{count} lines: {reason}')
         if len(upcoming_all) > len(upcoming):
             st.caption(f'{len(upcoming_all)-len(upcoming)} saved Fantasy estimates are passes, stale, or have unverified offered sides; they are excluded from entry-ready suggestions. Saved projections remain available for review.')
-        queued = max(0, summary['Upcoming imported Fantasy lines'] - len(upcoming_all))
+        queued = max(0, summary['Upcoming imported Fantasy lines'] - sum(item['upcoming'] for item in all_today))
         if queued: st.caption(f'{queued} imported Fantasy lines are awaiting verified projections.')
         if not visible and upcoming_all:
             st.info('No current selectable Fantasy lines passed verification. Saved forecasts remain available for review; calculation completion does not confirm live offers.')
