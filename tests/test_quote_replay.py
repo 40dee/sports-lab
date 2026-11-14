@@ -48,3 +48,13 @@ class BackupPacingTests(unittest.TestCase):
         result=scope['automatic_board_run_with_fallback'](SimpleNamespace(store=None))
         self.assertEqual(result['active_odds_provider'],'OddsPAPI')
         fallback.assert_not_called()
+
+class LeagueIsolationTests(unittest.TestCase):
+    def test_only_nba_fixtures_can_consume_nba_scan_allowance(self):
+        scope={}
+        node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='is_nba_fixture')
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),scope)
+        check=scope['is_nba_fixture']
+        self.assertTrue(check({'tournamentName':'NBA','tournamentSlug':'nba'}))
+        for name,slug in [('NBA G League','nba-g-league'),('WNBA','wnba'),('NBA Summer League','nba-summer'),('NBA G League','nba')]:
+            self.assertFalse(check({'tournamentName':name,'tournamentSlug':slug}))
