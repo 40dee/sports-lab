@@ -5074,6 +5074,12 @@ def today_pregame(start_value, reference=None):
                 and start.tz_convert(SLATE_TIMEZONE).date() == current.tz_convert(SLATE_TIMEZONE).date())
 
 
+def is_nba_fixture(game):
+    name=str(game.get('tournamentName','')).strip().lower()
+    slug=str(game.get('tournamentSlug','')).strip().lower()
+    return not any(word in name+' '+slug for word in ('g league','g-league','summer','development')) and (slug=='nba' or name in ('nba','national basketball association'))
+
+
 def _today_nba_fixtures(day):
     # The Pacific day is part of the cache key, so yesterday's slate cannot leak
     # across local midnight. The final filter also removes games that have begun.
@@ -5091,8 +5097,7 @@ def _today_nba_fixtures(day):
     for game in data:
         if not isinstance(game, dict) or not game.get("fixtureId"):
             continue
-        if not ("nba" in str(game.get("tournamentName", "")).lower()
-                or str(game.get("tournamentSlug", "")).lower() == "nba"):
+        if not is_nba_fixture(game):
             continue
         start = pd.to_datetime(game.get("startTime"), utc=True, errors="coerce")
         if pd.notna(start) and begin <= start < end:
