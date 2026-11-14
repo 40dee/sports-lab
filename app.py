@@ -3599,6 +3599,7 @@ class TursoStore(Store):
 def preparation_rows(rows):
     unique = {}
     for card in rows:
+        if str(card.get('Platform','')).lower()=='draftkings':continue
         if card.get('Decoded') and today_pregame(card.get('Start (UTC)')) and market_columns(card):
             unique.setdefault(market_signature(card), card)
     return list(unique.values())
@@ -4591,7 +4592,7 @@ st.markdown("""<style id="sports-lab-readable-controls">
 </style>""", unsafe_allow_html=True)
 
 BASE = "https://api.oddspapi.io/v4"
-BOOKS = ("prizepicks", "kalshi", "draftkings")
+BOOKS = ("prizepicks", "kalshi")
 
 ESPN_BASE = (
     "https://site.api.espn.com/apis/site/v2/"
@@ -9296,6 +9297,7 @@ def board_coverage(wf, board, reference=None):
     statuses = dict(wf.store.items('calculation_status'))
     cards = {}
     for card in board.get('v4_rows') or []:
+        if str(card.get('Platform','')).lower()=='draftkings':continue
         start = pd.to_datetime(card.get('Start (UTC)'), utc=True, errors='coerce')
         if card.get('Decoded') and market_columns(card) and pd.notna(start) and slate_day(start) == slate_day(current):
             cards.setdefault(market_signature(card), card)
@@ -10229,7 +10231,7 @@ def ui_board(page):
         st.warning('Some saved picks predate the injury-matching repair. Their original projections are preserved; recheck player availability before using them.')
     saved = {key: value for key, value in workflow_store.items('watchlist') if value.get('active', True)}
     selected = st.session_state.get('selected_prop_card')
-    if selected is not None and page != 'Saved' and not today_pregame(selected.get('Start (UTC)')):
+    if selected is not None and page != 'Saved' and (str(selected.get('Platform','')).lower()=='draftkings' or not today_pregame(selected.get('Start (UTC)'))):
         st.session_state.pop('selected_prop_card', None)
         selected = None
     if selected is not None:
@@ -10237,7 +10239,9 @@ def ui_board(page):
         return
     st.subheader('Saved plays' if page == 'Saved' else 'Your NBA plays')
     st.caption('NBA is connected. Other sports will appear here when their engines and feeds are ready.')
-    platform = (st.segmented_control('Platform', ['All', 'PrizePicks', 'Kalshi', 'DraftKings'], default=st.session_state.get('mobile_platform', 'All'), key='mobile_platform_buttons', width='stretch') or 'All')
+    platform_options=['All', 'PrizePicks', 'Kalshi']+(['DraftKings'] if page=='Saved' else [])
+    if st.session_state.get('mobile_platform_buttons') not in platform_options:st.session_state.pop('mobile_platform_buttons',None)
+    platform = (st.segmented_control('Platform', platform_options, default='All', key='mobile_platform_buttons', width='stretch') or 'All')
     kind = (st.segmented_control('Pick type', ['Player Props', 'Fantasy'], default=st.session_state.get('mobile_kind', 'Player Props'), key='mobile_kind_buttons', width='stretch') or 'Player Props')
     if page == 'Plays' and kind == 'Fantasy':
         if platform not in ('All', 'PrizePicks'):
@@ -10251,7 +10255,7 @@ def ui_board(page):
         records = [v['card'] for v in saved.values()]
         st.caption('Saved lines stay fixed. Comparisons use the latest imported board; opening this page does not refresh prices.')
     else:
-        records = rows
+        records = [card for card in rows if str(card.get('Platform','')).lower()!='draftkings']
         # Keep every not-yet-started game visible, including late tipoffs.
         # This is a display filter only; eligibility and MORE/LESS stay unchanged.
         upcoming_games = sorted({(str(c.get('Game') or 'NBA game'), str(c.get('Start (UTC)')))
