@@ -4691,7 +4691,9 @@ def odds_monthly_budget(store, account, reference=None):
 
 
 def reserve_odds_request(store, reference=None):
+    from daily_capture import require_capture
     day=slate_day(reference)
+    require_capture(store,day)
     key=day+':oddspapi'
     account=odds_account_snapshot(store,reference=reference)
     monthly=odds_monthly_budget(store,account,reference)
@@ -4739,8 +4741,8 @@ def api_get(path, params, force=False):
     same_slate = (pd.notna(stamp) and
         stamp.tz_convert(SLATE_TIMEZONE).date() == current.tz_convert(SLATE_TIMEZONE).date())
     ttl={'/markets':86400,'/fixtures':1800}.get(path,900)
-    if not force and 'payload' in cache and pd.notna(stamp) and (
-        (paid_slate_cache and same_slate) or
+    if 'payload' in cache and pd.notna(stamp) and (
+        same_slate or
         (not paid_slate_cache and 0 <= (current-stamp).total_seconds()<ttl)):
         return cache['payload']
     paused=store.get('odds_status','provider') or {}
@@ -4748,7 +4750,7 @@ def api_get(path, params, force=False):
     if pd.notna(resume) and current<resume:
         raise ValueError('OddsPAPI downloads paused after an account or rate-limit error; cached lines retained.')
     attempted=utc_timestamp(cache.get('failed_at'))
-    if pd.notna(attempted) and 0 <= (current-attempted).total_seconds()<900:
+    if pd.notna(attempted) and slate_day(attempted)==slate_day(current):
         raise ValueError('OddsPAPI request is cooling down after an error; saved lines retained.')
     cutoff=(current-pd.Timedelta(seconds=120)).isoformat()
     locked=store.query('INSERT INTO sports_records VALUES (?,?,?,?) '
@@ -9026,7 +9028,9 @@ def normalize_pp_projection(item, live_response=False):
 
 
 def recover_fantasy_source(wf):
-    """One bounded repair, max two quoted credits/day; no paid odds calls."""
+    """One bounded repair, only inside the initial daily capture."""
+    from daily_capture import require_capture
+    require_capture(wf.store,slate_day())
     from urllib.parse import urlencode
     health=check_prizepicks_source(wf.store)
     key=setting('PRIZEPICKS_API_KEY','')
@@ -9191,6 +9195,8 @@ def feed_request_cap():
 
 
 def reserve_prizepicks_request(store):
+    from daily_capture import require_capture
+    require_capture(store,slate_day())
     """One atomic counter shared by manual refreshes and scheduled workers."""
     if not store.remote:
         raise ValueError('Permanent storage is required before requesting provider pages.')
@@ -9493,17 +9499,8 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     checked_at = pd.to_datetime(last_check.get('checked_at'), utc=True, errors='coerce')
     if pd.isna(checked_at) or (pd.Timestamp.now(tz='UTC') - checked_at).total_seconds() >= 3600:
         refresh_input_checks(wf)
-    previous_health=wf.store.get('health',day) or {}
     health=refresh_board_health(wf, board)
-    # Preserve the daily paid snapshot. Injury changes trigger free ESPN
-    # eligibility checks, never a surprise forced OddsPAPI download.
-    targeted_checks=[]
-    if refresh and str(setting('ODDSPAPI_ALLOW_TARGETED_PAID_REFRESH','false')).lower()=='true':
-        try:
-            board,targeted_checks=refresh_saved_game_lines(wf,board,previous_health,health)
-        except ValueError as error:
-            errors.append(str(error))
-    ledger['targeted_checks']=targeted_checks
+    ledger['targeted_checks']=[]  # Paid lines stay frozen for the Pacific day.
     ledger['odds_requests']=wf.store.get('request_budget',day+':oddspapi',ledger.get('odds_requests',0))
     report = prepare_saved_board(wf, board, budget_seconds=budget_seconds, max_picks=10000)
     board_run_stage(wf.store,'finished')
@@ -9547,7 +9544,8 @@ def run_quota_fallback(wf, budget_seconds=1200):
         rows=[];status=dict(saved_status,http_requests=0,games_requested=0,reused_snapshot=True)
     else:
         rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''),markets=BOARD_MARKETS)
-    refreshed,quote_report=refresh_upcoming_quotes(wf.store,setting('THE_ODDS_API_KEY',''),board.get('v4_rows') or [])
+    refreshed=[]
+    quote_report={'http_requests':0,'events_updated':[],'errors':[],'state':'daily_cache_only'}
     status=dict(status,targeted_refresh=quote_report)
     if quote_report['events_updated']:
         changed=set(quote_report['events_updated'])
@@ -9631,18 +9629,40 @@ def automatic_board_run_with_fallback(wf, refresh=True, budget_seconds=1200):
     try:exhausted=primary_odds_quota_exhausted(wf.store)
     except ValueError:pass
     if exhausted:return run_quota_fallback(wf,budget_seconds)
-    try:
-        report=automatic_board_run(wf,refresh,budget_seconds)
-    except ValueError as error:
-        if any(reason in str(error) for reason in (
-            'Monthly OddsPAPI allowance exhausted',)):
-            return run_quota_fallback(wf,budget_seconds)
-        raise
-    if any(reason in str(v) for v in report.get('errors',[]) for reason in (
-        'Monthly OddsPAPI allowance exhausted',)):
-        return run_quota_fallback(wf,budget_seconds)
+    report=automatic_board_run(wf,refresh,budget_seconds)
     report['active_odds_provider']='OddsPAPI'
     return report
+
+
+def daily_cached_board_run(wf, budget_seconds=1200, capture_due=True):
+    from daily_capture import claim_capture, close_capture
+    day=slate_day();store=wf.store
+    store.put('board_capture_policy','enabled',True)
+    ledger=store.get('automation',day) or {}
+    board=store.get('board','board') or {}
+    stamp=utc_timestamp(board.get('v4_scan_at'))
+    # Adopt an existing capture on deployment instead of charging for another.
+    if ledger.get('last_run') and board.get('v4_rows') and pd.notna(stamp) and slate_day(stamp)==day:
+        store.put('board_capture_policy','enabled',True)
+        close_capture(store,day,now())
+    if not capture_due or not claim_capture(store,day,now()):
+        # Interrupted imports remain closed, even if no finish was recorded.
+        if store.get('daily_board_capture',day):close_capture(store,day,now())
+        report=prepare_saved_board(wf,board,budget_seconds=budget_seconds,max_picks=10000)
+        ledger.update(last_run=now(),daily_mode='cached_only',preparation=report,
+                      coverage=board_coverage(wf,board))
+        store.put('automation',day,ledger)
+        return ledger
+    try:
+        try:
+            account=odds_account_snapshot(store)
+            budget=odds_monthly_budget(store,account)
+            spent=int(store.get('request_budget',day+':oddspapi',0))
+            store.put('request_budget',day+':oddspapi_cap',min(odds_daily_cap(),spent+budget['remaining']))
+        except ValueError:pass
+        return automatic_board_run_with_fallback(wf,refresh=True,budget_seconds=budget_seconds)
+    finally:
+        close_capture(store,day,now())
 
 
 if '--rebuild-compact-fantasy' in sys.argv:
@@ -9704,7 +9724,7 @@ if '--auto-board' in sys.argv:
             # Catch a delayed tick after 14:30 Pacific without importing twice.
             # Earlier games retain their existing one-hour preparation window.
             explicit_refresh=scheduled_board_refresh_due(current,starts,ledger)
-        report = automatic_board_run_with_fallback(workflow, refresh=explicit_refresh)
+        report = daily_cached_board_run(workflow,capture_due=explicit_refresh or not scheduled)
         print(encode(report))
         coverage = report.get('coverage') or {}
         if report.get('feed_partial') or report.get('fantasy_partial'):
