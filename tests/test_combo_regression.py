@@ -209,3 +209,25 @@ class StandardTierTests(unittest.TestCase):
     for key in keys:
      self.assertTrue(all(l['card']['Line Type'].lower()==mode for l in store.get('combo',key)['legs']))
 
+
+
+class SavedProjectionComboTests(unittest.TestCase):
+ def test_stale_saved_quotes_build_paper_combos_without_becoming_live_or_changing_cohorts(self):
+  store=populated(18);board=store.get('board','board')
+  for card in board['v4_rows']:card['Odds checked (UTC)']='2026-11-09T10:00:00Z'
+  store.put('board','board',board)
+  self.assertEqual(env['combo_pool'](store,REF)[0],[])
+  snapshot=env['combo_research_suggestions'](store,'standard',6,REF)
+  self.assertTrue(snapshot['sizes']['6'])
+  self.assertEqual(snapshot['quote_mode'],'research')
+  self.assertIsNone(store.get('combo_suggestions','2026-11-09:standard'))
+  self.assertEqual(store.items('combo_cohort'),[])
+  for key in snapshot['sizes']['6']:
+   combo=store.get('combo',key)
+   self.assertEqual(combo['size'],6)
+   self.assertFalse(env['combo_live_check'](store,combo,REF)[0])
+ def test_saved_projection_mode_keeps_injury_and_tier_checks(self):
+  store=populated(1);health=store.get('health','2026-11-09')
+  next(iter(health['players'].values()))['blocked']=True
+  store.put('health','2026-11-09',health)
+  self.assertEqual(env['combo_pool'](store,REF,quote_mode='research')[0],[])
