@@ -41,6 +41,11 @@ class TargetedQuoteTests(unittest.TestCase):
   self.assertEqual(self.store.get('request_budget',day),182)
   f.refresh_upcoming_quotes(self.store,self.key,[self.card],NOW,self.get,markets=f.FANTASY_MARKETS)
   self.assertEqual(self.get.call_count,1)
+ def test_draftkings_is_not_requested_or_decoded(self):
+  self.run_check()
+  self.assertEqual(self.get.call_args.kwargs['params']['bookmakers'],'prizepicks')
+  body=json.loads(json.dumps(self.body));body['bookmakers'][0]['key']='draftkings'
+  self.assertEqual(f.decode(body,NOW.isoformat(),NOW),[])
  def test_stale_near_tipoff_refreshed_once_preserving_old_card(self):
   old=dict(self.card);rows,r=self.run_check()
   self.assertEqual(r['events_updated'],['abc123']);self.assertEqual(len(rows),1)
