@@ -900,7 +900,7 @@ def saved_forecast_records(store, reference=None, coverage=False):
     return reader() if callable(reader) else store.items('forecast')
 
 
-def combo_pool(store, reference=None, tier_mode="mixed"):
+def combo_pool(store, reference=None, tier_mode="mixed", quote_mode="verified"):
     current = combo_clock(reference)
     board = store.get('board', 'board') or {}
     health = (store.get('health', slate_day(current)) or {}).get('players') or {}
@@ -928,7 +928,7 @@ def combo_pool(store, reference=None, tier_mode="mixed"):
             reject('No valid frozen pregame projection'); continue
         if (start-current).total_seconds() < 300:
             reject('Within five minutes of recorded start'); continue
-        if not line_freshness(card,current,line_checks)[0]:
+        if quote_mode!='research' and not line_freshness(card,current,line_checks)[0]:
             reject('Line source missing or stale'); continue
         if not pick_is_selectable(card, result):
             reject('Direction unavailable or unverified'); continue
@@ -1062,6 +1062,30 @@ def combo_directional_grade(combo, grades, reference=None):
         'losses':losses,'pending':pending,'voids':voids,'legs':outcomes,
         'graded_at':combo_clock(reference).isoformat(),
         'note':'Model direction results; PrizePicks DNP, reboot and payout settlement can differ.'}
+
+
+def combo_research_suggestions(store, tier_mode, size, reference=None):
+    """Build only the requested paper view; never spend odds credits or alter live suggestions."""
+    if tier_mode not in ('standard','goblin','demon','mixed') or size not in range(2,7):
+        raise ValueError('Choose a supported combo tier and 2–6 players.')
+    current=combo_clock(reference)
+    pool,excluded=combo_pool(store,current,tier_mode=tier_mode,quote_mode='research')
+    key=slate_day(current)+(':'+tier_mode if tier_mode!='mixed' else '')+':research'
+    prior=store.get('combo_suggestions',key) or {}
+    sizes=dict(prior.get('sizes') or {})
+    policy=(store.get('combo_model',str(size)) or {}).get('policy','balanced-v1')
+    if policy not in COMBO_POLICIES:policy='balanced-v1'
+    keys=[]
+    for legs in combo_candidates(pool,size,policy):
+        combo=combo_snapshot(legs,policy,current)
+        combo['quote_mode']='research'
+        store.put('combo',combo['id'],combo,immutable=True)
+        keys.append(combo['id'])
+    sizes[str(size)]=keys
+    snapshot={'created_at':current.isoformat(),'day':slate_day(current),'eligible_players':len(pool),
+              'excluded':excluded,'sizes':sizes,'tier_mode':tier_mode,'quote_mode':'research'}
+    store.put('combo_suggestions',key,snapshot)
+    return snapshot
 
 
 def combo_live_check(store, combo, reference=None):
@@ -1276,7 +1300,7 @@ def render_board_run_status(store, st):
         st.caption('Times measure this worker pass, including saved-cache reuse. A finished worker can still have incomplete coverage. If the worker stops unexpectedly, its last stage remains visible; no finish time is invented.')
 
 
-def update_combos(store, generate=False, reference=None):
+def update_combos(store, generate=False, reference=None, quote_mode="verified"):
     current=combo_clock(reference)
     generated=0
     held_reason=None
@@ -1285,9 +1309,9 @@ def update_combos(store, generate=False, reference=None):
         generate=allowed
     if generate:
         for tier_mode in ('mixed','standard','goblin','demon'):
-            pool, excluded=combo_pool(store,current,tier_mode=tier_mode)
+            pool, excluded=combo_pool(store,current,tier_mode=tier_mode,quote_mode=quote_mode)
             suggestions={'created_at':current.isoformat(),'day':slate_day(current),
-                         'eligible_players':len(pool),'excluded':excluded,'sizes':{},'tier_mode':tier_mode}
+                         'eligible_players':len(pool),'excluded':excluded,'sizes':{},'tier_mode':tier_mode,'quote_mode':quote_mode}
             for size in range(2,7):
                 models=store.get('combo_model',str(size)) or {'policy':'balanced-v1'}
                 policies={}
@@ -1299,10 +1323,10 @@ def update_combos(store, generate=False, reference=None):
                     policies[policy]=[s['id'] for s in snapshots]
                 suggestions['sizes'][str(size)]=policies[models['policy']]
                 # First complete paired daily cohort is frozen, never cherry-picked later.
-                if tier_mode=='mixed' and all(len(v)==3 for v in policies.values()):
+                if quote_mode=='verified' and tier_mode=='mixed' and all(len(v)==3 for v in policies.values()):
                     store.put('combo_cohort',slate_day(current)+':'+str(size),
                         {'day':slate_day(current),'size':size,'created_at':current.isoformat(),'policies':policies},immutable=True)
-            store.put('combo_suggestions',slate_day(current)+(':'+tier_mode if tier_mode!='mixed' else ''),suggestions)
+            store.put('combo_suggestions',slate_day(current)+(':'+tier_mode if tier_mode!='mixed' else '')+(':research' if quote_mode=='research' else ''),suggestions)
     grades=dict(store.items('grade'))
     prior=dict(store.items('combo_grade'))
     for key,combo in store.items('combo'):
@@ -1368,12 +1392,17 @@ def render_combos(wf, st):
         size=st.segmented_control('Players',[2,3,4,5,6],default=2,key='combo_size') or 2
         tier_choice=st.segmented_control('Line types',['Standard only','Goblin only','Demon only','Mixed tiers'],default='Standard only',key='combo_tier_mode') or 'Standard only'
         tier_mode={'Standard only':'standard','Goblin only':'goblin','Demon only':'demon','Mixed tiers':'mixed'}[tier_choice]
-        snapshot=wf.store.get('combo_suggestions',slate_day()+(':'+tier_mode if tier_mode!='mixed' else '')) or {}
+        basis=st.segmented_control('Combo inputs',['Saved projections','Verified current lines'],default='Saved projections',key='combo_quote_basis') or 'Saved projections'
+        quote_mode='research' if basis=='Saved projections' else 'verified'
+        if quote_mode=='research':
+            st.warning('Saved-projection paper combos: quoted lines may be stale. Verify each live line, tier and offered side before using an entry. Injury, history, player identity and model direction checks still apply.')
+        snapshot=wf.store.get('combo_suggestions',slate_day()+(':'+tier_mode if tier_mode!='mixed' else '')+(':research' if quote_mode=='research' else '')) or {}
         st.caption('Standard only uses regular lines. Mixed tiers can include Goblins and Demons. Exact offered directions are required in both views.')
         st.caption('Suggestions rank projected separation, not entry payouts or expected return. Special tiers can lower payouts; check the actual PrizePicks entry. Browsing makes no odds requests.')
         if st.button('Build from saved board',key='combo_build'):
             try:
-                update_combos(wf.store,generate=True)
+                if quote_mode=='research':combo_research_suggestions(wf.store,tier_mode,size)
+                else:update_combos(wf.store,generate=True)
                 st.rerun()
             except Exception as error:
                 st.error('Combo build failed: '+type(error).__name__+'. Saved projections were not deleted.')
@@ -1394,10 +1423,13 @@ def render_combos(wf, st):
                     merged.update(subset.get('players') or {})
                     subset['players']=merged
                     wf.store.put('health',slate_day(),subset)
-                    update_combos(wf.store,generate=True)
+                    if quote_mode=='research':combo_research_suggestions(wf.store,tier_mode,size)
+                    else:update_combos(wf.store,generate=True)
                     st.rerun()
             except Exception as error:
                 st.error('ESPN eligibility recheck failed: '+type(error).__name__+'. No paid odds refresh was requested.')
+        if quote_mode=='research' and (not snapshot or str(size) not in (snapshot.get('sizes') or {})):
+            snapshot=combo_research_suggestions(wf.store,tier_mode,size)
         if not snapshot:
             st.info('No saved '+tier_choice.lower()+' suggestions yet. Build from the saved board or wait for the board worker. Other tiers are never used to fill a tier-specific slip.')
             return
@@ -1418,7 +1450,7 @@ def render_combos(wf, st):
         keys=(snapshot.get('sizes') or {}).get(str(size),[])
         if not keys:
             from collections import Counter
-            current_pool,_=combo_pool(wf.store,tier_mode=tier_mode)
+            current_pool,_=combo_pool(wf.store,tier_mode=tier_mode,quote_mode=quote_mode)
             game_counts=Counter(leg['event_id'] for leg in current_pool)
             capacity=sum(min(2,count) for count in game_counts.values())
             if capacity<size:
@@ -9240,6 +9272,7 @@ def refresh_board_health(wf, board):
         except Exception as error:
             players[key] = {'checked_at': now(), 'injuries_available': False,
                 'blocked': True, 'note': calculation_failure_details(error)['reason']}
+    players={**(previous.get('players') or {}),**players}
     report = {'checked_at': now(), 'players': players,
               'roster_matched': sum('player_id' in v for v in players.values()),
               'injury_checked': sum(v.get('injuries_available', False) for v in players.values()),
