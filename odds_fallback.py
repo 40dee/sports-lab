@@ -83,7 +83,7 @@ def decode(event, fetched, current):
     for book in event.get('bookmakers') or []:
         if not isinstance(book,dict):continue
         platform=book.get('key')
-        if platform not in ('prizepicks','draftkings'):continue
+        if platform != 'prizepicks':continue
         for market in book.get('markets') or []:
             if not isinstance(market,dict):continue
             market_key=market.get('key') or ''
@@ -292,7 +292,7 @@ def download(store, api_key, current=None, get=None, markets=None):
                 body=cached['event'];captured=cached['fetched_at']
             else:
                 report['budget']=reserve(store,api_key,current,remaining,cost=len(markets),daily_allowance=min(180,len(games)*len(markets)))
-                body=request('/events/'+event['id']+'/odds',{'bookmakers':'prizepicks,draftkings',
+                body=request('/events/'+event['id']+'/odds',{'bookmakers':'prizepicks',
                     'regions':'us_dfs','markets':','.join(markets),'oddsFormat':'american','dateFormat':'iso'})
                 report['games_requested']+=1
                 if not isinstance(body,dict) or body.get('id')!=event['id'] or {body.get('home_team'),body.get('away_team')}!={event['home_team'],event['away_team']}:
@@ -387,7 +387,7 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None, marke
             reserve(store,api_key,current,int(account['credits_remaining']),cost=len(markets),daily_allowance=184 if markets==FANTASY_MARKETS else 180)
             report['http_requests']+=1
             response=get(BASE+'/events/'+event+'/odds',params={'apiKey':api_key,
-                'bookmakers':'prizepicks,draftkings','regions':'us_dfs','markets':','.join(markets),
+                'bookmakers':'prizepicks','regions':'us_dfs','markets':','.join(markets),
                 'oddsFormat':'american','dateFormat':'iso'},timeout=20)
             info=quota(response)
             if 'credits_remaining' in info:
