@@ -8691,14 +8691,15 @@ def render_fantasy_plays(wf, st):
         upcoming_all=all_today if mode=='Full slate' else upcoming_all
         if mode=='Full slate':
             source=wf.store.get('source','the_odds_api_fallback_latest') or {}
-            games={str(g['game']) for g in source.get('game_coverage',[]) if g.get('game')}
-            games.update(str(c.get('Game')) for c in rows if fantasy_weights(c))
+            games={str(g['game']) for g in source.get('game_coverage',[]) if g.get('game') and pd.notna(utc_timestamp(g.get('start'))) and slate_day(g['start'])==slate_day()}
+            games.update(str(c.get('Game')) for c in rows if fantasy_weights(c) and pd.notna(utc_timestamp(c.get('Start (UTC)'))) and slate_day(c['Start (UTC)'])==slate_day())
             coverage=[]
             for game in sorted(games):
                 items=[item for item in all_today if str(item['card'].get('Game'))==game]
                 verified=sum(str(item['card'].get('Game'))==game for item in upcoming)
+                imported=sum(str(c.get('Game'))==game and bool(fantasy_weights(c)) for c in rows)
                 coverage.append({'Game':game,'Saved projections':len(items),'Verified upcoming lines':verified,
-                    'Status':'No usable Fantasy quotes imported' if not items else 'Started · saved projections' if not any(i['upcoming'] for i in items) else 'Verified and saved lines' if verified else 'Saved projections · quotes need refresh'})
+                    'Status':('Lines imported · projections pending' if imported else 'No usable Fantasy quotes imported') if not items else 'Started · saved projections' if not any(i['upcoming'] for i in items) else 'Verified and saved lines' if verified else 'Saved projections · quotes need refresh'})
             with st.expander('Full slate coverage',expanded=True):
                 if coverage:st.dataframe(pd.DataFrame(coverage),hide_index=True,width='stretch')
                 else:st.caption('No saved slate coverage is available.')
