@@ -21,6 +21,9 @@ catalog=env['market_catalog']()
 account=env['odds_account_snapshot'](wf.store,force=True)
 base=env['odds_monthly_budget'];budget=base(wf.store,account)
 if budget['remaining']<1:raise SystemExit('No guarded monthly allowance.')
+prior=wf.store.get('source','missing_nba_game_recovery_latest') or {}
+if prior.get('maximum_requests')==1 and prior.get('requests_reserved')==0:
+    wf.store.query('DELETE FROM sports_records WHERE namespace=? AND key=?',('missing_game_recovery',day))
 claimed=wf.store.query('INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING RETURNING key',
     ('missing_game_recovery',day,'{}',env['now']()),fetch=True)
 if not claimed:raise SystemExit('Single-request recovery already claimed.')
@@ -34,6 +37,11 @@ wf.store.put('request_budget',key,cap)
 report={'maximum_requests':1}
 try:
     game=games[0];fixture=str(game['fixtureId'])
+    cache_key=env['odds_cache_key']('/odds',env['odds_fixture_params'](fixture))
+    cache=wf.store.get('odds_cache',cache_key) or {}
+    if cache.get('failed_at'):
+        cache.pop('failed_at',None)
+        wf.store.put('odds_cache',cache_key,cache)
     rows,_=env['decode_game'](game,env['game_odds'](fixture,force=True),catalog)
     report['lines']=len(rows)
     board=wf.store.get('board','board') or {}
