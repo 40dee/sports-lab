@@ -1368,6 +1368,11 @@ def combo_legs_html(legs):
 
 
 def render_combos(wf, st):
+    cache=getattr(wf.store,'_read_cache',None)
+    if isinstance(cache,dict):
+        for key in list(cache):
+            if key[1] in ('combo_suggestions','health','combo_model'):
+                cache.pop(key,None)
     st.subheader('Combos')
     st.markdown("""<style>
     [class*="st-key-combo_option_"]{background:radial-gradient(ellipse at 100% 0%,#8b5cf614,transparent 65%),#15151f;border:1px solid #393449!important;border-radius:16px!important;padding:18px!important;box-shadow:0 8px 24px #00000024;}
