@@ -8663,14 +8663,15 @@ def render_fantasy_plays(wf, st):
     [data-baseweb="popover"] [role="option"]{background:#181621!important;color:#f1f6fc!important;font-size:14px;}
     [data-baseweb="popover"] [role="option"]:hover,[data-baseweb="popover"] [role="option"][aria-selected="true"]{background:#342744!important;color:#fff!important;}
     </style>''', unsafe_allow_html=True)
+    reader=getattr(wf.store,'forecast_items',None)
     records = (wf.store.items('forecast') if st.session_state.get('fantasy_view_buttons')=='Saved forecasts'
-               else saved_forecast_records(wf.store,combo_clock()))
+               else reader(day=slate_day()) if callable(reader) else wf.store.items('forecast'))
     grades = dict(wf.store.items('grade'))
     board = wf.store.get('board', 'board') or {}
     rows = board.get('v4_rows') or st.session_state.get('v4_rows', [])
     summary, saved = fantasy_saved_summary(rows, records, grades)
-    upcoming_all = [item for item in current_fantasy_records(rows, records, grades)
-                    if item['upcoming'] and item['date'] == slate_day()]
+    all_today = [item for item in current_fantasy_records(rows, records, grades) if item['date'] == slate_day()]
+    upcoming_all = [item for item in all_today if item['upcoming']]
     current_cards={market_signature(c):c for c in rows}
     line_checks=dict(wf.store.items('odds_refresh'))
     upcoming=[]
@@ -8679,19 +8680,34 @@ def render_fantasy_plays(wf, st):
         if (current_card and line_freshness(current_card,refresh_checks=line_checks)[0]
                 and pick_is_selectable(current_card,item['frozen'].get('result') or {})):
             upcoming.append(dict(item,card=current_card))
-    default = 'Upcoming' if upcoming_all or not saved else 'Saved forecasts'
-    mode = st.segmented_control('Fantasy view', ['Upcoming', 'Saved forecasts'], default=default,
+    default = 'Full slate'
+    mode = st.segmented_control('Fantasy view', ['Full slate', 'Upcoming', 'Saved forecasts'], default=default,
                                 key='fantasy_view_buttons', width='stretch') or default
     auto = wf.store.get('automation', slate_day()) or {}
     if auto.get('fantasy_partial') or auto.get('feed_partial'):
         st.caption('⚠ Feed incomplete · Saved projections shown; full Fantasy coverage is not confirmed.')
     date = None
-    if mode == 'Upcoming':
+    if mode in ('Upcoming','Full slate'):
+        upcoming_all=all_today if mode=='Full slate' else upcoming_all
+        if mode=='Full slate':
+            source=wf.store.get('source','the_odds_api_fallback_latest') or {}
+            games={str(g['game']) for g in source.get('game_coverage',[]) if g.get('game')}
+            games.update(str(c.get('Game')) for c in rows if fantasy_weights(c))
+            coverage=[]
+            for game in sorted(games):
+                items=[item for item in all_today if str(item['card'].get('Game'))==game]
+                verified=sum(str(item['card'].get('Game'))==game for item in upcoming)
+                coverage.append({'Game':game,'Saved projections':len(items),'Verified upcoming lines':verified,
+                    'Status':'No usable Fantasy quotes imported' if not items else 'Started · saved projections' if not any(i['upcoming'] for i in items) else 'Verified and saved lines' if verified else 'Saved projections · quotes need refresh'})
+            with st.expander('Full slate coverage',expanded=True):
+                if coverage:st.dataframe(pd.DataFrame(coverage),hide_index=True,width='stretch')
+                else:st.caption('No saved slate coverage is available.')
+
         fantasy_board_view=st.segmented_control('Fantasy board',['Selectable only','All saved lines'],default='All saved lines',key='fantasy_board_scope_v3') or 'All saved lines'
         eligible_signatures={market_signature(item['card']) for item in upcoming}
         visible = upcoming if fantasy_board_view=='Selectable only' else [
             dict(item,card=current_cards.get(market_signature(item['card']),item['card']),
-                **({'review_note':'Saved forecast only: line, availability or offered direction needs verification.'}
+                **({'review_note':'Saved pregame projection: this game has started.' if not item['upcoming'] else 'Saved forecast only: line, availability or offered direction needs verification.'}
                    if market_signature(item['card']) not in eligible_signatures else {})) for item in upcoming_all]
         if upcoming_all and not upcoming and fantasy_board_view=='All saved lines':
             st.warning('Showing saved pregame projections for review in All saved lines; these are not current slip recommendations. The cards retain their original MORE/LESS projections, not verified live PrizePicks offers.')
@@ -10228,11 +10244,11 @@ def ui_board(page):
                    if line_freshness(c,refresh_checks=line_checks)[0]
                    and pick_is_selectable(c, forecasts[identity(c)]['result'])
                    and not forecasts[identity(c)]['result'].get('tie', False)]
-        records = verified or calculated
+        records = calculated
         if calculated and not verified:
             st.warning('No entry-ready picks passed the current checks. Showing saved pregame projections for review below. Their exact lines or offered directions need verification; these are not current slip recommendations.')
         elif len(calculated)>len(verified):
-            st.caption(f'{len(calculated)-len(verified)} saved forecasts need review or are passes. All props shows those records.')
+            st.caption(f'{len(calculated)-len(verified)} saved forecasts need line verification or are passes; they remain visible below with review labels.')
         records.sort(key=lambda c: ui_number(forecasts[identity(c)]['result'].get('standardized_gap'), -1), reverse=True)
         st.caption('Ranked by projected gap relative to recent variability. This is not a proven probability or profit ranking. All props remains available.')
     else:
