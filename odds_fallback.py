@@ -46,6 +46,8 @@ def primary_exhausted(account, budget):
 
 
 def reserve(store, key, current, remaining_hint, cost=COST, daily_allowance=None):
+    from daily_capture import require_capture
+    require_capture(store,current.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat())
     fingerprint=hashlib.sha256(key.encode()).hexdigest()[:20]
     month=current.strftime('%Y-%m')+':the_odds_api:'+fingerprint
     day=current.astimezone(ZoneInfo('America/Los_Angeles')).strftime('%Y-%m-%d')+':the_odds_api:'+fingerprint
