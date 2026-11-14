@@ -77,6 +77,9 @@ def run_probe(store, api_key, now=None, get=None):
     if not getattr(store, 'remote', False) or not hasattr(store, 'query'):
         raise ValueError('Permanent storage is required for the test credit guard.')
     current = now or datetime.now(timezone.utc)
+    from daily_capture import require_capture
+    from zoneinfo import ZoneInfo
+    require_capture(store,current.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat())
     fingerprint = hashlib.sha256(key.encode()).hexdigest()[:20]
     record_key = 'the_odds_api_probe:' + current.strftime('%Y-%m-%d') + ':' + fingerprint
     existing = store.get('source', record_key)
