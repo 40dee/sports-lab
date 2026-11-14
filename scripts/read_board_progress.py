@@ -61,7 +61,11 @@ def main():
     games = {}
     for card in (records.get("board", {}).get("v4_rows") or []):
         game = str(card.get("Game", "Unknown"))
-        item = games.setdefault(game, {"lines": 0, "fantasy": 0, "latest_quote": ""})
+        item = games.setdefault(game, {"lines": 0, "fantasy": 0, "latest_quote": "", "platforms": {}})
+        platform = item["platforms"].setdefault(str(card.get("Platform")), {"lines": 0, "fantasy": 0, "latest_quote": ""})
+        platform["lines"] += 1
+        platform["fantasy"] += int("fantasy" in str(card.get("Stat", "")).lower() or "fantasy" in str(card.get("Stat Key", "")).lower())
+        platform["latest_quote"] = max(platform["latest_quote"], str(card.get("Odds checked (UTC)") or ""))
         item["lines"] += 1
         item["fantasy"] += int("fantasy" in str(card.get("Stat", "")).lower() or "fantasy" in str(card.get("Stat Key", "")).lower())
         item["latest_quote"] = max(item["latest_quote"], str(card.get("Odds checked (UTC)") or ""))
