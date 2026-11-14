@@ -15,6 +15,8 @@ jobs:
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      PRIZEPICKS_API_KEY: ${{ secrets.PRIZEPICKS_API_KEY }}
+      ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,6 +37,11 @@ jobs:
           env={'__name__':'sports_lab_diagnostic','__file__':'app.py'}
           exec(compile(ast.Module(body=nodes,type_ignores=[]),'app.py','exec'),env)
           store=env['CompactViewStore'](env['workflow_store'])
+          print('ALTERNATE_SOURCE',env['encode'](env['check_prizepicks_source'](store)))
+          try:
+              account=env['odds_account_snapshot'](store,force=True)
+              print('PRIMARY_CAPACITY',env['encode']({k:account.get(k) for k in ('remaining','limit','used','checked_at')}))
+          except ValueError as error:print('PRIMARY_CAPACITY_UNAVAILABLE',str(error))
           current=env['combo_clock']()
           board=store.get('board','board') or {}
           print('BOARD_ROWS',len(board.get('v4_rows') or []))
