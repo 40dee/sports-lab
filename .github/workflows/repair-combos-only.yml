@@ -26,3 +26,4 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - name: Inspect and rebuild Combos from saved board only
         run: python scripts/repair_combos_only.py
+# Build the requested six-player saved-projection options only.
