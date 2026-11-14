@@ -88,13 +88,13 @@ class RequestTests(unittest.TestCase):
   with self.assertRaisesRegex(ValueError,'Another worker'):env['api_get']('/odds',params)
   self.calls.assert_not_called()
   self.assertIsNone(self.store.get('request_budget',env['slate_day']()+':oddspapi'))
- def test_market_definitions_shared_for_one_day_and_force_refreshes_odds(self):
+ def test_market_definitions_and_forced_odds_reads_reuse_daily_snapshot(self):
   params={'language':'en'};key=env['odds_cache_key']('/markets',params)
   old=(pd.Timestamp.now(tz='UTC')-pd.Timedelta(hours=2)).isoformat()
   self.store.put('odds_cache',key,{'fetched_at':old,'payload':[]})
   self.assertEqual(env['api_get']('/markets',params),[]);self.calls.assert_not_called()
   env['api_get']('/odds',{'fixtureId':'1'});env['api_get']('/odds',{'fixtureId':'1'},force=True)
-  self.assertEqual(self.calls.call_count,2)
+  self.assertEqual(self.calls.call_count,1)
  def test_backups_restore_new_namespaces(self):
   env['api_get']('/odds',{'fixtureId':'1'})
   exported=json.loads(self.store.export())
