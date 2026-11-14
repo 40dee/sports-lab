@@ -9480,6 +9480,21 @@ def primary_odds_quota_exhausted(store):
     return used >= cap
 
 
+def newer_quote_rows(previous, incoming, family):
+    """An older saved provider snapshot cannot replace newer exact-family quotes."""
+    def observed(card):
+        field='Tier Fetched At' if card.get('Tier Source')=='prizepicksapi.com' else 'Odds checked (UTC)'
+        stamp=utc_timestamp(card.get(field))
+        native=utc_timestamp(card.get('Tier Observed At'))
+        return min(stamp,native) if pd.notna(stamp) and pd.notna(native) and card.get('Tier Source')=='prizepicksapi.com' else stamp
+    latest={}
+    for card in previous:
+        stamp=observed(card);key=family(card)
+        if pd.notna(stamp) and (key not in latest or stamp>latest[key]):latest[key]=stamp
+    return [card for card in incoming if family(card) not in latest or
+            (pd.notna(observed(card)) and observed(card)>=latest[family(card)])]
+
+
 def run_quota_fallback(wf, budget_seconds=1200):
     from odds_fallback import download, BOARD_MARKETS, COVERAGE_VERSION, prune_unavailable_lines, refresh_upcoming_quotes
     board_run_stage(wf.store,'importing')
@@ -9525,12 +9540,14 @@ def run_quota_fallback(wf, budget_seconds=1200):
             return (str(c.get('Fixture ID')),str(c.get('Platform')),normalize_player(c.get('Player','')),
                 ('FANTASY',) if fantasy_weights(c) else tuple(sorted(market_columns(c) or ())),
                 str(c.get('Period')),str(c.get('Line Type','')).lower())
+        rows=newer_quote_rows(previous,rows,family)
         families={family(c) for c in rows}
         # A new regular quote supersedes the old threshold for that market.
         # Special tiers and immutable frozen forecasts remain untouched.
         board['v4_rows']=[c for c in previous if family(c) not in families]+rows
         board.setdefault('v4_summary',[]);board.setdefault('v4_errors',[])
-        board['v4_scan_at']=now();wf.store.put('board','board',board)
+        if rows:board['v4_scan_at']=now()
+        wf.store.put('board','board',board)
     ledger=wf.store.get('automation',day) or {}
     # The fallback capture is the daily line source. Do not trigger a second paid provider scan.
     feed_errors=[]
