@@ -8706,7 +8706,7 @@ def render_fantasy_plays(wf, st):
     [data-baseweb="popover"] [role="option"]:hover,[data-baseweb="popover"] [role="option"][aria-selected="true"]{background:#342744!important;color:#fff!important;}
     </style>''', unsafe_allow_html=True)
     reader=getattr(wf.store,'forecast_items',None)
-    records = (wf.store.items('forecast') if st.session_state.get('fantasy_view_buttons')=='Saved forecasts'
+    records = (wf.store.items('forecast') if st.session_state.get('fantasy_view_buttons_v2')=='Saved forecasts'
                else reader(day=slate_day()) if callable(reader) else wf.store.items('forecast'))
     grades = dict(wf.store.items('grade'))
     board = wf.store.get('board', 'board') or {}
@@ -8714,6 +8714,7 @@ def render_fantasy_plays(wf, st):
     summary, saved = fantasy_saved_summary(rows, records, grades)
     all_today = [item for item in current_fantasy_records(rows, records, grades) if item['date'] == slate_day()]
     upcoming_all = [item for item in all_today if item['upcoming']]
+    st.caption(f"Upcoming Fantasy: {len({item['card'].get('Player') for item in upcoming_all})} players · {len(upcoming_all)} saved lines")
     current_cards={market_signature(c):c for c in rows}
     line_checks=dict(wf.store.items('odds_refresh'))
     upcoming=[]
@@ -8722,9 +8723,9 @@ def render_fantasy_plays(wf, st):
         if (current_card and line_freshness(current_card,refresh_checks=line_checks)[0]
                 and pick_is_selectable(current_card,item['frozen'].get('result') or {})):
             upcoming.append(dict(item,card=current_card))
-    default = 'Full slate'
+    default = 'Upcoming'
     mode = st.segmented_control('Fantasy view', ['Full slate', 'Upcoming', 'Saved forecasts'], default=default,
-                                key='fantasy_view_buttons', width='stretch') or default
+                                key='fantasy_view_buttons_v2', width='stretch') or default
     auto = wf.store.get('automation', slate_day()) or {}
     if auto.get('fantasy_partial') or auto.get('feed_partial'):
         st.caption('⚠ Feed incomplete · Saved projections shown; full Fantasy coverage is not confirmed.')
@@ -8742,7 +8743,7 @@ def render_fantasy_plays(wf, st):
                 imported=sum(str(c.get('Game'))==game and bool(fantasy_weights(c)) for c in rows)
                 coverage.append({'Game':game,'Saved projections':len(items),'Verified upcoming lines':verified,
                     'Status':('Lines imported · projections pending' if imported else 'No usable Fantasy quotes imported') if not items else 'Started · saved projections' if not any(i['upcoming'] for i in items) else 'Verified and saved lines' if verified else 'Saved projections · quotes need refresh'})
-            with st.expander('Full slate coverage',expanded=True):
+            with st.expander('Full slate coverage',expanded=False):
                 if coverage:st.dataframe(pd.DataFrame(coverage),hide_index=True,width='stretch')
                 else:st.caption('No saved slate coverage is available.')
 
@@ -10817,7 +10818,6 @@ def render_app_pages():
             if 'unfinished' in board_note: st.caption(board_note)
             render_combos(workflow, st)
         elif app_page == 'Fantasy':
-            if 'unfinished' in board_note: st.caption(board_note)
             render_fantasy_plays(workflow, st)
         elif app_page in ("Plays", "Saved"):
             if "unfinished" in board_note: st.caption(board_note)
