@@ -1417,8 +1417,19 @@ def render_combos(wf, st):
                 st.caption('No rejection reasons recorded. The saved board may be empty; check the Plays tab and board storage.')
         keys=(snapshot.get('sizes') or {}).get(str(size),[])
         if not keys:
-            st.info(f'No qualifying {size}-player combo yet. Rebuilding uses the same saved inputs and does not refresh stale lines.')
-            st.write('Next: open Settings → Enter current PrizePicks lines — no odds requests. Copy current lines, choose the actual offered directions and import them. The app checks rosters, calculates those lines and rebuilds suggestions. Lines can still be excluded for injury status, missing history or insufficient separation.')
+            from collections import Counter
+            current_pool,_=combo_pool(wf.store,tier_mode=tier_mode)
+            game_counts=Counter(leg['event_id'] for leg in current_pool)
+            capacity=sum(min(2,count) for count in game_counts.values())
+            if capacity<size:
+                st.info(f'{size} players require at least {math.ceil(size/2)} games under this builder’s two-per-game limit. '
+                        f'Current verified pool: {len(current_pool)} players across {len(game_counts)} games; '
+                        f'maximum {min(6,capacity)} players before other combo checks.')
+            else:
+                st.info(f'No saved {size}-player combo passed the builder checks. Rebuilding uses saved inputs and does not refresh stale lines.')
+            available=[str(n) for n in range(2,7) if (snapshot.get('sizes') or {}).get(str(n))]
+            if available:st.caption('Saved suggestions exist for these player counts: '+', '.join(available)+'. Each entry is rechecked before use.')
+            st.caption('A larger combo needs additional eligible players and games. Stale lines cannot be made current by rebuilding. Current lines can be confirmed in Settings → Enter current PrizePicks lines without API credits.')
         for number,key in enumerate(keys,1):
             combo=wf.store.get('combo',key)
             if not combo:continue
