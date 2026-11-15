@@ -25,3 +25,5 @@ jobs:
         run: python scripts/check_learning_pipeline.py
 
 # Evaluate the new daily training stage on existing settled NBA outcomes.
+
+# Verify daily evaluations with standalone module loading corrected.
