@@ -8889,6 +8889,7 @@ def pp_fantasy_check(rows, payload):
 def prizepicks_projection_page(store, params, purpose='Refresh my saved NBA board'):
     """Quote and check available credits before reserving a bounded page request."""
     from urllib.parse import urlencode
+    params=dict(params,league='NBA',stat='Fantasy Score')
     key=setting('PRIZEPICKS_API_KEY','')
     if not key:raise ValueError('PRIZEPICKS_API_KEY is missing.')
     day=slate_day()
@@ -9164,10 +9165,11 @@ def pp_cached_combined():
     full = workflow_store.get('source','pp_tiers_v1') or {}
     fantasy = workflow_store.get('source','pp_fantasy_v3') or {}
     compact=workflow_store.get('source','pp_fantasy_compact_v1') or {}
-    items=pp_cached_items((full,fantasy,compact))
-    if not full and not fantasy and not compact:
+    daily=workflow_store.get('source','pp_fantasy_daily_v1') or {}
+    items=pp_cached_items((full,fantasy,compact,daily))
+    if not full and not fantasy and not compact and not daily:
         return None
-    return {'items':items, 'fetched_at':compact.get('updated_at') or fantasy.get('updated_at') or full.get('fetched_at'),
+    return {'items':items, 'fetched_at':daily.get('fetched_at') or daily.get('updated_at') or compact.get('updated_at') or fantasy.get('updated_at') or full.get('fetched_at'),
             'partial':bool(full.get('partial') or fantasy.get('partial'))}
 
 
@@ -9368,10 +9370,9 @@ def import_daily_prizepicks_board(wf, board, ledger, day):
             ledger['feed_requests']=int(wf.store.get('request_budget',day+':prizepicks',0) or 0)
             wf.store.put('automation',day,ledger)
             return body
-        base_filters = {'league': 'NBA', 'status': 'active', 'view':'compact', 'limit': 1000}
-        # One complete daily traversal includes Fantasy and every tier. Do
-        # not spend another set of calls downloading the same Fantasy records.
-        feeds = [('pp_tiers_v1', base_filters, 'feed_partial', 10)]
+        base_filters = {'league': 'NBA', 'status': 'active', 'stat':'Fantasy Score', 'view':'compact', 'limit': 100}
+        # Native feed supplies Fantasy Score only, across all offered tiers.
+        feeds = [('pp_fantasy_daily_v1', base_filters, 'feed_partial', 10)]
         downloaded = {}
         observed_at = None
         for cache_key, filters, flag, allowance in feeds:
@@ -9400,10 +9401,11 @@ def import_daily_prizepicks_board(wf, board, ledger, day):
         compact=wf.store.get('source','pp_fantasy_compact_v1') or {}
         payloads=[{'items':list(downloaded.values())}]
         if compact.get('slate_day')==day:payloads.append(compact)
-        downloaded={str(item['id']):item for item in pp_cached_items(payloads)}
+        downloaded={str(item['id']):item for item in pp_cached_items(payloads)
+            if pp_stat_key((item.get('market') or {}).get('stat'))==('FANTASY',)}
         if downloaded:
             try:
-                merged, count = pp_merge_tiers(board.get('v4_rows', []), list(downloaded.values()), observed_at)
+                merged, count = pp_merge_tiers(board.get('v4_rows', []), list(downloaded.values()), observed_at, fantasy_only=True)
                 board['v4_rows'] = merged
                 ledger['native_import']={'downloaded_records':len(downloaded),'imported_rows':count,
                     'pagination_complete':bool(saved_feed.get('pagination_complete')),
@@ -9535,15 +9537,16 @@ def newer_quote_rows(previous, incoming, family):
 
 
 def run_quota_fallback(wf, budget_seconds=1200):
-    from odds_fallback import download, BOARD_MARKETS, COVERAGE_VERSION, prune_unavailable_lines, refresh_upcoming_quotes
+    from odds_fallback import download, BOARD_MARKETS, FANTASY_MARKETS, COVERAGE_VERSION, prune_unavailable_lines
+    regular_markets=tuple(m for m in BOARD_MARKETS if m not in FANTASY_MARKETS)
     board_run_stage(wf.store,'importing')
     day=slate_day();board=wf.store.get('board','board') or {}
     saved_status=wf.store.get('source','the_odds_api_fallback_latest') or {}
     checked=utc_timestamp(saved_status.get('checked_at'))
-    if saved_status.get('complete') and saved_status.get('coverage_version')==COVERAGE_VERSION and saved_status.get('requested_markets')==list(BOARD_MARKETS) and pd.notna(checked) and slate_day(checked)==day and board.get('v4_rows'):
+    if saved_status.get('complete') and saved_status.get('coverage_version')==COVERAGE_VERSION and saved_status.get('requested_markets')==list(regular_markets) and pd.notna(checked) and slate_day(checked)==day and board.get('v4_rows'):
         rows=[];status=dict(saved_status,http_requests=0,games_requested=0,reused_snapshot=True)
     else:
-        rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''),markets=BOARD_MARKETS)
+        rows,status=download(wf.store,setting('THE_ODDS_API_KEY',''),markets=regular_markets)
     refreshed=[]
     quote_report={'http_requests':0,'events_updated':[],'errors':[],'state':'daily_cache_only'}
     status=dict(status,targeted_refresh=quote_report)
@@ -9589,11 +9592,16 @@ def run_quota_fallback(wf, budget_seconds=1200):
         if rows:board['v4_scan_at']=now()
         wf.store.put('board','board',board)
     ledger=wf.store.get('automation',day) or {}
-    # The fallback capture is the daily line source. Do not trigger a second paid provider scan.
+    # Two disjoint feeds share one daily capture; neither retries the other.
     feed_errors=[]
+    ledger['fantasy_partial']=True
+    if setting('PRIZEPICKS_API_KEY',''):
+        board,feed_errors=import_daily_prizepicks_board(wf,board,ledger,day)
+    else:
+        feed_errors.append('PRIZEPICKS_API_KEY missing; Fantasy Score uses saved lines only.')
     ledger['feed_partial']=not status.get('complete',False)
-    ledger['fantasy_partial']=not status.get('complete',False)
-    board_run_stage(wf.store,'preparing',status.get('complete',False))
+    ledger['source_routing']={'regular_props':'The Odds API','fantasy_score':'PrizePicksAPI','league':'NBA'}
+    board_run_stage(wf.store,'preparing',not ledger['feed_partial'] and not ledger['fantasy_partial'])
     last_check=wf.store.get('input_health','latest') or {}
     checked_at=utc_timestamp(last_check.get('checked_at'))
     if pd.isna(checked_at) or (pd.Timestamp.now(tz='UTC')-checked_at).total_seconds()>=3600:
@@ -9623,15 +9631,8 @@ def run_quota_fallback(wf, budget_seconds=1200):
 
 
 def automatic_board_run_with_fallback(wf, refresh=True, budget_seconds=1200):
-    # The primary account check is unmetered. A quota guard may use the
-    # independently budgeted fallback; transient errors do not trigger it.
-    exhausted=False
-    try:exhausted=primary_odds_quota_exhausted(wf.store)
-    except ValueError:pass
-    if exhausted:return run_quota_fallback(wf,budget_seconds)
-    report=automatic_board_run(wf,refresh,budget_seconds)
-    report['active_odds_provider']='OddsPAPI'
-    return report
+    # Explicit user routing: regular NBA props + separate native Fantasy feed.
+    return run_quota_fallback(wf,budget_seconds)
 
 
 def daily_cached_board_run(wf, budget_seconds=1200, capture_due=True):
@@ -10503,7 +10504,7 @@ def render_pp_tier_refresh():
             else:
                 st.info('No fantasy-labelled records in the saved feed. Use the targeted Fantasy Score refresh for today; website availability and feed availability can differ.')
         fantasy_refresh = st.button('Refresh Fantasy Score only (max 2 requests)',type='primary')
-        full_refresh = st.button('Refresh PrizePicks lines and tiers')
+        full_refresh = False  # Regular props come from The Odds API only.
         rebuild = st.button('Rebuild from saved PrizePicks feed — no API calls')
         if not (fantasy_refresh or full_refresh or rebuild):
             return
@@ -10529,6 +10530,7 @@ def render_pp_tier_refresh():
                 payload,calls = pp_download_pages(workflow_store,
                     'pp_fantasy_v3' if fantasy_refresh else 'pp_tiers_v1',fetch_page,filters,
                     max_pages=2 if fantasy_refresh else 10,continuation_seconds=86400)
+            fantasy_refresh = True
             items = payload['items']
             if fantasy_refresh:
                 items = [item for item in items if pp_stat_key((item.get('market') or {}).get('stat')) == ('FANTASY',)]
