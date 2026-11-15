@@ -12,7 +12,7 @@ concurrency:
 jobs:
   combos:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     env:
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
@@ -27,3 +27,5 @@ jobs:
       - name: Inspect and rebuild Combos from saved board only
         run: python scripts/repair_combos_only.py
 # Build the requested six-player saved-projection options only.
+
+# Rebuild all sizes and tiers after the completed split-source board.
