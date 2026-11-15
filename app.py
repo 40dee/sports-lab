@@ -3108,6 +3108,7 @@ class Workflow:
                 "start": card["Start (UTC)"],
                 "created": frozen["created_at"],
                 "event": frozen["event_id"],
+                "player": str(result["player_id"]),
                 "baseline": result["baseline"],
                 "adjusted": result["matchup_projection"],
                 "line": float(card["Line"]),
@@ -3128,6 +3129,10 @@ class Workflow:
             ).dt.strftime("%Y-%m-%d")
 
             days = sorted(frame["day"].unique())
+            from daily_learning import evaluate_daily
+            daily=evaluate_daily(frame,float((self.store.get('model',group) or {}).get('alpha',1.0)))
+            daily.update(stat=group,evaluated_at=now())
+            self.store.put('model_daily_evaluation',group+':'+str(days[-1]),daily)
 
             if (
                 len(frame) < 120
@@ -3137,9 +3142,10 @@ class Workflow:
                 reports.append({
                     "stat": group,
                     "status": (
-                        "Collecting settled pregame forecasts"
+                        "Daily candidate evaluated; collecting dates for activation review"
                     ),
                     "samples": len(frame),
+                    "daily_evaluation": daily,
                 })
                 continue
 
