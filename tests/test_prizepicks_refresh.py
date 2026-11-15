@@ -41,6 +41,8 @@ class RefreshTests(unittest.TestCase):
   self.install(self.response(body={'quoted_credits':1}),self.response(body={'meta':{'mode':'live'},'data':[]},headers={'X-Credits-Remaining':'1','X-Credits-Cost':'1'}))
   result=env['prizepicks_projection_page'](self.store,{'view':'compact','limit':100})
   self.assertEqual(result['meta']['mode'],'live');self.reserve.assert_called_once()
+  self.assertEqual(self.get.call_args_list[1].kwargs['params']['stat'],'Fantasy Score')
+  self.assertEqual(self.get.call_args_list[1].kwargs['params']['league'],'NBA')
   self.assertTrue(self.get.call_args_list[0].args[0].endswith('/credit-costs'))
   self.assertTrue(self.get.call_args_list[1].args[0].endswith('/projections'))
   self.assertEqual(self.store.get('source','pp_health')['remaining'],'1')
