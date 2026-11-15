@@ -22,3 +22,5 @@ jobs:
           python-version: '3.12'
       - name: Read persisted progress without importing app or calling odds providers
         run: python scripts/read_board_progress.py
+
+# Inspect today's split-source capture; no line-provider calls.
