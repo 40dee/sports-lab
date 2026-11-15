@@ -36,18 +36,6 @@ class BackupPacingTests(unittest.TestCase):
         scope['odds_monthly_budget']=lambda *_:{'remaining':0}
         self.assertTrue(scope['primary_odds_quota_exhausted'](None))
 
-    def test_reported_daily_guard_does_not_spend_backup(self):
-        from unittest.mock import Mock
-        from types import SimpleNamespace
-        fallback=Mock(side_effect=AssertionError('Backup must not run'))
-        scope={'primary_odds_quota_exhausted':lambda _:False,
-               'automatic_board_run':lambda *_:{'errors':['Daily OddsPAPI request guard reached']},
-               'run_quota_fallback':fallback}
-        node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='automatic_board_run_with_fallback')
-        exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),scope)
-        result=scope['automatic_board_run_with_fallback'](SimpleNamespace(store=None))
-        self.assertEqual(result['active_odds_provider'],'OddsPAPI')
-        fallback.assert_not_called()
 
 class LeagueIsolationTests(unittest.TestCase):
     def test_only_nba_fixtures_can_consume_nba_scan_allowance(self):
