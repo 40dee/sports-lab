@@ -1,6 +1,8 @@
 """Read-only audit of effective learning examples across every saved market."""
 import ast,math
 from pathlib import Path
+import sys
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from collections import Counter,defaultdict
 source=Path('app.py').read_text();nodes=[]
 for node in ast.parse(source).body:
