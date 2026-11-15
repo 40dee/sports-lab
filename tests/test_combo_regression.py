@@ -245,3 +245,19 @@ class DifferentTeamsTests(unittest.TestCase):
   for leg in pool:leg['team_id']='one-team'
   self.assertEqual(env['combo_candidates'](pool,2,'balanced-v1'),[])
   with self.assertRaisesRegex(ValueError,'different team'):env['combo_snapshot'](pool[:2],'balanced-v1',REF)
+
+class SlateSizeGameLimitTests(unittest.TestCase):
+ def test_normal_slate_uses_one_player_per_game(self):
+  pool,_=env['combo_pool'](populated(18),REF)
+  for size in range(2,7):
+   options=env['combo_candidates'](pool,size,'balanced-v1')
+   self.assertTrue(options)
+   for legs in options:self.assertEqual(len({leg['event_id'] for leg in legs}),size)
+ def test_small_slate_allows_two_per_game_but_keeps_teams_distinct(self):
+  pool,_=env['combo_pool'](populated(6),REF)
+  options=env['combo_candidates'](pool,6,'balanced-v1')
+  self.assertTrue(options)
+  for legs in options:
+   self.assertEqual(len({leg['team_id'] for leg in legs}),6)
+   self.assertEqual(len({leg['event_id'] for leg in legs}),3)
+   self.assertTrue(all(sum(x['event_id']==leg['event_id'] for x in legs)<=2 for leg in legs))
