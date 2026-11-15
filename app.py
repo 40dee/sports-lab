@@ -1064,6 +1064,31 @@ def combo_directional_grade(combo, grades, reference=None):
         'note':'Model direction results; PrizePicks DNP, reboot and payout settlement can differ.'}
 
 
+def combo_inputs_version(store, reference=None):
+    current=combo_clock(reference)
+    board=store.get('board','board') or {}
+    health=store.get('health',slate_day(current)) or {}
+    prep=store.get('preparation','last') or {}
+    return [board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
+            prep.get('ready'),int(current.timestamp()//300)]
+
+
+def refresh_combo_health(wf, board=None, reference=None):
+    """Refresh only due ESPN eligibility checks; never request line providers."""
+    current=combo_clock(reference)
+    board=board if board is not None else (wf.store.get('board','board') or {})
+    health=wf.store.get('health',slate_day(current)) or {}
+    players=health.get('players') or {};due={}
+    for card in board.get('v4_rows') or []:
+        if str(card.get('Platform','')).lower()!='prizepicks' or not today_pregame(card.get('Start (UTC)'),current):continue
+        key=player_health_key(card);checked=utc_timestamp((players.get(key) or {}).get('checked_at'))
+        if pd.isna(checked) or not 0<=(current-checked).total_seconds()<900:
+            due.setdefault(key,card)
+    if due:
+        return refresh_board_health(wf,{'v4_rows':list(due.values())})
+    return health
+
+
 def combo_research_suggestions(store, tier_mode, size, reference=None):
     """Build only the requested paper view; never spend odds credits or alter live suggestions."""
     if tier_mode not in ('standard','goblin','demon','mixed') or size not in range(2,7):
@@ -1072,7 +1097,7 @@ def combo_research_suggestions(store, tier_mode, size, reference=None):
     pool,excluded=combo_pool(store,current,tier_mode=tier_mode,quote_mode='research')
     key=slate_day(current)+(':'+tier_mode if tier_mode!='mixed' else '')+':research'
     prior=store.get('combo_suggestions',key) or {}
-    sizes=dict(prior.get('sizes') or {})
+    sizes=dict(prior.get('sizes') or {}) if prior.get('input_version')==combo_inputs_version(store,current) else {}
     policy=(store.get('combo_model',str(size)) or {}).get('policy','balanced-v1')
     if policy not in COMBO_POLICIES:policy='balanced-v1'
     keys=[]
@@ -1083,7 +1108,8 @@ def combo_research_suggestions(store, tier_mode, size, reference=None):
         keys.append(combo['id'])
     sizes[str(size)]=keys
     snapshot={'created_at':current.isoformat(),'day':slate_day(current),'eligible_players':len(pool),
-              'excluded':excluded,'sizes':sizes,'tier_mode':tier_mode,'quote_mode':'research'}
+              'excluded':excluded,'sizes':sizes,'tier_mode':tier_mode,'quote_mode':'research',
+              'input_version':combo_inputs_version(store,current)}
     store.put('combo_suggestions',key,snapshot)
     return snapshot
 
@@ -1311,7 +1337,8 @@ def update_combos(store, generate=False, reference=None, quote_mode="verified"):
         for tier_mode in ('mixed','standard','goblin','demon'):
             pool, excluded=combo_pool(store,current,tier_mode=tier_mode,quote_mode=quote_mode)
             suggestions={'created_at':current.isoformat(),'day':slate_day(current),
-                         'eligible_players':len(pool),'excluded':excluded,'sizes':{},'tier_mode':tier_mode,'quote_mode':quote_mode}
+                         'eligible_players':len(pool),'excluded':excluded,'sizes':{},'tier_mode':tier_mode,'quote_mode':quote_mode,
+                         'input_version':combo_inputs_version(store,current)}
             for size in range(2,7):
                 models=store.get('combo_model',str(size)) or {'policy':'balanced-v1'}
                 policies={}
@@ -1389,6 +1416,9 @@ def render_combos(wf, st):
     st.caption('PrizePicks · 2–6 different players · Saved paper suggestions, not submitted entries')
     mode=st.segmented_control('Combo view',['Suggestions','Results & learning','Played entries'],default='Suggestions',key='combo_mode') or 'Suggestions'
     if mode=='Suggestions':
+        try:refresh_combo_health(wf)
+        except Exception as error:
+            st.caption('ESPN eligibility refresh unavailable: '+type(error).__name__+'. Saved checks remain subject to expiry.')
         allowed,note=combo_board_ready(wf.store)
         if not allowed:
             st.info(note)
@@ -1433,8 +1463,12 @@ def render_combos(wf, st):
                     st.rerun()
             except Exception as error:
                 st.error('ESPN eligibility recheck failed: '+type(error).__name__+'. No paid odds refresh was requested.')
-        if quote_mode=='research' and (not snapshot or str(size) not in (snapshot.get('sizes') or {})):
-            snapshot=combo_research_suggestions(wf.store,tier_mode,size)
+        if (not snapshot or str(size) not in (snapshot.get('sizes') or {})
+                or snapshot.get('input_version')!=combo_inputs_version(wf.store)):
+            if quote_mode=='research':snapshot=combo_research_suggestions(wf.store,tier_mode,size)
+            else:
+                update_combos(wf.store,generate=True)
+                snapshot=wf.store.get('combo_suggestions',slate_day()+(':'+tier_mode if tier_mode!='mixed' else '')) or {}
         if not snapshot:
             st.info('No saved '+tier_choice.lower()+' suggestions yet. Build from the saved board or wait for the board worker. Other tiers are never used to fill a tier-specific slip.')
             return
@@ -9650,9 +9684,14 @@ def daily_cached_board_run(wf, budget_seconds=None, capture_due=True):
     if not capture_due or not claim_capture(store,day,now()):
         # Interrupted imports remain closed, even if no finish was recorded.
         if store.get('daily_board_capture',day):close_capture(store,day,now())
+        refresh_combo_health(wf,board)
         report=prepare_saved_board(wf,board,budget_seconds=budget_seconds,max_picks=None)
+        refresh_combo_health(wf,board)
+        combo_report=update_combos(store,generate=True)
+        research_report=update_combos(store,generate=True,quote_mode='research')
+        combo_report['research_generated']=research_report.get('generated',0)
         ledger.update(last_run=now(),daily_mode='cached_only',preparation=report,
-                      combos=update_combos(store,generate=True),
+                      combos=combo_report,
                       coverage=board_coverage(wf,board))
         store.put('automation',day,ledger)
         return ledger
