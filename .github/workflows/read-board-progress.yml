@@ -24,3 +24,5 @@ jobs:
         run: python scripts/read_board_progress.py
 
 # Inspect today's split-source capture; no line-provider calls.
+
+# Read progress after the requested split-source capture started.
