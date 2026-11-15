@@ -27,3 +27,5 @@ jobs:
 # Evaluate the new daily training stage on existing settled NBA outcomes.
 
 # Verify daily evaluations with standalone module loading corrected.
+
+# Refresh saved daily evaluations using independently verified timestamp parsing.
