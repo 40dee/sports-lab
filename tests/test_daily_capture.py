@@ -48,7 +48,8 @@ class DailyWorkerTests(unittest.TestCase):
              'odds_account_snapshot':Mock(side_effect=ValueError('No account')),
              'automatic_board_run_with_fallback':provider,
              'prepare_saved_board':Mock(return_value={'ready':1}),
-             'board_coverage':Mock(return_value={'ready':1}),'update_combos':Mock(return_value={})}
+             'board_coverage':Mock(return_value={'ready':1}),'update_combos':Mock(return_value={}),
+             'refresh_combo_health':Mock(return_value={})}
         exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
         store=Store();wf=SimpleNamespace(store=store)
         self.assertEqual(env['daily_cached_board_run'](wf),{'capture':'done'})
