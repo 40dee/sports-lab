@@ -26,3 +26,5 @@ jobs:
 # Inspect today's split-source capture; no line-provider calls.
 
 # Read progress after the requested split-source capture started.
+
+# Verify native Fantasy import and calculation progress.
