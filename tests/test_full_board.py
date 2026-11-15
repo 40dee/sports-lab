@@ -105,9 +105,10 @@ class FullBoardTests(unittest.TestCase):
    item['event']['opponent']='LAL'
    with self.assertRaises(ValueError):env['pp_merge_tiers'](rows,[item],REF)
   finally:env.clear();env.update(saved)
- def test_daily_fallback_does_not_start_second_provider_scan(self):
+ def test_split_capture_includes_native_fantasy_once(self):
   fn=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='run_quota_fallback')
   calls=[n.func.id for n in ast.walk(fn) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name)]
-  self.assertNotIn('import_daily_prizepicks_board',calls)
+  self.assertEqual(calls.count('import_daily_prizepicks_board'),1)
+  self.assertNotIn('refresh_upcoming_quotes',calls)
 
 if __name__=='__main__':unittest.main()
