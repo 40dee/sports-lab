@@ -58,17 +58,17 @@ class FallbackTests(TestCase):
     def test_no_background_key_is_visible_without_calls(self):
         get=Mock();rows,report=f.download(Store(),'',NOW,get)
         get.assert_not_called();self.assertFalse(report['configured']);self.assertEqual(rows,[])
-    def test_wrapper_keeps_primary_until_exhausted(self):
+    def test_explicit_split_route_never_spends_oddspapi(self):
         source=Path(__file__).resolve().parents[1].joinpath('app.py').read_text()
         node=next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name=='automatic_board_run_with_fallback')
-        primary=Mock(return_value={'errors':[]});fallback=Mock(return_value={'fallback':True})
-        check=Mock(return_value=False)
-        env={'primary_odds_quota_exhausted':check,'automatic_board_run':primary,'run_quota_fallback':fallback}
+        primary=Mock(side_effect=AssertionError('OddsPAPI must not run'))
+        check=Mock(side_effect=AssertionError('No primary account query needed'))
+        split=Mock(return_value={'split':True})
+        env={'primary_odds_quota_exhausted':check,'automatic_board_run':primary,'run_quota_fallback':split}
         exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
         wf=SimpleNamespace(store=Store())
-        self.assertEqual(env['automatic_board_run_with_fallback'](wf)['active_odds_provider'],'OddsPAPI');fallback.assert_not_called()
-        check.return_value=True
-        self.assertEqual(env['automatic_board_run_with_fallback'](wf),{'fallback':True});self.assertEqual(primary.call_count,1)
+        self.assertEqual(env['automatic_board_run_with_fallback'](wf),{'split':True})
+        split.assert_called_once_with(wf,1200);primary.assert_not_called();check.assert_not_called()
 
     def test_fantasy_requests_cover_all_six_games(self):
         games=[]
