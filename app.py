@@ -3641,7 +3641,7 @@ def calculation_failure_details(error):
 
 
 def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.monotonic):
-    """Bounded resumable saved-data work. Never calls an odds/feed refresh."""
+    """Saved-data calculation; None budgets drain the board without timed handoffs."""
     import copy
     board = board if isinstance(board, dict) else {}
     rows = preparation_rows(board.get('v4_rows') or [])
@@ -3712,7 +3712,8 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
             retry = pd.to_datetime((states.get(key) or {}).get('retry_at'), utc=True, errors='coerce')
             if pd.notna(retry) and retry > pd.Timestamp.now(tz='UTC'):
                 continue
-            if clock() - began >= budget_seconds or report['attempted'] >= max_picks:
+            if ((budget_seconds is not None and clock() - began >= budget_seconds)
+                    or (max_picks is not None and report['attempted'] >= max_picks)):
                 break
             if not today_pregame(card.get('Start (UTC)')):
                 continue
@@ -9504,7 +9505,7 @@ def automatic_board_run(wf, refresh=True, budget_seconds=1200):
     health=refresh_board_health(wf, board)
     ledger['targeted_checks']=[]  # Paid lines stay frozen for the Pacific day.
     ledger['odds_requests']=wf.store.get('request_budget',day+':oddspapi',ledger.get('odds_requests',0))
-    report = prepare_saved_board(wf, board, budget_seconds=budget_seconds, max_picks=10000)
+    report = prepare_saved_board(wf, board, budget_seconds=budget_seconds, max_picks=None)
     board_run_stage(wf.store,'finished')
     ledger['combos'] = update_combos(wf.store, generate=True)
     ledger['coverage'] = board_coverage(wf, board)
@@ -9614,7 +9615,7 @@ def run_quota_fallback(wf, budget_seconds=1200):
         health['players']={**(health_before.get('players') or {}),**health['players']}
         wf.store.put('health',day,health)
         ledger['player_health']={k:v for k,v in health.items() if k!='players'}
-        preparation=prepare_saved_board(wf,{'v4_rows':current_rows},budget_seconds=budget_seconds,max_picks=10000)
+        preparation=prepare_saved_board(wf,{'v4_rows':current_rows},budget_seconds=budget_seconds,max_picks=None)
         board=wf.store.get('board','board') or board
         board_run_stage(wf.store,'finished')
         combos=update_combos(wf.store,generate=True)
@@ -9635,7 +9636,7 @@ def automatic_board_run_with_fallback(wf, refresh=True, budget_seconds=1200):
     return run_quota_fallback(wf,budget_seconds)
 
 
-def daily_cached_board_run(wf, budget_seconds=1200, capture_due=True):
+def daily_cached_board_run(wf, budget_seconds=None, capture_due=True):
     from daily_capture import claim_capture, close_capture
     day=slate_day();store=wf.store
     store.put('board_capture_policy','enabled',True)
@@ -9649,8 +9650,9 @@ def daily_cached_board_run(wf, budget_seconds=1200, capture_due=True):
     if not capture_due or not claim_capture(store,day,now()):
         # Interrupted imports remain closed, even if no finish was recorded.
         if store.get('daily_board_capture',day):close_capture(store,day,now())
-        report=prepare_saved_board(wf,board,budget_seconds=budget_seconds,max_picks=10000)
+        report=prepare_saved_board(wf,board,budget_seconds=budget_seconds,max_picks=None)
         ledger.update(last_run=now(),daily_mode='cached_only',preparation=report,
+                      combos=update_combos(store,generate=True),
                       coverage=board_coverage(wf,board))
         store.put('automation',day,ledger)
         return ledger
