@@ -26,5 +26,5 @@ if ledger.get('source_routing')!=routing and not store.get('source_route_migrati
     ledger.pop('last_run',None)
     store.put('automation',day,ledger)
     print('SPLIT_CAPTURE_MIGRATION old partial capture archived; one new-key capture authorized',flush=True)
-report=env['daily_cached_board_run'](wf,capture_due=True,budget_seconds=600)
+report=env['daily_cached_board_run'](wf,capture_due=True,budget_seconds=None)
 print('SPLIT_CAPTURE_RESULT',env['encode'](report),flush=True)
