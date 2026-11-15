@@ -24,7 +24,7 @@ jobs:
       ODDSPAPI_DAILY_REQUEST_CAP: ${{ vars.ODDSPAPI_DAILY_REQUEST_CAP || '34' }}
       ODDSPAPI_MONTHLY_REQUEST_CAP: ${{ vars.ODDSPAPI_MONTHLY_REQUEST_CAP || '' }}
       PRIZEPICKS_DAILY_REQUEST_CAP: ${{ vars.PRIZEPICKS_DAILY_REQUEST_CAP || '10' }}
-      REFRESH: 'false'
+      REFRESH: 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -34,7 +34,7 @@ jobs:
       - run: python -m pip install -r requirements.txt
       - name: Check fallback configuration without provider requests
         run: python -c "import os; print('THE_ODDS_API_KEY configured for background worker:', bool(os.getenv('THE_ODDS_API_KEY')))"
-      - name: Import or resume today's board
+      - name: Capture today's NBA lines once, otherwise prepare cached board
         run: |
           if [ "$REFRESH" = "true" ]; then
             python app.py --auto-board --refresh
@@ -44,4 +44,4 @@ jobs:
       - name: Grade completed games
         if: ${{ !cancelled() }}
         run: python app.py --maintenance
-# Resume saved board after releasing independently verified games (2026-11-13).
+# User requested today's split-source NBA import; daily capture lock remains enforced.
