@@ -1,4 +1,4 @@
-# Recheck live source capacity on November 11 before any further line downloads.
+# Verify the newly configured Fantasy source using zero-credit coverage only.
 name: Check PrizePicks source health without downloading lines
 on:
   push:
