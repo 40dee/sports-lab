@@ -14,7 +14,7 @@ import pandas as pd
 SOURCE=Path(__file__).resolve().parents[1]/'app.py'
 tree=ast.parse(SOURCE.read_text())
 names={'json_safe','encode','identity','utc_timestamp','market_signature','unique_forecasts',
- 'forecast_index','saved_prediction','slate_day','today_pregame','player_health_key',
+ 'combo_inputs_version','forecast_index','saved_prediction','slate_day','today_pregame','player_health_key',
  'pick_is_selectable','pick_offered_sides','line_freshness','board_coverage','board_download_progress','saved_forecast_records'}
 names.update(n.name for n in tree.body if isinstance(n,ast.FunctionDef) and
              (n.name.startswith('combo_') or n.name in ('update_combos','record_combo_actual')))
