@@ -231,3 +231,17 @@ class SavedProjectionComboTests(unittest.TestCase):
   next(iter(health['players'].values()))['blocked']=True
   store.put('health','2026-11-09',health)
   self.assertEqual(env['combo_pool'](store,REF,quote_mode='research')[0],[])
+
+class DifferentTeamsTests(unittest.TestCase):
+ def test_builder_never_pairs_teammates_even_when_their_scores_are_highest(self):
+  store=populated(18);pool,_=env['combo_pool'](store,REF)
+  pool[1]['team_id']=pool[0]['team_id']
+  for size in range(2,7):
+   options=env['combo_candidates'](pool,size,'balanced-v1')
+   self.assertTrue(options)
+   for legs in options:self.assertEqual(len({leg['team_id'] for leg in legs}),size)
+ def test_same_team_snapshot_is_rejected_and_unique_team_shortage_returns_empty(self):
+  store=populated(6);pool,_=env['combo_pool'](store,REF)
+  for leg in pool:leg['team_id']='one-team'
+  self.assertEqual(env['combo_candidates'](pool,2,'balanced-v1'),[])
+  with self.assertRaisesRegex(ValueError,'different team'):env['combo_snapshot'](pool[:2],'balanced-v1',REF)
