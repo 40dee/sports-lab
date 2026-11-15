@@ -13,9 +13,10 @@ def main():
         return 1
     sql = """SELECT namespace,key,payload,updated FROM sports_records
         WHERE (namespace='preparation' AND key='last')
-        OR (namespace IN ('board_run','board_download','coverage','automation') AND key=?)
+        OR (namespace IN ('board_run','board_download','coverage','automation','daily_board_capture') AND key=?)
         OR (namespace='board' AND key='board')
-        LIMIT 6"""
+        OR (namespace='source' AND key IN ('pp_health','pp_fantasy_daily_v1'))
+        LIMIT 12"""
     body = json.dumps({"requests": [
         {"type":"execute","stmt":{"sql":sql,"args":[{"type":"text","value":day}],"want_rows":True}},
         {"type":"close"}]}).encode()
@@ -37,10 +38,15 @@ def main():
                 print(json.dumps({"state":"Database read unavailable after two attempts; no records changed"}))
                 return 1
     records = {}
+    source_details = {}
     times = {}
     for row in data:
         namespace, key, payload, updated = [cell.get("value") for cell in row]
         records[namespace] = json.loads(payload)
+        if namespace=='source':
+            value=json.loads(payload)
+            source_details[key]={k:value.get(k) for k in ('state','remaining','http_status','pages_downloaded','pagination_complete','partial','next_cursor','updated_at','fetched_at')}
+            source_details[key]['saved_items']=len(value.get('items') or [])
         times[namespace] = updated
     prep = records.get("preparation", {})
     run = records.get("board_run", {})
@@ -58,6 +64,8 @@ def main():
         "last_completed_pass": {key:(ledger.get("preparation") or {}).get(key) for key in ("ready","total","pending","unavailable","finished_at")},
         "provider_capture_complete": (ledger.get("fallback") or {}).get("complete")
     }
+    report["source_details"]=source_details
+    report["capture"]=records.get("daily_board_capture")
     games = {}
     for card in (records.get("board", {}).get("v4_rows") or []):
         game = str(card.get("Game", "Unknown"))
