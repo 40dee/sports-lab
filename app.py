@@ -10029,7 +10029,7 @@ def pick_chart_spec(games, line, direction):
              'x': {'field': 'Game', 'type': 'ordinal', 'sort': None,
                    'axis': {'title': None, 'labelAngle': -45, 'labelLimit': 110}},
              'y': {'field': 'Value', 'type': 'quantitative', 'scale': {'domain': domain}, 'axis': {'title': None}},
-             'color': {'field': 'Outcome', 'type': 'nominal', 'scale': {'domain': ['Hit','Miss','Tie'], 'range': ['#22e6a5','#fa7079','#94a3b8']}, 'legend': None},
+             'color': {'field': 'Outcome', 'type': 'nominal', 'scale': {'domain': ['Hit','Miss','Tie'], 'range': ['#38ffa0','#ff4564','#f3d66b']}, 'legend': None},
              'tooltip': [{'field':'Date'}, {'field':'Matchup'}, {'field':'Value','title':'Stat result'}, {'field':'Outcome'}]}},
         {'data': {'values': [{'Line': float(line)}]},
          'mark': {'type':'rule','strokeDash':[7,4],'color':'#ffffff','strokeWidth':2},
@@ -10423,39 +10423,39 @@ def ui_board(page):
 # ---------------- APP HEADER ----------------
 st.markdown("""<style>
 :root { color-scheme:dark; }
-.stApp {background:radial-gradient(ellipse at 50% 0%,#211b32 0%,#101019 44%,#090a10 100%);color:#f3f8ff;}
+.stApp {background:radial-gradient(ellipse at 50% 0%,#251040 0%,#0e071c 44%,#070311 100%);color:#f3f8ff;}
 .stApp h1,.stApp h2,.stApp h3,.stApp h4,.stApp p,.stApp label {color:#f3f8ff;}
 .stApp [data-testid="stCaptionContainer"] p {color:#a9b9cb;}
 .block-container {max-width:1040px;padding-top:1.2rem;padding-bottom:6rem;}
-.sl-card {background:linear-gradient(135deg,#1c1b29,#12121c);border:1px solid #393449;border-radius:19px;padding:17px 17px 12px;margin:18px 0 6px;box-shadow:0 12px 28px #0003;}
+.sl-card {background:linear-gradient(135deg,#100820,#080412);border:2px solid #f3d66b;border-radius:19px;padding:17px 17px 12px;margin:18px 0 6px;box-shadow:3px 4px 0 #7135b1,0 12px 28px #0005;}
 .sl-person {display:flex;align-items:center;gap:16px;min-width:0;}
 .sl-person h3 {margin:0;color:white;font-size:1.3rem;line-height:1.25;}
-.sl-photo {width:78px;height:86px;object-fit:cover;border-radius:14px;background:#263d50;flex-shrink:0;}
-.sl-initial {display:flex;align-items:center;justify-content:center;font-size:24px;color:#24ed9c;}
-.sl-team {color:#b5a0e5;font-weight:700;font-size:.93rem;margin-top:3px;}
-.sl-muted {color:#9fb2c5;font-size:.77rem;margin-top:5px;}
-.sl-prop {color:#f1f7fd;font-size:.92rem;margin-top:4px;}
+.sl-photo {width:78px;height:86px;object-fit:cover;border-radius:14px;background:#241047;flex-shrink:0;}
+.sl-initial {display:flex;align-items:center;justify-content:center;font-size:24px;color:#38ffa0;}
+.sl-team {color:#b278ff;font-weight:700;font-size:.93rem;margin-top:3px;}
+.sl-muted {color:#c4b7d9;font-size:.77rem;margin-top:5px;}
+.sl-prop {color:#f3d66b;font-size:.92rem;margin-top:4px;}
 .sl-dot {color:#23e6a2;}
-.sl-pickline,.sl-hero {display:flex;align-items:center;justify-content:space-between;gap:9px;background:linear-gradient(120deg,#1d192b,#13131e);border:1px solid #403450;border-radius:14px;padding:12px;margin-top:14px;}
+.sl-pickline,.sl-hero {display:flex;align-items:center;justify-content:space-between;gap:9px;background:linear-gradient(120deg,#170b2a,#090413);border:1px solid #603491;border-radius:14px;padding:12px;margin-top:14px;}
 .sl-side {font-size:1.08rem;font-weight:850;white-space:nowrap;text-align:center;border-radius:13px;padding:10px 14px;min-width:115px;}
-.sl-side.more {background:linear-gradient(135deg,#008d46,#00d36b);border:2px solid #36ff99;color:white;box-shadow:0 0 17px #00d46c44;}
-.sl-side.less {background:linear-gradient(135deg,#a71927,#d43a43);border:2px solid #ff6876;color:white;}
+.sl-side.more {background:#38ffa0;border:2px solid #38ffa0;color:#07150e;box-shadow:0 0 17px #00d46c44;}
+.sl-side.less {background:#ff4564;border:2px solid #ff4564;color:#20050d;}
 .sl-side.pending {background:#2c3b4c;color:#d9e2eb;font-size:.85rem;}
 .sl-proj {display:flex;flex-direction:column;align-items:center;min-width:0;text-align:center;}
 .sl-proj small {font-size:.69rem;color:#c1cedb;white-space:nowrap;}
-.sl-proj b {font-size:1.45rem;color:#28ed99;line-height:1.3;}
+.sl-proj b {font-size:1.45rem;color:#38ffa0;line-height:1.3;}
 .sl-detail-heading {margin:8px 0 12px;}.sl-detail-heading h2 {margin:3px 0;font-size:1.7rem;}
 .sl-detail-photo {width:100px;height:110px;}.sl-eyebrow {font-size:.7rem;font-weight:800;letter-spacing:.12em;color:#9eb0c3;}
-.sl-hero {border:2px solid #22e6a5;padding:18px 14px;margin:16px 0 8px;}
+.sl-hero {border:2px solid #f3d66b;padding:18px 14px;margin:16px 0 8px;}
 .sl-hero .sl-proj b {font-size:2rem;}
-.stApp [data-testid="stButton"] button {border-radius:13px;border:1px solid #456073;background:#142536;color:#f0f6fc;}
-.stApp button[data-variant="segmented_control"]{background:#191824!important;border-color:#393449!important;color:#cfc5e2!important;}
-.stApp button[data-variant="segmented_control"][aria-checked="true"]{background:#342746!important;border-color:#9d7bd3!important;color:#f4edff!important;}
-.stApp button[data-variant="segmented_control"]:hover{background:#272033!important;}
-.stApp [data-testid="stButton"] button:hover {border-color:#22e6a5;color:#22e6a5;}
+.stApp [data-testid="stButton"] button {border-radius:13px;border:1px solid #8150b8;background:#170b2a;color:#f0f6fc;}
+.stApp button[data-variant="segmented_control"]{background:#100820!important;border-color:#7041a1!important;color:#cfc5e2!important;}
+.stApp button[data-variant="segmented_control"][aria-checked="true"]{background:#7135b1!important;border-color:#c28aff!important;color:#f4edff!important;}
+.stApp button[data-variant="segmented_control"]:hover{background:#28113f!important;}
+.stApp [data-testid="stButton"] button:hover {border-color:#38ffa0;color:#38ffa0;}
 .stApp [data-testid="stRadio"] [role="radiogroup"] {gap:.35rem;}
 .stApp [data-testid="stRadio"] label {border-radius:12px;}
-.stApp [data-testid="stMetric"] {background:#15283a;border:1px solid #395168;border-radius:12px;padding:10px;}
+.stApp [data-testid="stMetric"] {background:#0c0617;border:1px solid #7041a1;border-radius:12px;padding:10px;}
 @media(max-width:600px){.block-container{padding:1rem .65rem 6rem;}.sl-card{padding:12px;}.sl-photo{width:65px;height:75px;}.sl-detail-photo{width:82px;height:94px;}.sl-person h3{font-size:1.09rem;}.sl-detail-heading h2{font-size:1.25rem;}.sl-pickline,.sl-hero{padding:9px 6px;gap:5px;}.sl-side{font-size:.83rem;min-width:90px;padding:9px 5px;}.sl-proj small{font-size:.57rem;}.sl-proj b{font-size:1.17rem;}.sl-hero .sl-proj b{font-size:1.45rem;}}
 
 /* Board cards: compact two-column desktop layout, stacked by Streamlit on phones. */
@@ -10479,6 +10479,13 @@ st.markdown("""<style>
  .sl-compact .sl-person h3 {font-size:.96rem;}
  .sl-compact .sl-pickline {padding:5px 7px;margin-top:6px;}
 }
+
+.stApp [data-testid="stSidebar"] {background:#100820;}
+.stApp [data-testid="stAlert"] {background:#160c25;border:1px solid #7041a1;}
+.stApp [data-baseweb="input"],.stApp [data-baseweb="select"] > div {background:#100820;color:#f3f8ff;border-color:#7041a1;}
+.sl-context-tile {background:#0c0617!important;border-color:#7041a1!important;}
+.combo-choice.more,.fc-more {color:#38ffa0!important;}
+.combo-choice.less,.fc-less {color:#ff4564!important;}
 </style>""", unsafe_allow_html=True)
 def render_pp_tier_refresh():
     rows = [row for row in st.session_state.get('v4_rows',[]) if today_pregame(row.get('Start (UTC)'))]
