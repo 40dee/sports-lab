@@ -10,10 +10,10 @@ def evaluate_daily(frame, incumbent_alpha=1.0):
     for column in ('baseline','adjusted','actual','line'):
         frame[column]=pd.to_numeric(frame[column],errors='coerce')
     valid=np.isfinite(frame[['baseline','adjusted','actual','line']]).all(axis=1)
-    start=pd.to_datetime(frame['start'],utc=True,errors='coerce')
-    created=pd.to_datetime(frame['created'],utc=True,errors='coerce')
+    start=pd.to_datetime(frame['start'],utc=True,errors='coerce',format='ISO8601')
+    created=pd.to_datetime(frame['created'],utc=True,errors='coerce',format='ISO8601')
     frame=frame[valid & start.notna() & created.notna() & (created<start)].copy()
-    frame['day']=pd.to_datetime(frame['start'],utc=True).dt.strftime('%Y-%m-%d')
+    frame['day']=pd.to_datetime(frame['start'],utc=True,format='ISO8601').dt.strftime('%Y-%m-%d')
     days=sorted(frame['day'].unique())
     report={'status':'waiting_for_two_graded_dates','activation':'unchanged',
             'graded_dates':len(days),'examples':len(frame),'incumbent_alpha':incumbent_alpha}
