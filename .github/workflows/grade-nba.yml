@@ -24,7 +24,7 @@ concurrency:
 jobs:
   board:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 180
     env:
       TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
       TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
