@@ -101,3 +101,17 @@ class PreparationSpeedTests(unittest.TestCase):
         self.assertEqual(store.get('grade','historical'),{'status':'WIN'})
         archive=store.get('source','unavailable_board_lines:'+env['slate_day']())
         self.assertEqual(archive['items'][key]['card'],card)
+
+class ContinuousPreparationTests(unittest.TestCase):
+    def test_background_drain_ignores_elapsed_time_and_processes_remaining_cards(self):
+        env=preparation_env();store=f.Memory()
+        cards=f.populated(3).get('board','board')['v4_rows']
+        ticks=iter(range(0,1000000,10000))
+        def calculate(card,*args):
+            return {'id':env['identity'](card),'card':card,'created_at':f.REF,'event_id':'x','result':{}}
+        wf=SimpleNamespace(store=store,e={'fetch_player_history':lambda *_:None,'current_season':lambda:'2026-27'},
+            player=Mock(),event_for=Mock(),calculate=Mock(side_effect=calculate))
+        report=env['prepare_saved_board'](wf,{'v4_rows':cards},budget_seconds=None,max_picks=None,clock=lambda:next(ticks))
+        self.assertEqual(wf.calculate.call_count,3)
+        self.assertEqual(report['pending'],0)
+        self.assertEqual(report['ready'],3)
