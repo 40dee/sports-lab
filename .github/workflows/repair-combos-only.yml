@@ -29,3 +29,5 @@ jobs:
 # Build the requested six-player saved-projection options only.
 
 # Rebuild all sizes and tiers after the completed split-source board.
+
+# Rebuild suggestions with one player per team.
