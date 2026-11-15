@@ -1,0 +1,38 @@
+name: Check new Odds API key without credits
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/check-new-odds-key.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    env:
+      THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+    steps:
+      - name: Verify authentication and quota through free sports endpoint
+        run: |
+          python3 - <<'PY'
+          import os,json,urllib.request,urllib.parse,urllib.error
+          key=os.environ.get('THE_ODDS_API_KEY','').strip()
+          if not key:raise SystemExit('ODDS_KEY_CHECK missing repository secret')
+          url='https://api.the-odds-api.com/v4/sports/?'+urllib.parse.urlencode({'apiKey':key})
+          try:
+              with urllib.request.urlopen(url,timeout=25) as response:
+                  body=json.load(response)
+                  report={'authenticated':True,'credits_remaining':response.headers.get('x-requests-remaining'),
+                      'credits_used':response.headers.get('x-requests-used'),
+                      'last_request_cost':response.headers.get('x-requests-last'),
+                      'nba_available':any(x.get('key')=='basketball_nba' for x in body),
+                      'nfl_available':any(x.get('key')=='americanfootball_nfl' for x in body),
+                      'board_imported':False}
+                  print('ODDS_KEY_CHECK '+json.dumps(report))
+          except urllib.error.HTTPError as error:
+              print('ODDS_KEY_CHECK '+json.dumps({'authenticated':False,'http_status':error.code}))
+              raise SystemExit(1)
+          except Exception:
+              raise SystemExit('ODDS_KEY_CHECK connection failed; no retry made')
+          PY
