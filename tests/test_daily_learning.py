@@ -25,3 +25,12 @@ class DailyLearningTests(unittest.TestCase):
         self.assertEqual(evaluate_daily(frame)['status'],'waiting_for_two_graded_dates')
         frame=self.frame();frame.loc[0,'actual']=float('nan')
         self.assertEqual(evaluate_daily(frame)['examples'],1)
+
+    def test_mixed_iso_timestamp_precision_keeps_every_valid_pregame_example(self):
+        frame=self.frame()
+        extra=dict(frame.iloc[0]);extra.update(start='2026-11-10T20:00:00.000+00:00',created='2026-11-10T18:00:00.123456+00:00',player='3')
+        frame=pd.concat([frame,pd.DataFrame([extra])],ignore_index=True)
+        result=evaluate_daily(frame)
+        self.assertEqual(result['examples'],3)
+        self.assertEqual(result['train_examples'],2)
+        self.assertEqual(result['train_player_games'],2)
