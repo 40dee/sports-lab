@@ -1,0 +1,42 @@
+name: Continue saved NBA board without batch stops
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/drain-saved-nba.yml]
+permissions:
+  contents: read
+concurrency:
+  group: sports-lab-worker
+  cancel-in-progress: true
+jobs:
+  drain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - run: python -m pip install -r requirements.txt
+      - name: Calculate cached board continuously; no paid provider credentials
+        run: |
+          python - <<'PY'
+          import ast
+          from pathlib import Path
+          source=Path('app.py').read_text();nodes=[]
+          for node in ast.parse(source).body:
+              if isinstance(node,ast.If) and "'--rebuild-compact-fantasy'" in (ast.get_source_segment(source,node.test) or ''):break
+              nodes.append(node)
+          env={'__name__':'drain_saved_nba','__file__':'app.py'}
+          exec(compile(ast.Module(body=nodes,type_ignores=[]),'app.py','exec'),env)
+          if not env['_database_online'] or not env['workflow'].store.remote:raise SystemExit('Permanent storage unavailable.')
+          print('CONTINUOUS_NBA_STARTED saved board only; no timed batch limit',flush=True)
+          result=env['daily_cached_board_run'](env['workflow'],budget_seconds=None,capture_due=False)
+          print('CONTINUOUS_NBA_FINISHED',env['encode']({'preparation':result.get('preparation'),'coverage':result.get('coverage'),'combos':result.get('combos')}),flush=True)
+          PY
