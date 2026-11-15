@@ -4315,6 +4315,18 @@ def render_results_dashboard(wf, st):
                 hits = sum(row['Outcome'] == 'WIN' for row in decided)
                 st.caption(f'Combined model record: {hits}W–{len(decided)-hits}L. Identical cross-platform markets counted once.')
                 st.caption(f"{len(wf.store.items('model'))} learned stat models active. Updates require a chronological holdout.")
+                latest_daily={}
+                for _,evaluation in wf.store.items('model_daily_evaluation'):
+                    stat=evaluation.get('stat','Unknown')
+                    if str(evaluation.get('evaluated_at',''))>str(latest_daily.get(stat,{}).get('evaluated_at','')):
+                        latest_daily[stat]=evaluation
+                if latest_daily:
+                    st.caption('Daily training runs on settled data. Candidate evaluation and production activation are tracked separately.')
+                    st.dataframe(pd.DataFrame([{'Market':stat,'Latest graded date':v.get('holdout_date'),
+                        'Daily evaluation':v.get('status'),'Candidate accuracy':(v.get('candidate_holdout') or {}).get('accuracy'),
+                        'Current model accuracy':(v.get('incumbent_holdout') or {}).get('accuracy'),
+                        'Production model':v.get('activation')} for stat,v in sorted(latest_daily.items())]),hide_index=True,width='stretch')
+
 
 
 
