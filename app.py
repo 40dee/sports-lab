@@ -980,6 +980,7 @@ def combo_rank(legs, policy):
 def combo_candidates(pool, size, policy):
     import heapq
     # Bounded beam search, not an exhaustive optimizer or a probability model.
+    game_limit=1 if len({leg['event_id'] for leg in pool})>=size else 2
     beam = [()]
     for _ in range(size):
         next_beam = []
@@ -987,7 +988,7 @@ def combo_candidates(pool, size, policy):
             for i in range(chosen[-1]+1 if chosen else 0, len(pool)):
                 legs = [pool[j] for j in chosen+(i,)]
                 if len({str(x['team_id']) for x in legs}) != len(legs):continue
-                if sum(x['event_id']==pool[i]['event_id'] for x in legs) > 2: continue
+                if sum(x['event_id']==pool[i]['event_id'] for x in legs) > game_limit: continue
                 next_beam.append(chosen+(i,))
         # Retain search paths from every game as well as the global leaders.
         # Otherwise a strong early matchup can crowd all later games out of
@@ -1037,12 +1038,12 @@ def combo_snapshot(legs, policy, reference=None):
             raise ValueError('Combo snapshots must be saved before every leg starts.')
         if sum(x['event_id']==leg['event_id'] for x in legs)>2:
             raise ValueError('At most two players per game in this builder.')
-    key = hashlib.sha256(encode([slate_day(stamp),policy,'distinct-teams-v2',
+    key = hashlib.sha256(encode([slate_day(stamp),policy,'distinct-teams-adaptive-games-v3',
         sorted([x['forecast_id'],identity(x['card']),x['direction']] for x in legs)]).encode()).hexdigest()
     return {'id': key, 'created_at': stamp.isoformat(), 'day': slate_day(stamp),
         'size': len(legs), 'policy':policy, 'platform':'prizepicks', 'kind':'paper',
         'legs':json_safe(legs), 'ranking_score':combo_rank(legs,policy),
-        'rules_version':'distinct-teams-v2', 'payout_terms':None,
+        'rules_version':'distinct-teams-adaptive-games-v3', 'payout_terms':None,
         'note':'Directional paper result. No entry submitted. No multiplied hit probabilities.'}
 
 
@@ -1070,7 +1071,7 @@ def combo_inputs_version(store, reference=None):
     board=store.get('board','board') or {}
     health=store.get('health',slate_day(current)) or {}
     prep=store.get('preparation','last') or {}
-    return ['distinct-teams-v2',board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
+    return ['distinct-teams-adaptive-games-v3',board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
             prep.get('ready'),int(current.timestamp()//300)]
 
 
@@ -1484,7 +1485,7 @@ def render_combos(wf, st):
             else:
                 st.warning('No verified combo candidates passed all pregame checks. See the exclusion breakdown; rebuilding alone does not refresh provider lines or injury checks.')
         with st.expander('Selection checks and exclusion reasons', expanded=not snapshot['eligible_players']):
-            st.write('At least five history games; projected separation ≥0.25 recent-game standard deviations; checks within one hour; one player per team. Picks may span different games. These thresholds are not calibrated probabilities. No matching injury entry does not confirm starting.')
+            st.write('At least five history games; projected separation ≥0.25 recent-game standard deviations; checks within one hour; one player per team; one per game when enough eligible games are available, otherwise up to two per game. These thresholds are not calibrated probabilities. No matching injury entry does not confirm starting.')
             if snapshot.get('excluded'):
                 st.dataframe(pd.DataFrame([{'Reason':k,'Lines excluded':v} for k,v in sorted(snapshot['excluded'].items(),key=lambda item:-item[1])]),hide_index=True,width='stretch')
             else:
