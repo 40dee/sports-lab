@@ -31,3 +31,5 @@ jobs:
 # Rebuild all sizes and tiers after the completed split-source board.
 
 # Rebuild suggestions with one player per team.
+
+# Use one player per game unless too few eligible games remain for the selected size.
