@@ -18,7 +18,6 @@ for key,value in players.items():
 missing={};aliased=0
 for card in board.get('v4_rows') or []:
     if card.get('Platform')!='prizepicks' or not env['today_pregame'](card.get('Start (UTC)')):continue
-    if str(card.get('Line Type')).lower() not in ('standard','regular'):continue
     frozen=env['saved_prediction'](index,card)
     if not frozen:continue
     key=env['player_health_key'](card);result=frozen.get('result') or {}
@@ -33,7 +32,11 @@ health['players']=players;store.put('health',day,health)
 if missing:
     health=env['refresh_board_health'](wf,{'v4_rows':list(missing.values())})
 print('COMBO_HEALTH',env['encode']({'verified_id_aliases':aliased,'ESPN_rechecked':len(missing)}),flush=True)
-snapshot=env['combo_research_suggestions'](store,'standard',6)
+before,excluded=env['combo_pool'](store,tier_mode='standard',quote_mode='research')
+print('COMBO_DIAGNOSIS',env['encode']({'eligible':len(before),'excluded':excluded}),flush=True)
+for mode in ('verified','research'):
+    print('COMBO_REBUILD',mode,env['encode'](env['update_combos'](store,generate=True,quote_mode=mode)),flush=True)
+snapshot=store.get('combo_suggestions',day+':standard:research') or {}
 print('SIX_PLAYER_RESULT',env['encode'](snapshot),flush=True)
 for key in snapshot['sizes'].get('6',[]):
     combo=store.get('combo',key)
