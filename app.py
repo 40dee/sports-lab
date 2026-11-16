@@ -9981,9 +9981,21 @@ def ui_card(card, frozen, saved=False):
     elif health.get('statuses'):
         st.caption('Latest injury status: ' + ', '.join(health['statuses']) + ' · checked ' + str(health.get('checked_at')))
     if today_pregame(card.get('Start (UTC)')):
-        st.caption(('' if fresh else '⚠ ')+freshness_note)
-        if result and not fresh:
-            st.caption('Saved model direction: '+direction+' · Verify the exact line before using this forecast.')
+        # Daily cached quotes age normally; reserve alerts for actual missing
+        # metadata or failed checks. This does not certify a current offer.
+        quote_field='Tier Fetched At' if card.get('Tier Source')=='prizepicksapi.com' else 'Odds checked (UTC)'
+        quote_stamp=utc_timestamp(card.get(quote_field))
+        if card.get('Tier Source')=='prizepicksapi.com':
+            observed=utc_timestamp(card.get('Tier Observed At'))
+            if pd.notna(observed) and pd.notna(quote_stamp):quote_stamp=min(quote_stamp,observed)
+        daily_cached=(not fresh and freshness_note.startswith('Saved quote captured ')
+                      and pd.notna(quote_stamp) and slate_day(quote_stamp)==slate_day())
+        if daily_cached:
+            st.caption('Daily saved board · Captured '+quote_stamp.tz_convert('America/Los_Angeles').strftime('%I:%M %p PT'))
+        else:
+            st.caption(('' if fresh else '⚠ ')+freshness_note)
+            if result and not fresh:
+                st.caption('Saved model direction: '+direction+' · Verify the exact line before using this forecast.')
     if result:
         st.caption(pick_side_note(card, result))
     key = identity(card)
