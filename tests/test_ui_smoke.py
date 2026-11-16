@@ -19,6 +19,20 @@ class NavigationTests(unittest.TestCase):
             self.assertTrue(any('picks are waiting for the complete board' in x.value for x in app.info))
             self.assertFalse(any('combo_option_' in str(x) for x in app.markdown))
 
+    def test_standard_filters_default_and_manual_choice_persists(self):
+        app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
+        self.assertFalse(app.exception,list(app.exception))
+        self.assertEqual(app.session_state['mobile_tier'],'Standard')
+        self.assertEqual(app.session_state['fantasy_tier_filter'],'Standard')
+        app.session_state['mobile_tier']='Demon'
+        app.run()
+        self.assertFalse(app.exception,list(app.exception))
+        self.assertEqual(app.session_state['mobile_tier'],'Demon')
+        app.session_state['sports_lab_page_buttons']='Fantasy'
+        app.run()
+        self.assertFalse(app.exception,list(app.exception))
+        self.assertEqual(app.session_state['fantasy_tier_filter'],'Standard')
+
     def test_all_pages_render_without_provider_credentials(self):
         app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
         self.assertFalse(app.exception,list(app.exception))
@@ -111,7 +125,7 @@ class NavigationTests(unittest.TestCase):
         self.assertTrue(any('↑ MORE' in card and 'Saved model direction: MORE' in card for card in cards))
         self.assertFalse(any('No selectable upcoming Fantasy plays' in item.value for item in app.info))
         self.assertTrue(any('Standard: 1' in item.value and 'Goblin: 1' in item.value and 'Demon: 1' in item.value for item in app.caption))
-        app.session_state['fantasy_tier_filter']='Standard'
+        self.assertEqual(app.session_state['fantasy_tier_filter'],'Standard')
         app.run()
         self.assertFalse(app.exception,list(app.exception))
         cards=[item.value for item in app.markdown if '<div class="fc-card">' in item.value]
