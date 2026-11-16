@@ -4926,8 +4926,12 @@ def line_freshness(card, reference=None, refresh_checks=None):
         if card.get('Tier Source')=='prizepicksapi.com':
             return False,'Native tier line predates the latest game change/check; verify PrizePicks.'
     limit=1800 if (utc_timestamp(card.get('Start (UTC)'))-current).total_seconds()<=3600 else 7200
-    if pd.isna(stamp) or not 0 <= (current-stamp).total_seconds()<=limit:
-        return False,'Line needs an update: source timestamp missing or stale.'
+    if pd.isna(stamp):
+        return False,'Quote capture time is missing; verify the exact offered line.'
+    age=(current-stamp).total_seconds()
+    if not 0 <= age<=limit:
+        captured=stamp.tz_convert('America/Los_Angeles').strftime('%b %d, %I:%M %p PT')
+        return False,'Saved quote captured '+captured+'; current offer is unverified. Browsing keeps the daily cache and makes no paid refresh.'
     return True,'Line source checked '+stamp.tz_convert('America/Los_Angeles').strftime('%I:%M %p PT')+'.'
 
 
@@ -8702,8 +8706,9 @@ def compact_fantasy_card_html(item, status=None):
     result = item['frozen'].get('result') or {}
     text = lambda value: escape(str(value if value is not None else ''))
     direction = result.get('direction')
-    side = model_direction_label(result)
+    side = model_direction_label(result) if pick_is_selectable(card,result) else pick_display_label(card,result)
     side_class = 'fc-more' if direction == 'MORE' else 'fc-less' if direction == 'LESS' else ''
+    if not pick_is_selectable(card,result):side_class = ''
     outcome = item.get('outcome', 'PENDING')
     label = {'WIN':'✓ WIN', 'LOSS':'✕ LOSS', 'TIE':'Tie', 'DNP':'DNP', 'PENDING':'Pending'}.get(outcome,outcome)
     outcome_class = 'fc-more' if outcome == 'WIN' else 'fc-less' if outcome == 'LOSS' else ''
@@ -8865,7 +8870,7 @@ def render_fantasy_plays(wf, st):
     tier_counts={tier:sum(str(item['card'].get('Line Type','')).lower() in values for item in visible)
         for tier,values in {'Standard':('standard','regular'),'Goblin':('goblin',),'Demon':('demon',)}.items()}
     st.caption('Saved Fantasy lines in this view · '+ ' · '.join(f'{tier}: {count}' for tier,count in tier_counts.items()))
-    tier_choice=st.segmented_control('Fantasy line type',['All','Standard','Goblin','Demon'],default='All',key='fantasy_tier_filter') or 'All'
+    tier_choice=st.segmented_control('Fantasy line type',['All','Standard','Goblin','Demon'],default='Standard',key='fantasy_tier_filter') or 'Standard'
     if tier_choice!='All':
         tiers=('standard','regular') if tier_choice=='Standard' else (tier_choice.lower(),)
         visible=[item for item in visible if str(item['card'].get('Line Type','')).lower() in tiers]
@@ -9942,7 +9947,10 @@ def ui_card(card, frozen, saved=False):
     if result:
         direction_text=model_direction_label(result)
         if result.get('tie'):direction_class='pending'
-        if not pick_is_selectable(card,result):probability=None
+        if not pick_is_selectable(card,result):
+            direction_text=pick_display_label(card,result)
+            direction_class='pending'
+            probability=None
     fresh, freshness_note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
     if result and not fresh:
         probability = None
@@ -9960,7 +9968,7 @@ def ui_card(card, frozen, saved=False):
       <div class="sl-prop">{ui_text(stat)} <span class="sl-dot">·</span> Line {line_text}</div>
       <div class="sl-muted">{ui_text(platform)}{(' · ' + ui_text(tier_note)) if tier_note else ''}</div>
       </div></div>
-      <div class="sl-pickline"><div class="sl-side {direction_class}" title="Frozen model direction; line eligibility is checked separately">{ui_text(direction_text)}</div>
+      <div class="sl-pickline"><div class="sl-side {direction_class}" title="Offered direction check; the frozen model estimate is preserved below">{ui_text(direction_text)}</div>
       <div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
       <div class="sl-proj"><small>Experimental estimate</small><b>{prob_text}</b></div></div>
       </div>''', unsafe_allow_html=True)
@@ -10380,7 +10388,7 @@ def ui_board(page):
     stats = ['All'] + sorted({ui_stat(card) for card in records})
     stat = a.selectbox('Stat', stats, key='mobile_stat')
     tiers = ['All', 'Standard', 'Goblin', 'Demon', 'Unverified']
-    tier = b.selectbox('PrizePicks line type', tiers, key='mobile_tier')
+    tier = b.selectbox('PrizePicks line type', tiers, index=1, key='mobile_tier')
     records = [c for c in records if (stat == 'All' or ui_stat(c) == stat)
                and (tier == 'All' or (c.get('Platform') == 'prizepicks' and c.get('Line Type') == tier))]
     if view == 'Top plays':
@@ -10485,6 +10493,11 @@ def ui_board(page):
 
 
 # ---------------- APP HEADER ----------------
+# Apply the new landing preference once; later manual filter changes are retained.
+if not st.session_state.get('_standard_landing_v1'):
+    st.session_state['mobile_tier'] = 'Standard'
+    st.session_state['fantasy_tier_filter'] = 'Standard'
+    st.session_state['_standard_landing_v1'] = True
 st.markdown("""<style>
 :root { color-scheme:dark; }
 .stApp {background:radial-gradient(ellipse at 50% 0%,#251040 0%,#0e071c 44%,#070311 100%);color:#f3f8ff;}
