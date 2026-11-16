@@ -19,6 +19,40 @@ class NavigationTests(unittest.TestCase):
             self.assertTrue(any('picks are waiting for the complete board' in x.value for x in app.info))
             self.assertFalse(any('combo_option_' in str(x) for x in app.markdown))
 
+    def test_more_only_less_card_is_a_pass_without_changing_projection(self):
+        import pandas as pd
+        import test_combo_regression as fixtures
+        store=fixtures.populated(1)
+        current=pd.Timestamp.now(tz='UTC')
+        start=current.tz_convert('America/Los_Angeles').normalize()+pd.DateOffset(days=1)-pd.Timedelta(microseconds=1)
+        board=store.get('board','board');card=board['v4_rows'][0]
+        frozen=store.get('forecast',fixtures.env['identity'](card))
+        card.update({'Start (UTC)':start.tz_convert('UTC').isoformat(),
+                     'Odds checked (UTC)':current.isoformat(),'Period':'result',
+                     'Line Type':'Demon','Available Sides':['MORE']})
+        key=fixtures.env['identity'](card)
+        frozen.update(id=key,card=dict(card))
+        frozen['result'].update(direction='LESS',projection=0.49)
+        store.put('forecast',key,frozen)
+        store.put('board','board',board)
+        store.put('board_run',fixtures.env['slate_day'](current),
+            {'stage':'finished','import_complete':True,'board_scan_at':board.get('v4_scan_at')})
+        app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
+        app.session_state['_sports_lab_offline_records_v1']=store.records
+        app.session_state['v4_rows']=board['v4_rows']
+        app.session_state['sports_lab_page_buttons']='Plays'
+        app.session_state['mobile_tier']='Demon'
+        app.run()
+        self.assertFalse(app.exception,list(app.exception))
+        cards=[item.value for item in app.markdown if 'sl-card sl-compact' in item.value and 'Player 0' in item.value]
+        self.assertEqual(len(cards),1)
+        self.assertIn('>PASS</div>',cards[0])
+        self.assertIn('0.49',cards[0])
+        self.assertNotIn('↓ LESS</div>',cards[0])
+        self.assertTrue(any('Model estimate: LESS' in item.value for item in app.caption))
+        self.assertTrue(all(button.disabled for button in app.button if button.label=='☆ Save'))
+        self.assertEqual(store.get('forecast',key)['result']['direction'],'LESS')
+
     def test_standard_filters_default_and_manual_choice_persists(self):
         app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
         self.assertFalse(app.exception,list(app.exception))
