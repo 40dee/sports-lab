@@ -78,6 +78,26 @@ def main():
         item["fantasy"] += int("fantasy" in str(card.get("Stat", "")).lower() or "fantasy" in str(card.get("Stat Key", "")).lower())
         item["latest_quote"] = max(item["latest_quote"], str(card.get("Odds checked (UTC)") or ""))
     report["games"] = games
+    report["screenshot_cards"] = [c for c in (records.get("board", {}).get("v4_rows") or [])
+        if any(name in str(c.get("Player","")).lower() for name in ("suggs","tatum"))
+        and str(c.get("Line")) in ("4.5","13.5")]
+    stmt = {"sql": "SELECT payload FROM sports_records WHERE namespace='forecast' AND (payload LIKE '%Suggs%' OR payload LIKE '%Tatum%') ORDER BY updated DESC LIMIT 200", "want_rows": True}
+    request = Request("https://" + parsed.netloc + "/v2/pipeline",
+        data=json.dumps({"requests":[{"type":"execute","stmt":stmt},{"type":"close"}]}).encode(),
+        headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"})
+    with urlopen(request,timeout=30) as response:
+        rows=json.load(response)["results"][0]["response"]["result"].get("rows",[])
+    seen=set(); forecasts=[]
+    for row in rows:
+        frozen=json.loads(row[0]["value"]); card=frozen.get("card") or {}; result=frozen.get("result") or {}
+        if str(card.get("Line")) not in ("4.5","13.5"): continue
+        key=(card.get("Player"),card.get("Stat Key"),card.get("Start (UTC)"))
+        if key in seen: continue
+        seen.add(key)
+        forecasts.append({"card":card,"created_at":frozen.get("created_at"),
+            "event_id":frozen.get("event_id"),"result":result})
+        if len(forecasts)>=8:break
+    report["screenshot_forecasts"]=forecasts
     print("BOARD_PROGRESS_JSON " + json.dumps(report, sort_keys=True))
     return 0
 
