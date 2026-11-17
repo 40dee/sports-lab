@@ -8814,6 +8814,14 @@ def render_fantasy_plays(wf, st):
             return
         st.session_state.pop('selected_fantasy_forecast',None)
     st.subheader('Fantasy plays')
+    default = 'Upcoming'
+    mode = st.segmented_control('Fantasy view', ['Full slate', 'Upcoming', 'Saved forecasts', 'Results'], default=default,
+                                key='fantasy_view_buttons_v2', width='stretch') or default
+    if mode in ('Upcoming','Full slate'):
+        allowed,note=combo_board_ready(wf.store)
+        if not allowed:
+            st.info('Today’s picks are waiting for the complete board. '+note)
+            return
     st.caption('PrizePicks NBA · Original saved pregame projections')
     st.markdown('''<style>
     .fc-card{background:radial-gradient(ellipse at 100% 0%,#8b5cf615,transparent 65%),linear-gradient(145deg,#1b1b28,#11121b);border:1px solid #393449;border-radius:15px;padding:13px 14px 11px;margin:5px 0 2px;color:#f4f1ff;box-shadow:0 8px 22px #00000024;transition:border-color .16s ease,box-shadow .16s ease;}
@@ -8859,9 +8867,6 @@ def render_fantasy_plays(wf, st):
         if (current_card and line_freshness(current_card,refresh_checks=line_checks)[0]
                 and pick_is_selectable(current_card,item['frozen'].get('result') or {})):
             upcoming.append(dict(item,card=current_card))
-    default = 'Upcoming'
-    mode = st.segmented_control('Fantasy view', ['Full slate', 'Upcoming', 'Saved forecasts', 'Results'], default=default,
-                                key='fantasy_view_buttons_v2', width='stretch') or default
     auto = wf.store.get('automation', slate_day()) or {}
     if auto.get('fantasy_partial') or auto.get('feed_partial'):
         st.caption('⚠ Feed incomplete · Saved projections shown; full Fantasy coverage is not confirmed.')
@@ -11012,7 +11017,7 @@ def render_app_pages():
             shown_preparation=workflow.store.get('preparation','last') or {}
             st.session_state['_ui_displayed_board_revision']=(shown_run.get('board_scan_at'),
                 shown_preparation.get('ready'),shown_preparation.get('total'))
-        if not board_allowed and app_page != 'Combos':
+        if not board_allowed and app_page not in ('Combos','Fantasy'):
             st.info('Today’s picks are waiting for the complete board. '+board_note)
             st.caption('Saved plays and results remain available. Progress updates automatically; browsing does not download provider lines.')
         elif app_page == 'Combos':
