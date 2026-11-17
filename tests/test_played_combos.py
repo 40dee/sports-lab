@@ -35,13 +35,15 @@ class PlayedTests(unittest.TestCase):
     def test_played_history_shows_exact_legs_and_undo_without_payout_form(self):
         store,combo=populated()
         env['mark_combo_played'](store,combo['id'])
+        store.put('board_run',fixtures.env['slate_day'](),{'stage':'finished','import_complete':True,'board_scan_at':None})
         app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
         app.session_state['_sports_lab_offline_records_v1']=store.records
+        app.session_state['v4_rows']=store.get('board','board')['v4_rows']
         app.session_state['sports_lab_page_buttons']='Combos'
         app.session_state['combo_mode']='Played entries'
         app.run()
         self.assertFalse(app.exception,list(app.exception))
-        self.assertTrue(any('players · Played' in x.value for x in app.markdown))
+        self.assertTrue(any('players · Played' in x.value for x in app.markdown),[x.value for x in app.info])
         frames=[x.value for x in app.dataframe]
         self.assertTrue(any('Player 0' in frame.get('Player',[]).tolist() for frame in frames if 'Player' in frame))
         self.assertFalse(any(b.label=='Confirm platform return' for b in app.button))
