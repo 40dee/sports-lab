@@ -8805,6 +8805,14 @@ def fantasy_breakdown_table(rows):
 
 
 def render_fantasy_plays(wf, st):
+    selected=st.session_state.get('selected_fantasy_forecast')
+    if selected:
+        frozen=wf.store.get('forecast',selected['id'])
+        if frozen:
+            ui_detail(selected['card'],{identity(selected['card']):frozen},
+                selection_key='selected_fantasy_forecast',back_label='‹ Fantasy')
+            return
+        st.session_state.pop('selected_fantasy_forecast',None)
     st.subheader('Fantasy plays')
     st.caption('PrizePicks NBA · Original saved pregame projections')
     st.markdown('''<style>
@@ -8834,7 +8842,7 @@ def render_fantasy_plays(wf, st):
     [data-baseweb="popover"] [role="option"]:hover,[data-baseweb="popover"] [role="option"][aria-selected="true"]{background:#342744!important;color:#fff!important;}
     </style>''', unsafe_allow_html=True)
     reader=getattr(wf.store,'forecast_items',None)
-    records = (wf.store.items('forecast') if st.session_state.get('fantasy_view_buttons_v2')=='Saved forecasts'
+    records = (wf.store.items('forecast') if st.session_state.get('fantasy_view_buttons_v2') in ('Saved forecasts','Results')
                else reader(day=slate_day()) if callable(reader) else wf.store.items('forecast'))
     grades = dict(wf.store.items('grade'))
     board = wf.store.get('board', 'board') or {}
@@ -8852,7 +8860,7 @@ def render_fantasy_plays(wf, st):
                 and pick_is_selectable(current_card,item['frozen'].get('result') or {})):
             upcoming.append(dict(item,card=current_card))
     default = 'Upcoming'
-    mode = st.segmented_control('Fantasy view', ['Full slate', 'Upcoming', 'Saved forecasts'], default=default,
+    mode = st.segmented_control('Fantasy view', ['Full slate', 'Upcoming', 'Saved forecasts', 'Results'], default=default,
                                 key='fantasy_view_buttons_v2', width='stretch') or default
     auto = wf.store.get('automation', slate_day()) or {}
     if auto.get('fantasy_partial') or auto.get('feed_partial'):
@@ -8918,18 +8926,12 @@ def render_fantasy_plays(wf, st):
         if not dates:
             st.info('No saved pregame Fantasy projections were found. Expired feed quotes are not backfilled into new predictions.')
             return
-        recent = dates[:7]
-        options = recent + (['Older dates'] if len(dates) > 7 else [])
-        previous = st.session_state.get('fantasy_day_pills')
-        if previous is not None and previous not in options:
-            st.session_state.pop('fantasy_day_pills', None)
-        date = st.pills('Game day · Pacific', options, default=recent[0],
-            format_func=lambda value: value if value == 'Older dates' else fantasy_date_label(value), key='fantasy_day_pills') or recent[0]
-        if date == 'Older dates':
-            date = st.date_input('Choose an older game day', value=pd.Timestamp(dates[7]).date(),
-                min_value=pd.Timestamp(dates[-1]).date(), max_value=pd.Timestamp(dates[7]).date(),
-                format='MM/DD/YYYY', key='fantasy_older_day').isoformat()
-        visible = [item for item in saved if item['date'] == date]
+        options = ['All dates'] + dates
+        if st.session_state.get('fantasy_day_dropdown') not in options:
+            st.session_state.pop('fantasy_day_dropdown',None)
+        date = st.selectbox('Game day · Pacific',options,index=1,
+            format_func=lambda value:value if value=='All dates' else fantasy_date_label(value),key='fantasy_day_dropdown')
+        visible = [item for item in saved if date=='All dates' or item['date'] == date]
     tier_counts={tier:sum(str(item['card'].get('Line Type','')).lower() in values for item in visible)
         for tier,values in {'Standard':('standard','regular'),'Goblin':('goblin',),'Demon':('demon',)}.items()}
     st.caption('Saved Fantasy lines in this view · '+ ' · '.join(f'{tier}: {count}' for tier,count in tier_counts.items()))
@@ -8941,6 +8943,17 @@ def render_fantasy_plays(wf, st):
     search = st.text_input('Find Fantasy player', placeholder='Search player…', key='fantasy_find_player',label_visibility='collapsed')
     visible = [item for item in visible if search.strip().lower() in ui_name(item['card'].get('Player','')).lower()]
     st.caption(f'{len(visible)} lines · {sum(item["outcome"] in ("WIN","LOSS","TIE","DNP") for item in visible)} settled · Started games show saved pregame forecasts')
+    if mode=='Results':
+        counts={outcome:sum(item['outcome']==outcome for item in visible) for outcome in ('WIN','LOSS','TIE','DNP','PENDING')}
+        decided=counts['WIN']+counts['LOSS']
+        st.markdown('**Fantasy grading record**')
+        st.caption(f"{counts['WIN']} green · {counts['LOSS']} red · {counts['TIE']} ties · {counts['DNP']} DNP · {counts['PENDING']} pending")
+        st.metric('Fantasy directional hit rate',f"{counts['WIN']/decided:.1%}" if decided else '—')
+        st.caption('Fantasy only · PTS + 1.2 REB + 1.5 AST + 3 STL + 3 BLK − TO. Graded against each original pregame line and direction. Ties and DNPs excluded from hit rate; platform settlement can differ.')
+        st.dataframe(pd.DataFrame([{'Day':item['date'],'Player':ui_name(item['card']['Player']),
+            'Tier':item['card'].get('Line Type'),'Line':item['card']['Line'],
+            'Pick':item['frozen']['result'].get('direction'),'Projection':item['projection'],
+            'Actual FP':item['actual'],'Result':item['outcome']} for item in visible]),hide_index=True,width='stretch')
     page_size = 12
     pages = max(1, math.ceil(len(visible)/page_size))
     filters = (mode, date, search, tier_choice, st.session_state.get("fantasy_board_scope_v3"))
@@ -8954,6 +8967,9 @@ def render_fantasy_plays(wf, st):
         card, result = item['card'], item['frozen'].get('result') or {}
         with columns[i % 3]:
             st.markdown(compact_fantasy_card_html(item, health.get(player_health_key(card))),unsafe_allow_html=True)
+            if st.button('History & splits  ›',key='fantasy_research_'+item['id']):
+                st.session_state['selected_fantasy_forecast']={'id':item['id'],'card':dict(card)}
+                st.rerun()
             with st.expander('Breakdown'):
                 weights = fantasy_weights(card)
                 breakdown = []
@@ -10097,10 +10113,11 @@ def ui_fantasy_rates(card, history, result):
     games['MIN'] = pd.to_numeric(games['MIN'], errors='coerce')
     games = games[games['FP'].notna() & games['MIN'].gt(0)].sort_values('GAME_DATE', ascending=False)
     rows = []
-    for label, sample in [('Last 5', games.head(5)), ('Last 15', games.head(15)),
+    for label, sample in [('Last 5', games.head(5)), ('Last 10', games.head(10)), ('Last 15', games.head(15)), ('Last 20', games.head(20)),
                           ('Current season', games[games['SEASON'] == current_season()])]:
         minutes = sample['MIN'].sum()
-        rows.append({'Window': label, 'Games': len(sample), 'Historical FP/min': round(float(sample['FP'].sum() / minutes), 3) if minutes > 0 else None})
+        rows.append({'Window': label, 'Games': len(sample), 'Historical FP/min': round(float(sample['FP'].sum() / minutes), 3) if minutes > 0 else None,
+                     'Historical FP/5 min':round(float(5 * sample['FP'].sum() / minutes),3) if minutes > 0 else None})
     st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
     minutes = ui_number(result.get('minutes'))
     projection = ui_number(result.get('projection'))
@@ -10272,9 +10289,9 @@ def ui_frozen_sources(result):
         st.json({key: result[key] for key in ('minutes','components','learning_model','probability_method','probability_note','availability','warnings') if key in result})
 
 
-def ui_detail(card, forecasts):
-    if st.button('‹  Plays', key='back_to_plays'):
-        st.session_state.pop('selected_prop_card', None)
+def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='‹  Plays'):
+    if st.button(back_label, key='back_to_plays'):
+        st.session_state.pop(selection_key, None)
         st.rerun()
     frozen = forecasts.get(identity(card))
     if frozen:frozen=workflow_store.get('forecast',frozen.get('id') or identity(card)) or frozen
