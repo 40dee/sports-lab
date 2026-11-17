@@ -165,8 +165,8 @@ def evaluate(rows):
     days = sorted({r['day'] for r in rows})
     folds = []
     for day in days[2:]:
-        train = [r for r in rows if r['day'] < day]
-        test = [r for r in rows if r['day'] == day]
+        train = eligible([r for r in rows if r['day'] < day])
+        test = eligible([r for r in rows if r['day'] == day])
         model = fit(train)
         weight = sum(r['weight'] for r in test)
         if not weight:
@@ -185,10 +185,12 @@ def evaluate(rows):
 
 def learn(records, grades):
     rows, excluded = examples(records, grades)
-    model = fit(rows)
+    profile = fit(rows)
+    ranking_rows = eligible(rows)
+    model = fit(ranking_rows)
     folds = evaluate(rows)
     patterns = []
-    for feature, values in model['cells'].items():
+    for feature, values in profile['cells'].items():
         for value, cell in values.items():
             patterns.append(dict(feature=feature, pattern=value, effective_examples=round(cell['weight'], 3),
                 weighted_greens=round(cell['wins'], 3), weighted_reds=round(cell['weight']-cell['wins'], 3),
@@ -196,9 +198,9 @@ def learn(records, grades):
                 shrunk_accuracy=(cell['wins']+20*model['prior'])/(cell['weight']+20)))
     digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()[:16]
     report = dict(version=VERSION, status='evaluated' if folds else 'collecting_dates',
-        examples=len(rows), effective_examples=model['effective_examples'], graded_dates=len({r['day'] for r in rows}),
-        last_graded_date=model['trained_through'], input_digest=digest, excluded=excluded,
+        examples=len(rows), effective_examples=profile['effective_examples'], ranking_examples=len(ranking_rows), ranking_effective_examples=model['effective_examples'], graded_dates=len({r['day'] for r in rows}),
+        last_graded_date=profile['trained_through'], input_digest=digest, excluded=excluded,
         patterns=patterns, folds=folds, activation='shadow_only',
         scope='All settled PrizePicks markets, including Fantasy. Never changes frozen MORE/LESS predictions.',
-        method='Pregame features only. Earlier Pacific dates train; later dates test. Alternate thresholds share player-game/market weight. Top-six diagnostic uses distinct player-games, not full combo constraints or payouts.')
+        method='Pregame features only. Earlier Pacific dates train; later dates test. Alternate thresholds share player-game/market weight. Ranking trains and tests only selectable Standard rows meeting the history/gap checks. All-projection patterns also include passes. Top-six diagnostic uses distinct player-games, not full combo constraints or payouts.')
     return model, report
