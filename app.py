@@ -4390,7 +4390,7 @@ def render_results_dashboard(wf, st):
                 reliability = wf.store.get('pick_reliability_evaluation', 'latest') or {}
                 if reliability:
                     st.caption('Green/red learning: '+str(reliability.get('graded_dates',0))+' graded dates · '
-                        +str(round(reliability.get('effective_examples',0)))+' player-game/market equivalents. Shadow evaluation; combo ranking is unchanged.')
+                        +str(round(reliability.get('effective_examples',0)))+' player-game/market equivalents. Combo ranking can use the capped experimental adjustment; frozen MORE/LESS projections are unchanged.')
                     st.caption('Patterns describe historical associations, not causes or guaranteed hit rates. Alternate lines share weight.')
                     with st.expander('What the model saw in greens and reds'):
                         patterns = reliability.get('patterns') or []
