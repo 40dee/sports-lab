@@ -2707,7 +2707,16 @@ class Workflow:
         prices = dict(self.store.items("paper_forecast"))
         rows = []
 
-        for key, frozen in unique_forecasts(saved_forecast_records(self.store)):
+        learning_forecasts = unique_forecasts(saved_forecast_records(self.store))
+        from pick_reliability import learn as learn_pick_reliability
+        reliability_model, reliability_report = learn_pick_reliability(learning_forecasts, grades)
+        reliability_report['evaluated_at'] = now()
+        self.store.put('pick_reliability_model', 'latest', reliability_model)
+        self.store.put('pick_reliability_evaluation', 'latest', reliability_report)
+        if reliability_report.get('last_graded_date'):
+            self.store.put('pick_reliability_evaluation', reliability_report['last_graded_date'], reliability_report)
+
+        for key, frozen in learning_forecasts:
             result = frozen["result"]
             card = frozen["card"]
             grade = grades.get(key, {})
@@ -4315,6 +4324,18 @@ def render_results_dashboard(wf, st):
                 hits = sum(row['Outcome'] == 'WIN' for row in decided)
                 st.caption(f'Combined model record: {hits}W–{len(decided)-hits}L. Identical cross-platform markets counted once.')
                 st.caption(f"{len(wf.store.items('model'))} learned stat models active. Updates require a chronological holdout.")
+                reliability = wf.store.get('pick_reliability_evaluation', 'latest') or {}
+                if reliability:
+                    st.caption('Green/red learning: '+str(reliability.get('graded_dates',0))+' graded dates · '
+                        +str(round(reliability.get('effective_examples',0)))+' player-game/market equivalents. Shadow evaluation; combo ranking is unchanged.')
+                    st.caption('Patterns describe historical associations, not causes or guaranteed hit rates. Alternate lines share weight.')
+                    with st.expander('What the model saw in greens and reds'):
+                        patterns = reliability.get('patterns') or []
+                        if patterns:st.dataframe(pd.DataFrame(patterns),hide_index=True,width='stretch')
+                        folds = reliability.get('folds') or []
+                        if folds:
+                            st.caption('Earlier dates train; later dates test. Top-six comparison is a ranking diagnostic, not a full combo or payout backtest.')
+                            st.dataframe(pd.DataFrame(folds),hide_index=True,width='stretch')
                 latest_daily={}
                 for _,evaluation in wf.store.items('model_daily_evaluation'):
                     stat=evaluation.get('stat','Unknown')
