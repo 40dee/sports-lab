@@ -1,5 +1,6 @@
-import ast
+import ast,sys
 from pathlib import Path
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 source=Path('app.py').read_text();nodes=[]
 for node in ast.parse(source).body:
     if isinstance(node,ast.If) and "'--rebuild-compact-fantasy'" in (ast.get_source_segment(source,node.test) or ''):break
@@ -38,6 +39,7 @@ for mode in ('verified','research'):
     print('COMBO_REBUILD',mode,env['encode'](env['update_combos'](store,generate=True,quote_mode=mode)),flush=True)
 snapshot=store.get('combo_suggestions',day+':standard:research') or {}
 print('SIX_PLAYER_RESULT',env['encode'](snapshot),flush=True)
-for key in snapshot['sizes'].get('6',[]):
+for key in (snapshot.get('sizes') or {}).get('6',[]):
     combo=store.get('combo',key)
+    print('COMBO_RANKING_USED',env['encode']({'combo_id':key,'ranking_model':combo.get('ranking_model'),'adjustments':[{'player':leg['card']['Player'],'raw_gap':leg.get('projected_gap_score',leg['score']),'adjustment':leg.get('reliability_adjustment',0),'ranking_score':leg['score']} for leg in combo['legs']]}),flush=True)
     print('SIX_PLAYER_OPTION',env['encode']([{'player':leg['card']['Player'],'stat':leg['card']['Stat'],'line':leg['card']['Line'],'direction':leg['direction'],'projection':leg['projection']} for leg in combo['legs']]),flush=True)
