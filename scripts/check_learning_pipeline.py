@@ -59,3 +59,6 @@ except Exception as error:
 print('LEARNING_PIPELINE_AFTER',env['encode']({'active_models':dict(store.items('model')),
     'model_reviews':len(store.items('model_review')),
     'combo_learning':env['combo_learning'](store)}),flush=True)
+
+reliability=store.get('pick_reliability_evaluation','latest') or {}
+print('GREEN_RED_RELIABILITY',env['encode'](reliability),flush=True)
