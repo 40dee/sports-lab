@@ -1446,7 +1446,7 @@ def render_combos(wf, st):
             st.caption('ESPN eligibility refresh unavailable: '+type(error).__name__+'. Saved checks remain subject to expiry.')
         allowed,note=combo_board_ready(wf.store)
         if not allowed:
-            st.info(note)
+            st.info('Today’s picks are waiting for the complete board. '+note)
             st.caption('Saved combo history is preserved. New suggestions wait for the complete board; no extra odds requests are made.')
             return
         size=st.segmented_control('Players',[2,3,4,5,6],default=2,key='combo_size') or 2
@@ -10995,7 +10995,7 @@ def render_app_pages():
             shown_preparation=workflow.store.get('preparation','last') or {}
             st.session_state['_ui_displayed_board_revision']=(shown_run.get('board_scan_at'),
                 shown_preparation.get('ready'),shown_preparation.get('total'))
-        if not board_allowed:
+        if not board_allowed and app_page != 'Combos':
             st.info('Today’s picks are waiting for the complete board. '+board_note)
             st.caption('Saved plays and results remain available. Progress updates automatically; browsing does not download provider lines.')
         elif app_page == 'Combos':
