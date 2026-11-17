@@ -8,7 +8,7 @@ permissions:
   contents: read
 concurrency:
   group: sports-lab-worker
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   combos:
     runs-on: ubuntu-24.04
@@ -33,3 +33,5 @@ jobs:
 # Rebuild suggestions with one player per team.
 
 # Use one player per game unless too few eligible games remain for the selected size.
+
+# Rebuild today's suggestions with the newly connected capped learned ranking; no paid provider keys.
