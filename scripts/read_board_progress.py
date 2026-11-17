@@ -88,6 +88,32 @@ def main():
     for row in model_rows:
         ns,key,payload=[cell["value"] for cell in row];v=json.loads(payload)
         report["learning"].setdefault(ns,{})[key]={k:v.get(k) for k in ("version","alpha","policy","status","activation","trained_through","evaluated_at","last_graded_date","graded_dates","examples","ranking_examples")}
+    stmt={"sql":"SELECT namespace,key,payload FROM sports_records WHERE namespace IN ('combo_cohort','combo_grade','combo_played','combo_actual')","want_rows":True}
+    request=Request("https://"+parsed.netloc+"/v2/pipeline",
+        data=json.dumps({"requests":[{"type":"execute","stmt":stmt},{"type":"close"}]}).encode(),
+        headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"})
+    with urlopen(request,timeout=30) as response:
+        result=json.load(response)["results"][0]
+    if result.get("type")!="ok":raise RuntimeError("Combo read failed")
+    combo_data={}
+    for row in result["response"]["result"].get("rows",[]):
+        ns,key,payload=[cell["value"] for cell in row]
+        combo_data.setdefault(ns,{})[key]=json.loads(payload)
+    sizes={str(n):{"hits":0,"misses":0,"pending":0,"review":0,"days":set()} for n in range(2,7)}
+    for cohort in combo_data.get("combo_cohort",{}).values():
+        row=sizes.get(str(cohort.get("size")))
+        if row is None:continue
+        row["days"].add(cohort.get("day"))
+        for key in (cohort.get("policies") or {}).get("balanced-v1",[]):
+            state=(combo_data.get("combo_grade",{}).get(key) or {}).get("state","PENDING")
+            row[{"ALL_HIT":"hits","MISSED":"misses","VOID_REVIEW":"review"}.get(state,"pending")]+=1
+    for row in sizes.values():
+        row["days"]=len(row["days"])
+        row["hit_rate"]=row["hits"]/(row["hits"]+row["misses"]) if row["hits"]+row["misses"] else None
+    report["combo_hit_rates_balanced"]=sizes
+    played={v["combo_id"] for v in combo_data.get("combo_played",{}).values() if v.get("active")}
+    played.update(v["combo_id"] for v in combo_data.get("combo_actual",{}).values())
+    report["unique_played_combos"]=len(played)
     print("BOARD_PROGRESS_JSON " + json.dumps(report, sort_keys=True))
     return 0
 
