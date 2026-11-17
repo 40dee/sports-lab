@@ -195,7 +195,7 @@ def learn(records, grades):
             patterns.append(dict(feature=feature, pattern=value, effective_examples=round(cell['weight'], 3),
                 weighted_greens=round(cell['wins'], 3), weighted_reds=round(cell['weight']-cell['wins'], 3),
                 historical_accuracy=cell['wins']/cell['weight'],
-                shrunk_accuracy=(cell['wins']+20*model['prior'])/(cell['weight']+20)))
+                shrunk_accuracy=(cell['wins']+20*profile['prior'])/(cell['weight']+20)))
     digest = hashlib.sha256(json.dumps(rows, sort_keys=True).encode()).hexdigest()[:16]
     report = dict(version=VERSION, status='evaluated' if folds else 'collecting_dates',
         examples=len(rows), effective_examples=profile['effective_examples'], ranking_examples=len(ranking_rows), ranking_effective_examples=model['effective_examples'], graded_dates=len({r['day'] for r in rows}),
