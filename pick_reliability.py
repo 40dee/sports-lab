@@ -10,7 +10,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-FEATURES = ('market_direction', 'tier', 'history', 'minutes', 'gap', 'adjustment', 'pace')
+FEATURES = ('market_direction', 'tier', 'history', 'minutes', 'gap', 'adjustment', 'pace', 'rate', 'position_adjustment')
 VERSION = 'green-red-reliability-v1'
 
 
@@ -43,9 +43,13 @@ def features(card, result):
     projection = number(result.get('projection'))
     baseline = number(result.get('baseline'))
     relative = None if projection is None or baseline is None or baseline <= 0 else projection / baseline - 1
+    minutes = number(result.get('minutes'))
+    rate = baseline / minutes if baseline is not None and minutes is not None and minutes > 0 else None
     components = result.get('components') or []
     pace = [number(c.get('Pace factor')) for c in components]
     pace = [p for p in pace if p is not None]
+    positions = [number(c.get('Position factor')) for c in components]
+    positions = [p for p in positions if p is not None]
     return {
         'market_direction': str(result.get('stat_group') or card.get('Stat Key')) + ':' + str(result.get('direction')),
         'tier': str(card.get('Line Type') or 'unverified').lower(),
@@ -53,6 +57,8 @@ def features(card, result):
         'minutes': band(number(result.get('minutes')), (15, 25, 32), ('under15', '15-24', '25-31', '32+')),
         'gap': band(number(result.get('standardized_gap')), (.5, 1, 1.5), ('under0.5', '0.5-0.99', '1-1.49', '1.5+')),
         'adjustment': band(relative, (-.05, .05), ('below-5pct', 'within5pct', 'above5pct')),
+        'rate': str(result.get('stat_group') or card.get('Stat Key')) + ':' + band(rate, (.05, .2, .5, 1, 2), ('under0.05', '0.05-0.19', '0.2-0.49', '0.5-0.99', '1-1.99', '2+')),
+        'position_adjustment': band(sum(positions) / len(positions) if positions else None, (.95, 1.05), ('below0.95', 'neutral', 'above1.05')),
         'pace': band(sum(pace) / len(pace) if pace else None, (.98, 1.02), ('slower', 'neutral', 'faster')),
     }
 
