@@ -38,5 +38,5 @@ class FantasyParityTests(unittest.TestCase):
         self.assertTrue(any(x.label=='Game day · Pacific' for x in app.selectbox))
         self.assertFalse(any(x.label=='Game day · Pacific' for x in app.get('pills')))
         self.assertTrue(any('1 green · 0 red' in x.value for x in app.caption))
-        self.assertTrue(any(x.label=='History & splits  ›' for x in app.button))
+        self.assertTrue(any(x.key=='fantasy_research_'+key and x.label.strip()=='Player 0' for x in app.button))
         self.assertTrue(any(x.label=='Fantasy directional hit rate' and x.value=='100.0%' for x in app.metric))
