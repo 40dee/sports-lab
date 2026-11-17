@@ -30,4 +30,4 @@ jobs:
 
 # Refresh saved daily evaluations using independently verified timestamp parsing.
 
-# Verify green/red profiles separately from selectable Standard ranking evaluation.
+# Independently recompute the latest selectable Standard ranking evaluation.
