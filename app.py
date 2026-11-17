@@ -8825,6 +8825,11 @@ def render_fantasy_plays(wf, st):
     st.caption('PrizePicks NBA · Original saved pregame projections')
     st.markdown('''<style>
     .fc-card{background:radial-gradient(ellipse at 100% 0%,#8b5cf615,transparent 65%),linear-gradient(145deg,#1b1b28,#11121b);border:1px solid #393449;border-radius:15px;padding:13px 14px 11px;margin:5px 0 2px;color:#f4f1ff;box-shadow:0 8px 22px #00000024;transition:border-color .16s ease,box-shadow .16s ease;}
+    [class*="st-key-fantasy_tile_"]{background:linear-gradient(145deg,#1b1b28,#11121b);border:1px solid #393449;border-radius:15px;padding:10px 12px 0;margin:5px 0 2px;}
+    [class*="st-key-fantasy_tile_"] .fc-card{background:transparent;border:0;box-shadow:none;padding:0 0 10px;margin:0;}
+    [class*="st-key-fantasy_tile_"] .fc-name{display:none;}
+    [class*="st-key-fantasy_tile_"] [data-testid="stButton"] button{background:transparent;border:0;text-align:left;justify-content:flex-start;padding:0;min-height:30px;color:#f4f1ff;font-weight:750;}
+    [class*="st-key-fantasy_tile_"] [data-testid="stButton"] button:hover{color:#c9b4f4;}
     .fc-card:hover{border-color:#8d75c2;box-shadow:0 8px 26px #00000038;}
     .fc-name{font-size:15px;font-weight:750;line-height:1.25;overflow-wrap:anywhere;color:#f4f1ff;}
     .fc-game{font-size:11px;color:#b5a0e5;margin:5px 0;line-height:1.3;}
@@ -8971,10 +8976,13 @@ def render_fantasy_plays(wf, st):
     for i, item in enumerate(visible[(page-1)*page_size:page*page_size]):
         card, result = item['card'], item['frozen'].get('result') or {}
         with columns[i % 3]:
-            st.markdown(compact_fantasy_card_html(item, health.get(player_health_key(card))),unsafe_allow_html=True)
-            if st.button('History & splits  ›',key='fantasy_research_'+item['id']):
-                st.session_state['selected_fantasy_forecast']={'id':item['id'],'card':dict(card)}
-                st.rerun()
+            with st.container(key='fantasy_tile_'+item['id']):
+                if st.button(ui_name(card.get('Player','Unknown player'))+' '+ui_tier_marker(card),
+                             key='fantasy_research_'+item['id'],use_container_width=True,
+                             help='Open player research and history splits'):
+                    st.session_state['selected_fantasy_forecast']={'id':item['id'],'card':dict(card)}
+                    st.rerun()
+                st.markdown(compact_fantasy_card_html(item, health.get(player_health_key(card))),unsafe_allow_html=True)
             with st.expander('Breakdown'):
                 weights = fantasy_weights(card)
                 breakdown = []
