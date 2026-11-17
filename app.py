@@ -378,7 +378,7 @@ class Store:
             "input_health",
             "request_budget",
             "odds_cache", "odds_lock", "odds_fixture", "odds_refresh", "odds_status",
-            "combo", "combo_grade", "combo_suggestions", "combo_actual",
+            "combo", "combo_grade", "combo_suggestions", "combo_actual", "combo_played",
             "combo_cohort", "combo_model", "combo_review",
         }
 
@@ -1398,6 +1398,27 @@ def combo_legs_html(legs):
     return '<div class="combo-legs">'+''.join(rows)+'</div>'
 
 
+def mark_combo_played(store, combo_id, active=True, reference=None):
+    """Self-reported played marker; never submits an entry or assumes payouts."""
+    combo=store.get('combo',combo_id)
+    if not combo:raise ValueError('Saved combo not found.')
+    if type(active) is not bool:raise ValueError('Played status must be true or false.')
+    prior=store.get('combo_played',combo_id) or {}
+    stamp=combo_clock(reference).isoformat()
+    record=dict(prior,combo_id=combo_id,active=active,
+        marked_at=prior.get('marked_at') or stamp,updated_at=stamp,
+        source='user_reported',payout_status='not_recorded')
+    store.put('combo_played',combo_id,record)
+    return record
+
+
+def combo_played_button(store, combo, st, context):
+    marked=bool((store.get('combo_played',combo['id']) or {}).get('active'))
+    if st.button('✓ Played · Undo' if marked else 'I played this',key='quick_played_'+context+'_'+combo['id']):
+        mark_combo_played(store,combo['id'],not marked)
+        st.rerun()
+
+
 def render_combos(wf, st):
     cache=getattr(wf.store,'_read_cache',None)
     if isinstance(cache,dict):
@@ -1520,7 +1541,8 @@ def render_combos(wf, st):
                 st.caption(f'{games} games · {size-games} extra same-game legs · Related outcomes may move together. Special tiers may change payouts.')
                 st.markdown(combo_legs_html(combo['legs']),unsafe_allow_html=True)
                 st.caption('Selection: balances the weakest and average projected separation, with penalties for repeated games and stat groups. Original model forecasts are unchanged.')
-                with st.expander('Record this as an entry you played'):
+                combo_played_button(wf.store,combo,st,'suggestion')
+                with st.expander('Optional: entry ID, stake and payout details'):
                     st.caption('Only record after submitting in PrizePicks and before the first game. Copy the entry’s actual payout schedule; no standard rates are assumed.')
                     with st.form('played_'+key):
                         entry_id=st.text_input('PrizePicks entry ID',key='entryid_'+key)
@@ -1585,6 +1607,7 @@ def render_combos(wf, st):
                     'Projection':leg['projection'],'Actual':results.get(leg['forecast_id'],{}).get('actual'),
                     'Result':results.get(leg['forecast_id'],{}).get('outcome','PENDING')}
                     for leg in combo['legs']]),hide_index=True,use_container_width=True)
+                combo_played_button(wf.store,combo,st,'history')
                 st.caption('Frozen '+combo['created_at']+' UTC · '+grade.get('state','PENDING')+' · Paper direction results; no payout assumed.')
             else:st.caption('No saved suggestions yet.')
         st.markdown('**Learning status**')
@@ -1606,8 +1629,27 @@ def render_combos(wf, st):
                 st.caption(f'{size} players · {model["policy"]} · {paired}/14 paired settled days · No completed policy comparison yet.')
         st.caption('Activation requires ≥14 paired settled days (10 earlier +4 later), ≥120 distinct legs and ≥40 games; challenger must improve later-day all-hit rate by ≥2 percentage points. Overlapping combos are not independent. This learns selection diversity, not profitability or calibrated probabilities.')
     else:
+        marked=[v for _,v in wf.store.items('combo_played') if v.get('active')]
+        marked.sort(key=lambda v:v.get('marked_at',''),reverse=True)
         entries=wf.store.items('combo_actual')
-        if not entries:st.info('No played entries recorded. Paper suggestions are not real-money results.')
+        if not marked and not entries:st.info('Nothing marked as played yet. Tap I played this on a suggestion or a saved combo in Results & learning.')
+        if marked:
+            st.caption('Your played combos · Self-reported selections. No entry ID or payout details required. Marking does not place a bet.')
+            for entry in marked:
+                combo=wf.store.get('combo',entry['combo_id'])
+                if not combo:continue
+                grade=combo_directional_grade(combo,dict(wf.store.items('grade')))
+                outcomes={leg['forecast_id']:leg for leg in grade['legs']}
+                with st.container(border=True,key='played_combo_'+combo['id']):
+                    st.markdown(f"**{combo['day']} · {combo['size']} players · Played**")
+                    st.caption(f"{grade['wins']} green · {grade['losses']} red · {grade['pending']} pending · {grade['voids']} tie/DNP")
+                    st.dataframe(pd.DataFrame([{'Player':ui_name(leg['card']['Player']),
+                        'Stat':ui_stat(leg['card']),'Line':leg['card']['Line'],'Pick':leg['direction'],
+                        'Actual':outcomes[leg['forecast_id']].get('actual'),'Result':outcomes[leg['forecast_id']]['outcome']}
+                        for leg in combo['legs']]),hide_index=True,use_container_width=True)
+                    combo_played_button(wf.store,combo,st,'played')
+                    st.caption('Payout not assumed. Marks made after tipoff are a personal log, not a pregame test record.')
+        if entries:st.markdown('**Entries with stake and payout details**')
         for key,entry in entries:
             combo=wf.store.get('combo',entry['combo_id'])
             grade=wf.store.get('combo_grade',entry['combo_id']) or combo_directional_grade(combo,dict(wf.store.items('grade')))
