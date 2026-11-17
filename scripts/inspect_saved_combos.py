@@ -1,54 +1,49 @@
-"""Read saved combo inputs without requesting market or player providers."""
-import ast
-import json
-from collections import Counter
+"""Audit saved Nov 16 NBA combo outcomes without provider requests or database writes."""
+import ast,sys
 from pathlib import Path
-source=Path('app.py').read_text()
-nodes=[]
+from collections import Counter,defaultdict
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+source=Path('app.py').read_text();nodes=[]
 for node in ast.parse(source).body:
-    if isinstance(node,ast.If) and "'--rebuild-compact-fantasy'" in ast.get_source_segment(source,node.test):
-        break
+    if isinstance(node,ast.If) and "'--rebuild-compact-fantasy'" in (ast.get_source_segment(source,node.test) or ''):break
     nodes.append(node)
-env={'__name__':'sports_lab_saved_diagnostic','__file__':'app.py'}
+env={'__name__':'combo_outcome_audit','__file__':'app.py'}
 exec(compile(ast.Module(body=nodes,type_ignores=[]),'app.py','exec'),env)
-if not env['_database_online']:
-    raise SystemExit('Permanent database unavailable; no provider calls made.')
-store=env['CompactViewStore'](env['workflow_store'])
-current=env['combo_clock']()
-board=store.get('board','board') or {}
-records=store.items('forecast')
-index=env['forecast_index'](records)
-checks=dict(store.items('odds_refresh'))
-report={'checked_at':current.isoformat(),'provider_requests':0,'tier_pools':{},'source_snapshots':{},'current_fantasy':[],'keldon_saved':[]}
-for mode in ('standard','goblin','demon','mixed'):
-    pool,excluded=env['combo_pool'](store,current,tier_mode=mode)
-    report['tier_pools'][mode]={'eligible':len(pool),'excluded':excluded,
-        'players':[dict(player=x['card']['Player'],stat=x['card']['Stat'],line=x['card']['Line'],tier=x['card'].get('Line Type'),direction=x['direction'],score=x['score']) for x in pool]}
-for key in ('pp_tiers_v1','pp_fantasy_v3','pp_fantasy_compact_v1'):
-    payload=store.get('source',key) or {}
-    rows=payload.get('items') or []
-    counts=Counter()
-    for item in rows:
-        normalized=env['normalize_pp_projection'](item)
-        for selection in normalized.get('selections') or []:
-            if selection.get('available') is True:
-                counts[str(selection.get('tier'))+':'+str(selection.get('side'))]+=1
-    report['source_snapshots'][key]={'fetched_at':payload.get('fetched_at') or payload.get('updated_at'),'records':len(rows),'partial':payload.get('partial'),'explicit_sides':dict(counts)}
-seen=set()
-for card in board.get('v4_rows') or []:
-    if str(card.get('Platform')).lower()!='prizepicks':continue
-    signature=env['market_signature'](card)
-    if signature in seen:continue
-    seen.add(signature)
-    if not env['today_pregame'](card.get('Start (UTC)'),current):continue
-    result=(env['saved_prediction'](index,card) or {}).get('result') or {}
-    value={'player':card.get('Player'),'game':card.get('Game'),'stat':card.get('Stat'),'line':card.get('Line'),'tier':card.get('Line Type'),
-        'sides':card.get('Available Sides'),'source':card.get('Tier Source') or card.get('Line Source'),
-        'fetched':card.get('Tier Fetched At') or card.get('Odds checked (UTC)'),'observed':card.get('Tier Observed At'),
-        'direction':result.get('direction'),'projection':result.get('projection'),'gap':result.get('standardized_gap'),
-        'freshness':env['line_freshness'](card,current,checks),'selectable':env['pick_is_selectable'](card,result)}
-    if 'keldon' in str(card.get('Player','')).lower():report['keldon_saved'].append(value)
-    if env['fantasy_weights'](card):report['current_fantasy'].append(value)
-print('SAVED_COMBO_DIAGNOSTIC '+env['encode'](report))
-
-print('REGULAR_RAW '+env['encode']((store.get('source','pp_current_regular_fantasy_v1') or {}).get('items',[])))
+store=env['workflow_store']
+if not env['_database_online'] or not store.remote:raise SystemExit('Permanent database unavailable.')
+day='2026-11-16'
+combos={k:v for k,v in store.items('combo') if v.get('day')==day}
+grades=dict(store.items('grade')); forecasts=dict(env['saved_forecast_records'](store))
+cohorts={k:v for k,v in store.items('combo_cohort') if k.startswith(day)}
+suggestions={k:v for k,v in store.items('combo_suggestions') if k.startswith(day)}
+actuals=[v for k,v in store.items('combo_actual') if v.get('combo_id') in combos]
+def detail(key):
+    c=combos[key];g=env['combo_directional_grade'](c,grades);legs=[]
+    for leg in c['legs']:
+        card=leg['card'];f=forecasts.get(leg['forecast_id']) or {};r=f.get('result') or {};out=grades.get(leg['forecast_id']) or {}
+        legs.append(dict(player=card.get('Player'),stat=card.get('Stat'),tier=card.get('Line Type'),line=card.get('Line'),
+            direction=leg.get('direction'),projection=r.get('projection'),actual=out.get('actual'),outcome=out.get('outcome','PENDING'),
+            grade_status=out.get('status'),history_games=r.get('ranking_games'),minutes=r.get('minutes'),baseline=r.get('baseline'),
+            model=r.get('learning_model'),score=leg.get('score'),forecast_id=leg['forecast_id']))
+    return dict(id=key,created=c.get('created_at'),size=c['size'],quote_mode=c.get('quote_mode'),score=c.get('ranking_score'),result=g,legs=legs)
+summary=defaultdict(Counter);unique={}
+for k,c in combos.items():
+    tier='standard' if all(str(x['card'].get('Line Type','')).lower() in ('standard','regular') for x in c['legs']) else 'special_or_mixed'
+    g=env['combo_directional_grade'](c,grades)
+    summary[str(c['size'])+':'+tier][g['state']]+=1
+    if tier=='standard':
+        for leg in c['legs']:unique.setdefault(leg['forecast_id'],leg)
+leg_results=[]
+for k,leg in unique.items():
+    f=forecasts.get(k) or {};r=f.get('result') or {};g=grades.get(k) or {};card=leg['card']
+    leg_results.append(dict(player=card.get('Player'),stat=card.get('Stat'),line=card.get('Line'),direction=leg.get('direction'),
+        projection=r.get('projection'),actual=g.get('actual'),outcome=g.get('outcome','PENDING'),games=r.get('ranking_games'),
+        minutes=r.get('minutes'),baseline=r.get('baseline'),score=leg.get('score')))
+standard6=sorted([k for k,c in combos.items() if c['size']==6 and all(str(x['card'].get('Line Type','')).lower() in ('standard','regular') for x in c['legs'])],
+    key=lambda k:combos[k]['created_at'])
+sample=list(dict.fromkeys(standard6[:3]+standard6[-3:]))
+report=dict(day=day,provider_requests=0,combo_count=len(combos),summary={k:dict(v) for k,v in summary.items()},
+    actual_entries_recorded=len(actuals),cohorts=cohorts,suggestions={k:{p:v.get(p) for p in ('created_at','eligible_players','sizes','tier_mode','quote_mode')} for k,v in suggestions.items()},
+    six_player_samples=[detail(k) for k in sample],standard_unique_legs=leg_results,
+    actual_combos=[detail(x['combo_id']) for x in actuals[:10]])
+print('COMBO_OUTCOME_AUDIT '+env['encode'](report),flush=True)
