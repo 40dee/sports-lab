@@ -2749,16 +2749,7 @@ class Workflow:
         prices = dict(self.store.items("paper_forecast"))
         rows = []
 
-        learning_forecasts = unique_forecasts(saved_forecast_records(self.store))
-        from pick_reliability import learn as learn_pick_reliability
-        reliability_model, reliability_report = learn_pick_reliability(learning_forecasts, grades)
-        reliability_report['evaluated_at'] = now()
-        self.store.put('pick_reliability_model', 'latest', reliability_model)
-        self.store.put('pick_reliability_evaluation', 'latest', reliability_report)
-        if reliability_report.get('last_graded_date'):
-            self.store.put('pick_reliability_evaluation', reliability_report['last_graded_date'], reliability_report)
-
-        for key, frozen in learning_forecasts:
+        for key, frozen in unique_forecasts(saved_forecast_records(self.store)):
             result = frozen["result"]
             card = frozen["card"]
             grade = grades.get(key, {})
@@ -3123,7 +3114,16 @@ class Workflow:
         grades = dict(self.store.items("grade"))
         reviews = self.store.items("model_review")
 
-        for key, frozen in unique_forecasts(saved_forecast_records(self.store)):
+        learning_forecasts = unique_forecasts(saved_forecast_records(self.store))
+        from pick_reliability import learn as learn_pick_reliability
+        reliability_model, reliability_report = learn_pick_reliability(learning_forecasts, grades)
+        reliability_report['evaluated_at'] = now()
+        self.store.put('pick_reliability_model', 'latest', reliability_model)
+        self.store.put('pick_reliability_evaluation', 'latest', reliability_report)
+        if reliability_report.get('last_graded_date'):
+            self.store.put('pick_reliability_evaluation', reliability_report['last_graded_date'], reliability_report)
+
+        for key, frozen in learning_forecasts:
             result = frozen["result"]
             card = frozen["card"]
             grade = grades.get(key)
