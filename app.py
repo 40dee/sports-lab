@@ -379,7 +379,8 @@ class Store:
             "request_budget",
             "odds_cache", "odds_lock", "odds_fixture", "odds_refresh", "odds_status",
             "combo", "combo_grade", "combo_suggestions", "combo_actual", "combo_played",
-            "combo_cohort", "combo_model", "combo_review",
+            "combo_cohort", "combo_model", "combo_review", "combo_ranking",
+            "pick_reliability_model", "pick_reliability_evaluation", "model_daily_evaluation",
         }
 
         checked = []
@@ -906,6 +907,10 @@ def combo_pool(store, reference=None, tier_mode="mixed", quote_mode="verified"):
     health = (store.get('health', slate_day(current)) or {}).get('players') or {}
     index = forecast_index(saved_forecast_records(store,current))
     line_checks=dict(store.items('odds_refresh'))
+    from combo_reliability import context as ranking_context_for, adjust as adjust_rank
+    ranking_mode=store.get('combo_ranking','mode','learned_blend')
+    reliability_model=store.get('pick_reliability_model','latest') or {}
+    ranking_context=ranking_context_for(reliability_model,slate_day(current),ranking_mode)
     pool, excluded, seen = [], {}, set()
     def reject(reason): excluded[reason] = excluded.get(reason, 0) + 1
     for card in board.get('v4_rows') or []:
@@ -953,11 +958,14 @@ def combo_pool(store, reference=None, tier_mode="mixed", quote_mode="verified"):
                 raise ValueError('weak or insufficient history')
         except (KeyError,ValueError,TypeError,OverflowError):
             reject('Insufficient history or projected separation'); continue
+        raw_score=score
+        score,rank_adjustment=adjust_rank(raw_score,card,result,reliability_model,ranking_context)
         seen.add(signature)
         pool.append({'forecast_id': frozen['id'], 'card': dict(card),
             'player_id': str(h['player_id']), 'team_id': str(h['team_id']),
             'event_id': str(frozen['event_id']), 'direction': result['direction'],
-            'projection': projection, 'score': score, 'games': games,
+            'projection': projection, 'score': score, 'projected_gap_score':raw_score,
+            'reliability_adjustment':rank_adjustment,'ranking_model':ranking_context, 'games': games,
             'stat_group': result.get('stat_group') or str(card.get('Stat Key')),
             'health_checked_at': h['checked_at'], 'forecast_created_at': frozen['created_at']})
     pool.sort(key=lambda x:(-min(x['score'],1.5),-x['games'],x['forecast_id']))
@@ -1038,12 +1046,15 @@ def combo_snapshot(legs, policy, reference=None):
             raise ValueError('Combo snapshots must be saved before every leg starts.')
         if sum(x['event_id']==leg['event_id'] for x in legs)>2:
             raise ValueError('At most two players per game in this builder.')
-    key = hashlib.sha256(encode([slate_day(stamp),policy,'distinct-teams-adaptive-games-v3',
-        sorted([x['forecast_id'],identity(x['card']),x['direction']] for x in legs)]).encode()).hexdigest()
+    ranking_context=next((leg.get('ranking_model') for leg in legs if leg.get('ranking_model')),None)
+    key_data=[slate_day(stamp),policy,'distinct-teams-adaptive-games-v3',
+        sorted([x['forecast_id'],identity(x['card']),x['direction']] for x in legs)]
+    if ranking_context:key_data.append(ranking_context)
+    key=hashlib.sha256(encode(key_data).encode()).hexdigest()
     return {'id': key, 'created_at': stamp.isoformat(), 'day': slate_day(stamp),
         'size': len(legs), 'policy':policy, 'platform':'prizepicks', 'kind':'paper',
         'legs':json_safe(legs), 'ranking_score':combo_rank(legs,policy),
-        'rules_version':'distinct-teams-adaptive-games-v3', 'payout_terms':None,
+        'rules_version':'distinct-teams-adaptive-games-v3', 'ranking_model':ranking_context or {'version':'original-gap-v1'}, 'payout_terms':None,
         'note':'Directional paper result. No entry submitted. No multiplied hit probabilities.'}
 
 
@@ -1071,7 +1082,7 @@ def combo_inputs_version(store, reference=None):
     board=store.get('board','board') or {}
     health=store.get('health',slate_day(current)) or {}
     prep=store.get('preparation','last') or {}
-    return ['distinct-teams-adaptive-games-v3',board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
+    return ['distinct-teams-adaptive-games-v3',store.get('combo_ranking','mode','learned_blend'),(store.get('pick_reliability_evaluation','latest') or {}).get('input_digest'),board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
             prep.get('ready'),int(current.timestamp()//300)]
 
 
@@ -1459,6 +1470,15 @@ def render_combos(wf, st):
         snapshot=wf.store.get('combo_suggestions',slate_day()+(':'+tier_mode if tier_mode!='mixed' else '')+(':research' if quote_mode=='research' else '')) or {}
         st.caption('Standard only uses regular lines. Mixed tiers can include Goblins and Demons. Exact offered directions are required in both views.')
         st.caption('Suggestions rank projected separation, not entry payouts or expected return. Special tiers can lower payouts; check the actual PrizePicks entry. Browsing makes no odds requests.')
+        with st.expander('Ranking settings'):
+            rank_mode=wf.store.get('combo_ranking','mode','learned_blend')
+            choice=st.selectbox('Combo ranking',['Learned adjustment (experimental)','Original gap ranking'],
+                index=0 if rank_mode=='learned_blend' else 1,key='combo_ranking_choice')
+            desired='learned_blend' if choice.startswith('Learned') else 'original'
+            if desired!=rank_mode:
+                wf.store.put('combo_ranking','mode',desired)
+                st.rerun()
+            st.caption('Learned mode adds at most ±0.05 to each projected-gap ranking score. This is an experimental cap, not a proven optimal blend. MORE/LESS projections and eligibility checks stay fixed.')
         if st.button('Build from saved board',key='combo_build'):
             try:
                 if quote_mode=='research':combo_research_suggestions(wf.store,tier_mode,size)
@@ -1540,7 +1560,8 @@ def render_combos(wf, st):
                 games=len({leg['event_id'] for leg in combo['legs']})
                 st.caption(f'{games} games · {size-games} extra same-game legs · Related outcomes may move together. Special tiers may change payouts.')
                 st.markdown(combo_legs_html(combo['legs']),unsafe_allow_html=True)
-                st.caption('Selection: balances the weakest and average projected separation, with penalties for repeated games and stat groups. Original model forecasts are unchanged.')
+                ranking_version=(combo.get('ranking_model') or {}).get('version','original-gap-v1')
+                st.caption('Ranking: '+ranking_version+' · Balances weakest and average separation, with game/stat penalties. Learned influence is capped and experimental; frozen MORE/LESS projections are unchanged.')
                 combo_played_button(wf.store,combo,st,'suggestion')
                 with st.expander('Optional: entry ID, stake and payout details'):
                     st.caption('Only record after submitting in PrizePicks and before the first game. Copy the entry’s actual payout schedule; no standard rates are assumed.')
