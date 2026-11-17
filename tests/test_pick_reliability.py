@@ -79,3 +79,15 @@ class ReliabilityTests(unittest.TestCase):
         self.assertLess(estimate,1)
         duplicate=copy.deepcopy(rows[0]);duplicate['id']='another-threshold'
         self.assertEqual(len(top_players(rows+[duplicate],lambda r:r['gap'])),1)
+
+    def test_unavailable_directions_cannot_train_combo_ranking_but_remain_in_all_projection_patterns(self):
+        k1,f1,g1=record(player='offered')
+        k2,f2,g2=record(player='pass',actual=5)
+        f2['card'].update({'Line Type':'Demon','Available Sides':['MORE']})
+        f2['result']['direction']='LESS'
+        g2['outcome']='WIN'
+        model,report=learn([(k1,f1),(k2,f2)],{k1:g1,k2:g2})
+        self.assertEqual(report['examples'],2)
+        self.assertEqual(report['ranking_examples'],1)
+        self.assertAlmostEqual(model['effective_examples'],1)
+        self.assertTrue(any(p['feature']=='tier' and p['pattern']=='demon' for p in report['patterns']))
