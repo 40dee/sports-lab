@@ -60,5 +60,10 @@ print('LEARNING_PIPELINE_AFTER',env['encode']({'active_models':dict(store.items(
     'model_reviews':len(store.items('model_review')),
     'combo_learning':env['combo_learning'](store)}),flush=True)
 
-reliability=store.get('pick_reliability_evaluation','latest') or {}
+from pick_reliability import learn as verify_pick_reliability
+verified_model,reliability=verify_pick_reliability(forecasts,grades)
+reliability['evaluated_at']=env['now']()
+store.put('pick_reliability_model','latest',verified_model)
+store.put('pick_reliability_evaluation','latest',reliability)
+if reliability.get('last_graded_date'):store.put('pick_reliability_evaluation',reliability['last_graded_date'],reliability)
 print('GREEN_RED_RELIABILITY',env['encode'](reliability),flush=True)
