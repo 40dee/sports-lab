@@ -4260,6 +4260,49 @@ def results_comparison_rows(frame):
     return bars
 
 
+def combo_hit_rate_summary(rows):
+    summaries=[];seen=set();unique=[]
+    for row in rows:
+        key=row.get('Combo ID')
+        if key and key in seen:continue
+        if key:seen.add(key)
+        unique.append(row)
+    for size in range(2,7):
+        group=[r for r in unique if r.get('Size')==size]
+        hits=sum(r.get('Result')=='ALL_HIT' for r in group)
+        misses=sum(r.get('Result')=='MISSED' for r in group)
+        decided=hits+misses
+        summaries.append({'Players':size,'Full combo hits':hits,'Misses':misses,
+            'Settled combos':decided,'Hit rate':f'{hits/decided:.1%}' if decided else '—',
+            'Pending':sum(r.get('Result','PENDING')=='PENDING' for r in group),
+            'Tie / DNP review':sum(r.get('Result')=='VOID_REVIEW' for r in group),
+            'Days':len({r['Day'] for r in group})})
+    return summaries
+
+
+def render_combo_hit_rates(store, st, date='All dates'):
+    st.markdown('#### Combo hit rates · 2–6 players')
+    source=st.segmented_control('Combo results',['Model cohorts','Played combos'],
+        default='Model cohorts',key='results_combo_source') or 'Model cohorts'
+    if source=='Model cohorts':
+        policy=st.selectbox('Ranking policy',['balanced-v1','diverse-v1'],key='results_combo_policy')
+        rows=[r for r in combo_results_rows(store) if r['Policy']==policy]
+        st.caption('First frozen daily paper cohorts across their recorded tiers. Later rebuilds excluded. Separate from the experimental learned-ranking comparison.')
+    else:
+        marks={v['combo_id'] for _,v in store.items('combo_played') if v.get('active')}
+        marks.update(v['combo_id'] for _,v in store.items('combo_actual'))
+        grades=dict(store.items('grade'));rows=[]
+        for key in marks:
+            combo=store.get('combo',key)
+            if not combo:continue
+            grade=combo_directional_grade(combo,grades)
+            rows.append({'Combo ID':key,'Day':combo['day'],'Size':combo['size'],'Result':grade['state']})
+        st.caption('Unique marked/recorded played combos. Duplicate marks count once. Directional results; no platform payouts assumed.')
+    if date!='All dates':rows=[r for r in rows if r['Day']==date]
+    st.dataframe(pd.DataFrame(combo_hit_rate_summary(rows)),hide_index=True,width='stretch')
+    st.caption('Hit rate = full combo hits ÷ (full hits + misses). Pending and tie/DNP reviews are separate. Overlapping combos are not independent. Game-date filter applies; singles platform/result filters do not.')
+
+
 def render_results_dashboard(wf, st):
     st.markdown('### Results')
     research = wf.research_rows()
@@ -4299,6 +4342,8 @@ def render_results_dashboard(wf, st):
     else:
         st.info('No wins or losses match these filters yet. The graph appears after picks settle.')
     st.caption('Hit rate = wins ÷ (wins + losses). Hover for daily sample sizes. Ties, DNP and excluded picks do not count. This is not ROI.')
+
+    render_combo_hit_rates(wf.store,st,date)
 
     with st.expander('Player breakdown · line vs projection vs actual'):
         if st.checkbox('Open player comparison', key='show_results_player_graph') and len(visible):
