@@ -4280,27 +4280,57 @@ def combo_hit_rate_summary(rows):
     return summaries
 
 
+def combo_line_type(combo):
+    tiers={str(leg.get('card',{}).get('Line Type','')).strip().lower() for leg in combo.get('legs',[])}
+    tiers={'standard' if tier=='regular' else tier for tier in tiers}
+    if not tiers or not tiers<={'standard','goblin','demon'}:return 'Unverified'
+    return next(iter(tiers)).title() if len(tiers)==1 else 'Mixed'
+
+
+def combo_tier_result_rows(combos, grades, tier, policy, ranking_version):
+    # Freeze the first available three options per day/size/tier/policy/version.
+    # Later rebuilds and hindsight winners must not inflate the record.
+    groups={};rows=[]
+    ordered=sorted(combos.items(),key=lambda item:(str(item[1].get('created_at','')),
+        -float(item[1].get('ranking_score') or 0),item[0]))
+    for key,combo in ordered:
+        version=(combo.get('ranking_model') or {}).get('version','original-gap-v1')
+        if combo.get('policy')!=policy or combo_line_type(combo)!=tier or version!=ranking_version:continue
+        group=(combo.get('day'),combo.get('size'))
+        if groups.get(group,0)>=3:continue
+        groups[group]=groups.get(group,0)+1
+        grade=grades.get(key) or {}
+        rows.append({'Combo ID':key,'Day':combo['day'],'Size':combo['size'],
+            'Result':grade.get('state','PENDING')})
+    return rows
+
+
 def render_combo_hit_rates(store, st, date='All dates'):
     st.markdown('#### Combo hit rates · 2–6 players')
     source=st.segmented_control('Combo results',['Model cohorts','Played combos'],
         default='Model cohorts',key='results_combo_source') or 'Model cohorts'
+    tier=st.selectbox('Combo line type',['Standard','Goblin','Demon','Mixed'],key='results_combo_tier')
+    combos=dict(store.items('combo'))
     if source=='Model cohorts':
         policy=st.selectbox('Ranking policy',['balanced-v1','diverse-v1'],key='results_combo_policy')
-        rows=[r for r in combo_results_rows(store) if r['Policy']==policy]
-        st.caption('First frozen daily paper cohorts across their recorded tiers. Later rebuilds excluded. Separate from the experimental learned-ranking comparison.')
+        ranking=st.selectbox('Ranking version',['Original gap ranking','Learned adjustment'],key='results_combo_ranking')
+        version='original-gap-v1' if ranking=='Original gap ranking' else 'reliability-blend-v1'
+        rows=combo_tier_result_rows(combos,dict(store.items('combo_grade')),tier,policy,version)
+        st.caption('First available three saved options per day and player count for this line type, policy and ranking version. Later rebuilds excluded; older missing tiers are not reconstructed.')
     else:
         marks={v['combo_id'] for _,v in store.items('combo_played') if v.get('active')}
         marks.update(v['combo_id'] for _,v in store.items('combo_actual'))
         grades=dict(store.items('grade'));rows=[]
         for key in marks:
-            combo=store.get('combo',key)
-            if not combo:continue
+            combo=combos.get(key)
+            if not combo or combo_line_type(combo)!=tier:continue
             grade=combo_directional_grade(combo,grades)
             rows.append({'Combo ID':key,'Day':combo['day'],'Size':combo['size'],'Result':grade['state']})
-        st.caption('Unique marked/recorded played combos. Duplicate marks count once. Directional results; no platform payouts assumed.')
+        st.caption('Unique marked/recorded played combos of this line type. Duplicate marks count once. Directional results; no platform payouts assumed.')
     if date!='All dates':rows=[r for r in rows if r['Day']==date]
     st.dataframe(pd.DataFrame(combo_hit_rate_summary(rows)),hide_index=True,width='stretch')
-    st.caption('Hit rate = full combo hits ÷ (full hits + misses). Pending and tie/DNP reviews are separate. Overlapping combos are not independent. Game-date filter applies; singles platform/result filters do not.')
+    if not rows:st.caption('No saved combos match these filters yet. No hit rate is invented.')
+    st.caption('Standard/Goblin/Demon means every leg has that tier; Mixed means multiple tiers. Hit rate = full combo hits ÷ (full hits + misses). Pending and tie/DNP reviews are separate. Overlapping combos are not independent. Game-date filter applies; singles platform/result filters do not.')
 
 
 def render_results_dashboard(wf, st):
