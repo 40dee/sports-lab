@@ -17,3 +17,5 @@ projection_v2.install(env)
 projection_v2.print_cli_backtest(env["workflow_store"])
 
 # Bounded 600-candidate Standard replay; batched saved-evidence reads.
+
+# Report stat, direction, gap/probability cutoffs and exact replay cohort IDs.
