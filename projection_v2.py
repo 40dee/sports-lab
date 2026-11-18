@@ -113,13 +113,13 @@ def _discrete_tail_probability(mean, variance, line, direction):
     denominator = more+less
     return None if denominator < 1e-12 else max(.01,min(.99,(more if direction=="MORE" else less)/denominator))
 
-def calibrated_hit_probability(all_values, forecast, line, direction, columns, is_fantasy=False):
+def calibrated_hit_probability(all_values, forecast, line, direction, columns, is_fantasy=False, model_error_variance=0.):
     """Uncalibrated distributional estimate, conditional on playing and no tie."""
-    values = pd.to_numeric(all_values,errors="coerce").dropna()
+    values = pd.to_numeric(pd.Series(all_values),errors="coerce").dropna()
     n = len(values)
     if n < 3 or direction not in ("MORE","LESS"):
         return None, None
-    variance = float(values.var(ddof=1))
+    variance = float(values.var(ddof=1)) + max(0.,float(model_error_variance))
     if not is_fantasy and len(columns)==1 and columns[0] in ("FG3M","STL","BLK"):
         return _discrete_tail_probability(forecast,variance,line,direction), "experimental-negbin-poisson"
     floor = max(1., .20*max(forecast,line,1.))
@@ -194,7 +194,7 @@ def _saved_replays(store, candidates):
 
 def saved_book_direction(market):
     """Use frozen exact-match evidence only, never today's odds for an old game."""
-    if not isinstance(market, dict) or market.get('book') != 'draftkings':
+    if not isinstance(market, dict) or market.get('book') not in ('draftkings','fanduel','betmgm','bovada','pinnacle','consensus'):
         return None
     if market.get('match_method') != 'teams-time-player-stat-period-line':
         return None
@@ -209,7 +209,7 @@ def saved_book_direction(market):
         return None
 
 
-def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'):
+def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat', diagnostics=False):
     env = env or _env_ref
     raw = getattr(store,"_store",store)
     grades = dict(raw.items("grade"))
@@ -282,9 +282,11 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
             if isinstance(adv,dict) and adv.get("fetched_at"):
                 stamp=pd.to_datetime(adv["fetched_at"],utc=True,errors="coerce")
                 if pd.isna(stamp) or stamp>created:adv_df=None
-            minutes,_=estimate_robust_minutes(sample,ctx,result.get("team"))
+            minutes,blowout_factor=estimate_robust_minutes(sample,ctx,result.get("team"))
+            unadjusted_minutes,_=estimate_robust_minutes(sample,None,result.get("team"))
             comps={c["Stat"]:c for c in result.get("components",[]) if c.get("Stat")}
             projection=0.
+            no_vegas_projection=0.
             for stat in cols:
                 if stat not in comps:raise ValueError("missing_frozen_component")
                 rate,_=shrunk_per_minute_rate(hist,sample,stat,season,created)
@@ -294,6 +296,7 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
                 effective_pace=1+.4*(pace-1) if has_vegas else pace
                 factor=max(.88,min(1.12,effective_pace*vegas))
                 projection+=minutes*rate*factor*position*weights.get(stat,1.)
+                no_vegas_projection+=minutes*rate*max(.88,min(1.12,effective_pace))*position*weights.get(stat,1.)
             if not math.isfinite(projection):raise ValueError("invalid_candidate")
             if abs(projection-line)<1e-9:raise ValueError("candidate_no_direction")
             v2_dir="MORE" if projection>line else "LESS"
@@ -311,7 +314,10 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
                 v1_gap=float(v1_gap)
                 if not math.isfinite(v1_gap):v1_gap=None
             except (TypeError,ValueError):v1_gap=None
-            rows.append(dict(id=key,v1_dir=direction,v2_dir=v2_dir,v1_gap=v1_gap,v2_gap=v2_gap,day=start.tz_convert("America/Los_Angeles").date().isoformat(),event=str(frozen.get("event_id")),
+            rows.append(dict(id=key,created=created.isoformat(),graded_at=grade.get("graded_at"),line=line,
+                columns=cols,is_fantasy=bool(weights),history_values=values.tolist(),game_variance=float(values.var(ddof=1)),
+                no_vegas_proj=no_vegas_projection,no_blowout_proj=projection*unadjusted_minutes/minutes,neither_proj=no_vegas_projection*unadjusted_minutes/minutes,
+                v1_dir=direction,v2_dir=v2_dir,v1_gap=v1_gap,v2_gap=v2_gap,day=start.tz_convert("America/Los_Angeles").date().isoformat(),event=str(frozen.get("event_id")),
                 player=str(result.get("player_id")),stat=result.get("stat_group",card.get("Stat")),
                 platform=str(card.get("Platform","")).lower(),tier=str(card.get("Line Type","")).lower(),
                 actual=actual,v1_proj=v1,v2_proj=projection,v1_win=int(grade["outcome"]=="WIN"),
@@ -366,7 +372,7 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
                 hit_rate=float(np.average(group[version+"_win"],weights=group.weight)) if len(group) else None))
     result["by_edge_tier"]=edge_tiers
     result["by_sportsbook_agreement"]=agreement
-    result["sportsbook_note"]="Only frozen semantically verified DraftKings pairs are used. Missing or legacy unverified quotes remain unavailable; no current odds are fetched."
+    result["sportsbook_note"]="Only frozen semantically verified sportsbook pairs or consensus are used. Missing or legacy unverified quotes remain unavailable; no current odds are fetched."
     result["by_direction"]=by_direction
     result["by_confidence_cutoff"]=cutoffs
     result["by_original_direction"]=[dict(direction=direction,**summary(group)) for direction,group in frame.groupby("v1_dir")]
@@ -379,10 +385,16 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
         vegas_rows=int(frame.vegas_available.sum()),by_stat=[dict(stat=stat,**summary(group)) for stat,group in frame.groupby("stat")],
         by_day=[dict(day=day,**summary(group)) for day,group in frame.groupby("day")],
         limitation="Uses only stored pregame logs and frozen matchup factors. Historical logs may contain only L15, preventing prior-season shrinkage. Fixed heuristics were not selected on an untouched holdout. Not a production promotion or proof of calibrated probabilities.")
+    if diagnostics:
+        from replay_diagnostics import uncertainty_report,pra_ablation_report,health_inventory,sportsbook_inventory
+        result["uncertainty_diagnostic"]=uncertainty_report(frame,calibrated_hit_probability)
+        result["pra_ablation"]=pra_ablation_report(frame)
+        result["health_inventory"]=health_inventory(raw)
+        result["sportsbook_inventory"]=sportsbook_inventory(raw)
     return result
 
 def print_cli_backtest(store, max_samples=600):
-    print("V2_BACKTEST_JSON "+json.dumps(run_backtest(store,max_samples=max_samples),allow_nan=False),flush=True)
+    print("V2_BACKTEST_JSON "+json.dumps(run_backtest(store,max_samples=max_samples,diagnostics=True),allow_nan=False),flush=True)
 
 def render_backtest_panel(store, st):
     with st.expander("v2 Projection Backtest (offline · no API calls)"):

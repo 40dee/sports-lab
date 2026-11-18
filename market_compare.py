@@ -1,5 +1,6 @@
 """Cross-provider sportsbook comparison using exact semantic market identity."""
 from datetime import datetime
+from sportsbook_capture import BOOKS
 import math
 
 def compare_no_vig(card, rows, normalize_player, team_key, columns, fantasy_weights):
@@ -27,9 +28,14 @@ def compare_no_vig(card, rows, normalize_player, team_key, columns, fantasy_weig
     if not start or not game or not own_columns or not player(card.get("Player")):return None
     pairs={}
     for row in rows:
-        if str(row.get("Platform","")).lower()!="draftkings":continue
+        book=str(row.get("Platform","")).lower()
+        if book not in BOOKS:continue
         other=stamp(row.get("Start (UTC)"))
         if not other or abs((other-start).total_seconds())>900:continue
+        observed=stamp(row.get("Odds checked (UTC)"))
+        captured=stamp(row.get("Provider fetched at"))
+        if observed and observed>=start:continue
+        if captured and (captured>=start or (observed and not 0<=(captured-observed).total_seconds()<=1800)):continue
         if teams(row.get("Game"))!=game or player(row.get("Player"))!=player(card.get("Player")):continue
         if tuple(sorted(columns(row) or []))!=own_columns:continue
         if tuple(sorted((fantasy_weights(row) or {}).items()))!=scoring:continue
@@ -43,14 +49,21 @@ def compare_no_vig(card, rows, normalize_player, team_key, columns, fantasy_weig
         if direction not in ("MORE","LESS"):continue
         probability=100/(price+100) if price>0 else -price/(-price+100)
         # Pair within a sportsbook's own market, never across two snapshots.
-        key=(str(row.get("Fixture ID") or other.isoformat()),str(row.get("Market ID") or own_columns),
-             str(row.get("Odds checked (UTC)") or ""))
+        key=(book,str(row.get("Fixture ID") or other.isoformat()),str(row.get("Market ID") or own_columns),
+             str(row.get("Odds checked (UTC)") or ""),str(row.get("Provider fetched at") or ""))
         pairs.setdefault(key,{}).setdefault(direction,set()).add((price,probability))
     valid={}
-    for sides in pairs.values():
+    for pair_key,sides in pairs.items():
         if set(sides)!={"MORE","LESS"} or any(len(v)!=1 for v in sides.values()):continue
         over,under=next(iter(sides["MORE"])),next(iter(sides["LESS"]))
         total=over[1]+under[1]
-        valid[(over[0],under[0])]={"book":"draftkings","over_price":over[0],"under_price":under[0],
-            "more":over[1]/total,"less":under[1]/total,"match_method":"teams-time-player-stat-period-line"}
-    return next(iter(valid.values())) if len(valid)==1 else None
+        valid.setdefault(pair_key[0],{})[(over[0],under[0])]={"book":pair_key[0],"over_price":over[0],"under_price":under[0],
+            "more":over[1]/total,"less":under[1]/total,"observed_at":pair_key[3] or None,"captured_at":pair_key[4] or None,"match_method":"teams-time-player-stat-period-line"}
+    books=[next(iter(values.values())) for values in valid.values() if len(values)==1]
+    if not books:return None
+    if len(books)==1:
+        return dict(books[0],books=[books[0]],book_count=1,consensus_method="equal-weight-no-vig")
+    more=sum(book["more"] for book in books)/len(books)
+    return {"book":"consensus","more":more,"less":1-more,"books":books,"book_count":len(books),
+            "match_method":"teams-time-player-stat-period-line","consensus_method":"equal-weight-no-vig"}
+

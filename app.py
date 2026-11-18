@@ -1928,6 +1928,7 @@ class Workflow:
                 raise ValueError("Invalid injury feed.")
 
             entries = []
+            teammates = []
 
             for group in data["injuries"]:
                 for injury in group.get("injuries", []):
@@ -1935,11 +1936,18 @@ class Workflow:
                         continue
                     returned_id = espn_injury_player_id(injury.get('athlete') or {})
 
+                    if returned_id:
+                        athlete=injury.get("athlete") or {}
+                        teammates.append({"player_id":returned_id,"team_id":str(team_id),
+                            "name":athlete.get("displayName") or athlete.get("fullName"),
+                            "status":injury.get("status"),"date":injury.get("date")})
+
                     if returned_id == str(player_id):
                         entries.append(injury)
 
             return {
                 "entries": entries,
+                "teammates": teammates,
                 "identity_parser": 2,
                 "checked_at": now(),
                 "fetched_at": self.e[
@@ -2339,6 +2347,8 @@ class Workflow:
 
         result["position_evidence"] = evidence
         result["market"] = self.e["engine_no_vig"](card)
+        from teammate_context import from_availability
+        result["teammate_context"] = from_availability(availability,player["id"])
 
         if card.get("Platform") == "kalshi":
             try:
@@ -7231,7 +7241,7 @@ def engine_position(team, athlete, season):
 
 def engine_no_vig(card, rows=None):
     from market_compare import compare_no_vig
-    return compare_no_vig(card,st.session_state.get("v4_rows",[]) if rows is None else rows,
+    return compare_no_vig(card,(st.session_state.get("v4_rows",[]) if rows is None else rows) + (card.get("Sportsbook Quotes") or []),
                           normalize_player,engine_team_key,market_columns,fantasy_weights)
 
 

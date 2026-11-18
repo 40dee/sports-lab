@@ -7,6 +7,7 @@ import math
 from zoneinfo import ZoneInfo
 import requests
 from the_odds_api import BASE, quota, stamp
+from sportsbook_capture import REQUEST_BOOKS, attach_quotes
 
 MARKETS = {
     'player_points': ('Points','points'),
@@ -117,7 +118,7 @@ def decode(event, fetched, current):
                     'Line Source':'The Odds API','Odds checked (UTC)':observed.isoformat(),
                     'Provider fetched at':fetched,'Provider Event ID':str(event['id'])})
                 if side not in card['Available Sides']:card['Available Sides'].append(side)
-    return list(grouped.values())
+    return attach_quotes(list(grouped.values()),event,fetched,current,MARKETS)
 
 
 COVERAGE_VERSION = 3
@@ -294,7 +295,7 @@ def download(store, api_key, current=None, get=None, markets=None):
                 body=cached['event'];captured=cached['fetched_at']
             else:
                 report['budget']=reserve(store,api_key,current,remaining,cost=len(markets),daily_allowance=min(180,len(games)*len(markets)))
-                body=request('/events/'+event['id']+'/odds',{'bookmakers':'prizepicks',
+                body=request('/events/'+event['id']+'/odds',{'bookmakers':REQUEST_BOOKS,
                     'regions':'us_dfs','markets':','.join(markets),'oddsFormat':'american','dateFormat':'iso'})
                 report['games_requested']+=1
                 if not isinstance(body,dict) or body.get('id')!=event['id'] or {body.get('home_team'),body.get('away_team')}!={event['home_team'],event['away_team']}:
@@ -389,7 +390,7 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None, marke
             reserve(store,api_key,current,int(account['credits_remaining']),cost=len(markets),daily_allowance=184 if markets==FANTASY_MARKETS else 180)
             report['http_requests']+=1
             response=get(BASE+'/events/'+event+'/odds',params={'apiKey':api_key,
-                'bookmakers':'prizepicks','regions':'us_dfs','markets':','.join(markets),
+                'bookmakers':REQUEST_BOOKS,'regions':'us_dfs','markets':','.join(markets),
                 'oddsFormat':'american','dateFormat':'iso'},timeout=20)
             info=quota(response)
             if 'credits_remaining' in info:
@@ -416,4 +417,5 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None, marke
             store.put('quote_refresh',claim,{'state':'failed','checked_at':current.isoformat(),'note':note})
     store.put('source','the_odds_api_quote_refresh_latest',report)
     return rows,report
+
 
