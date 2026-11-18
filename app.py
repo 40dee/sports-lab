@@ -1004,53 +1004,51 @@ def combo_player_exposure(store, tier_mode, quote_mode, size, reference=None):
 
 def combo_candidates(pool, size, policy, exposure=None):
     import heapq
-    # Bounded beam search, not an exhaustive optimizer or a probability model.
+    # Re-run a bounded beam for each option so new players are not discarded
+    # before alternatives can account for the players already selected.
     game_limit=1 if len({leg['event_id'] for leg in pool})>=size else 2
     exposure=dict(exposure or {})
-    beam = [()]
-    for _ in range(size):
-        next_beam = []
-        for chosen in beam:
-            for i in range(chosen[-1]+1 if chosen else 0, len(pool)):
-                legs = [pool[j] for j in chosen+(i,)]
-                if len({str(x['team_id']) for x in legs}) != len(legs):continue
-                if sum(x['event_id']==pool[i]['event_id'] for x in legs) > game_limit: continue
-                next_beam.append(chosen+(i,))
-        # Retain search paths from every game as well as the global leaders.
-        # Otherwise a strong early matchup can crowd all later games out of
-        # the beam before a complete slip is ever evaluated.
-        rank = lambda indexes:(-combo_rank([pool[j] for j in indexes],policy),indexes)
-        leaders = heapq.nsmallest(128,next_beam,key=rank)
-        if exposure and next_beam:
-            best=combo_rank([pool[j] for j in min(next_beam,key=rank)],policy)
-            comparable=[indexes for indexes in next_beam if combo_rank([pool[j] for j in indexes],policy)>=best-.10]
-            leaders+=heapq.nsmallest(128,comparable,key=lambda indexes:(
-                sum(exposure.get(str(pool[j]['player_id']),0) for j in indexes),rank(indexes)))
-        by_game = {}
-        for indexes in next_beam:
-            game = pool[indexes[-1]]['event_id']
-            prior = by_game.get(game)
-            if prior is None or rank(indexes)<rank(prior):by_game[game]=indexes
-        beam = list(dict.fromkeys(leaders+list(by_game.values())))
-    eligible = [indexes for indexes in beam if len({pool[j]['team_id'] for j in indexes}) >= 2]
-    selected = []
-    # Reduce shared-player concentration only among comparable qualifying entries.
-    # The score floor remains independent of previous suggestions and results.
-    eligible.sort(key=lambda indexes:(-combo_rank([pool[j] for j in indexes],policy),indexes))
-    while len(selected)<3:
-        remaining=[indexes for indexes in eligible if indexes not in selected and not any(
-            len(set(indexes)&set(old))>max(1,size-2) for old in selected)]
-        if not remaining:break
-        best=max(combo_rank([pool[j] for j in indexes],policy) for indexes in remaining)
-        comparable=[indexes for indexes in remaining if combo_rank([pool[j] for j in indexes],policy)>=best-.10]
+    selected=[]
+    def rank(indexes):
+        return (-combo_rank([pool[j] for j in indexes],policy),indexes)
+    for option in range(3):
         counts=dict(exposure)
         for old in selected:
             for j in old:
                 player=str(pool[j]['player_id'])
                 counts[player]=counts.get(player,0)+1
-        chosen=min(comparable,key=lambda indexes:(
-            sum(2*counts.get(str(pool[j]['player_id']),0)+1 for j in indexes),
-            -combo_rank([pool[j] for j in indexes],policy),indexes))
+        def reuse(indexes):
+            return sum(counts.get(str(pool[j]['player_id']),0) for j in indexes)
+        beam=[()]
+        for _ in range(size):
+            next_beam=[]
+            for chosen in beam:
+                for i in range(chosen[-1]+1 if chosen else 0,len(pool)):
+                    indexes=chosen+(i,)
+                    legs=[pool[j] for j in indexes]
+                    if len({str(x['team_id']) for x in legs})!=len(legs):continue
+                    if sum(x['event_id']==pool[i]['event_id'] for x in legs)>game_limit:continue
+                    next_beam.append(indexes)
+            if not next_beam:
+                beam=[];break
+            leaders=heapq.nsmallest(128,next_beam,key=rank)
+            if counts:
+                best=-rank(leaders[0])[0]
+                comparable=[indexes for indexes in next_beam if -rank(indexes)[0]>=best-.10]
+                leaders+=heapq.nsmallest(128,comparable,key=lambda indexes:(reuse(indexes),rank(indexes)))
+            by_game={}
+            for indexes in next_beam:
+                game=pool[indexes[-1]]['event_id']
+                prior=by_game.get(game)
+                if prior is None or rank(indexes)<rank(prior):by_game[game]=indexes
+            beam=list(dict.fromkeys(leaders+list(by_game.values())))
+        eligible=[indexes for indexes in beam if len({pool[j]['team_id'] for j in indexes})>=2
+            and indexes not in selected and not any(
+                len(set(indexes)&set(old))>max(1,size-2) for old in selected)]
+        if not eligible:break
+        best=max(combo_rank([pool[j] for j in indexes],policy) for indexes in eligible)
+        comparable=[indexes for indexes in eligible if combo_rank([pool[j] for j in indexes],policy)>=best-.10]
+        chosen=min(comparable,key=lambda indexes:(reuse(indexes),rank(indexes)))
         selected.append(chosen)
     return [[pool[j] for j in indexes] for indexes in selected]
 
