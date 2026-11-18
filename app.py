@@ -1359,11 +1359,12 @@ def render_board_run_status(store, st):
             st.caption('Worker finished. Pick eligibility is checked in the selected view.')
         else:
             st.info('Board worker is ' + str(stage) + '.')
-        history=[v for _,v in store.items('board_run_history') if v.get('day')==record.get('day') and v.get('started_at')!=record.get('started_at')]
-        for prior in sorted(history,key=lambda v:v.get('started_at',''),reverse=True)[:5]:
-            st.caption('Earlier pass · '+str(prior.get('started_at'))+' UTC · '+str(prior.get('stage'))+
-                ' · Import '+elapsed(prior.get('started_at'),prior.get('import_finished_at'))+
-                ' · Total '+elapsed(prior.get('started_at'),prior.get('finished_at')))
+        if st.button('Load earlier worker passes',key='load_board_run_history'):
+            history=[v for _,v in store.items('board_run_history') if v.get('day')==record.get('day') and v.get('started_at')!=record.get('started_at')]
+            for prior in sorted(history,key=lambda v:v.get('started_at',''),reverse=True)[:5]:
+                st.caption('Earlier pass · '+str(prior.get('started_at'))+' UTC · '+str(prior.get('stage'))+
+                    ' · Import '+elapsed(prior.get('started_at'),prior.get('import_finished_at'))+
+                    ' · Total '+elapsed(prior.get('started_at'),prior.get('finished_at')))
         st.caption('Times measure this worker pass, including saved-cache reuse. A finished worker can still have incomplete coverage. If the worker stops unexpectedly, its last stage remains visible; no finish time is invented.')
 
 
@@ -3706,8 +3707,12 @@ class TursoStore(Store):
         self.token = str(token).strip()
         self.http = requests.Session()
         self.remote = True
-        st.session_state.pop('_turso_read_cache_v1',None)
-        self._read_cache = st.session_state.setdefault('_turso_read_cache_v2', {})
+        self._read_cache = None
+        try:
+            st.session_state.pop('_turso_read_cache_v1',None)
+            self._read_cache = st.session_state.setdefault('_turso_read_cache_v2', {})
+        except Exception:
+            pass
         self.query('CREATE TABLE IF NOT EXISTS sports_records (namespace TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(namespace,key))')
 
     def restore(self, value):
@@ -10149,7 +10154,7 @@ def ui_save_pick(card, frozen):
             return False
         workflow_store.put('watchlist', key, {
             'active': True, 'saved_at': now(), 'card': json_safe(dict(card)),
-            'forecast_id': key if frozen else None,
+            'forecast_id': frozen['id'] if frozen else None,
             'result': (frozen or {}).get('result'),
             'board_observed_at': st.session_state.get('v4_scan_at'),
         })
@@ -10360,11 +10365,12 @@ def pick_chart_spec(games, line, direction):
     ], 'config': {'background':'transparent','view':{'stroke':None}, 'axis':{'labelColor':'#b5c5d8','gridColor':'#28384a','domainColor':'#43566d'}}}
 
 
-def ui_recent_chart(card, history):
+def ui_recent_chart(card, history, frozen=None):
     if history is None or history.empty:
         st.info('No verified pregame game log is available for this player.')
         return
-    frozen = workflow_store.get('forecast', identity(card), {})
+    if frozen is None:
+        frozen = saved_prediction(forecast_index(saved_forecast_records(workflow_store)),card) or {}
     result = frozen.get('result') or {}
     direction = result.get('direction')
     if direction not in ('MORE','LESS'):
@@ -10539,7 +10545,7 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
         if history is not None:
             st.divider()
             st.markdown('#### Recent performance')
-            ui_recent_chart(card, history)
+            ui_recent_chart(card, history, frozen)
     except Exception:
         st.warning('This research section could not load. Your frozen forecast remains unchanged.')
 
