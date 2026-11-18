@@ -114,6 +114,14 @@ def main():
     played={v["combo_id"] for v in combo_data.get("combo_played",{}).values() if v.get("active")}
     played.update(v["combo_id"] for v in combo_data.get("combo_actual",{}).values())
     report["unique_played_combos"]=len(played)
+    for saved_row in data:
+        ns,key,payload,_=[cell.get("value") for cell in saved_row]
+        if ns=="source" and key=="pp_fantasy_daily_v1":
+            report["fantasy_offer_examples"]=[item for item in (json.loads(payload).get("items") or [])
+                if any(name in str(item.get("player","")).lower() for name in ("mikal bridges","jalen brunson"))]
+    fields=("Player","Line","Line Type","Direction","Available Sides","Tier Fetched At","Tier Observed At","Tier Source","Tier Projection ID","Start (UTC)")
+    report["fantasy_offer_cards"]=[{k:c.get(k) for k in fields} for c in (records.get("board",{}).get("v4_rows") or [])
+        if "fantasy" in str(c.get("Stat","")).lower() and any(name in str(c.get("Player","")).lower() for name in ("mikal bridges","jalen brunson"))]
     print("BOARD_PROGRESS_JSON " + json.dumps(report, sort_keys=True))
     return 0
 
