@@ -10326,6 +10326,50 @@ def ui_sparkline(values, line, direction):
             ''.join(bars)+f'<line x1="0" x2="164" y1="{y(line):.2f}" y2="{y(line):.2f}" stroke="#91acbc" stroke-dasharray="3 3"/></svg>')
 
 
+def consensus_edge_info(card, result, board_rows=None):
+    """Display-only saved quote screen. Never changes the frozen model side."""
+    def valid(market):
+        if not isinstance(market,dict):return False
+        values=[ui_number(market.get(side)) for side in ('more','less')]
+        return all(v is not None and 0<=v<=1 for v in values) and abs(sum(values)-1)<.001
+    market=result.get('market') or {}
+    source='saved forecast'
+    if not valid(market):
+        market=(engine_no_vig(card) if board_rows is None else engine_no_vig(card,board_rows)) or {}
+        source='matching saved board'
+    if not valid(market):return {'model_probability':None,'best_side':None,'best_probability':None,'book_count':0,'aligned':False,'sharp_ev':False}
+    direction=str(result.get('direction') or '').upper()
+    offered=(pick_offered_sides(card) or ()) if str(card.get('Platform','')).lower()=='prizepicks' else ()
+    probability=market.get(direction.lower()) if direction in ('MORE','LESS') else None
+    best=max(offered,key=lambda side:float(market[side.lower()])) if offered else None
+    best_probability=float(market[best.lower()]) if best else None
+    count=ui_number(market.get('book_count'))
+    count=int(count) if count is not None and count>=1 else len(market.get('books') or []) or (1 if market.get('book') else 0)
+    return {'model_probability':float(probability) if probability is not None else None,
+            'best_side':best,'best_probability':best_probability,'book_count':count,'source':source,'market':market,
+            'aligned':direction in offered and probability is not None and float(probability)>=.535,
+            'sharp_ev':best_probability is not None and best_probability>=.54}
+
+
+def consensus_matches_filter(info, mode):
+    return info.get('aligned',False) if mode=='✓ Sharp aligned (53.5%+)' else info.get('sharp_ev',False) if mode=='🔥 Sharp +EV (54%+)' else True
+
+
+def consensus_sort_records(records, infos, scores, sort_by):
+    field='best_probability' if sort_by=='Highest sharp %' else None
+    def rank(card):
+        key=identity(card)
+        value=(infos.get(key) or {}).get(field) if field else scores.get(key)
+        return ui_number(value,-1)
+    return sorted(records,key=rank,reverse=True)
+
+
+def ui_sharp_side_badge(info, direction):
+    if not info.get('sharp_ev') or info.get('best_side')==direction:return ''
+    side=info['best_side'];arrow='↑' if side=='MORE' else '↓'
+    return '<span class="sl-badge" title="Saved consensus threshold screen; model direction unchanged. Entry payout EV is not calculated.">🔥 Sharp +EV side: '+arrow+' '+side+f" {info['best_probability']:.1%} ({info['book_count']} books)</span>"
+
+
 def ui_card_badges(result, direction):
     badges=[]
     market=result.get('market') or {}
@@ -10408,6 +10452,7 @@ def ui_card(card, frozen, saved=False):
     elif not result:footer.append((workflow_store.get('calculation_status',identity(card)) or {}).get('reason') or 'Projection pending')
     else:footer.append('Saved pregame · Estimates experimental')
     tier_label=tier_note or tier or platform
+    sharp_info=consensus_edge_info(card,result)
     st.markdown(ui_html(f'''<div class="sl-card sl-compact">
       <div class="sl-person">{portrait}<div class="sl-player-info">
       <h3>{ui_text(name)}{marker_html}</h3><div class="sl-team">{ui_text(card.get('Game', ''))} · {ui_text(tipoff)}</div>
@@ -10416,7 +10461,7 @@ def ui_card(card, frozen, saved=False):
       <div class="sl-pickline"><div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
       <div class="sl-proj"><small>Est. hit</small><b>{prob_text}</b></div>
       <span class="sl-badge">{ui_text(tier_label)}</span></div>
-      <div class="sl-badges">{ui_card_badges(result,direction)}</div>
+      <div class="sl-badges">{ui_card_badges(dict(result,market=sharp_info.get("market") or {}),direction)}{ui_sharp_side_badge(sharp_info,direction)}</div>
       {ui_sparkline(result.get("recent_values"),line,direction)}
       <div class="sl-footer">{ui_text(' · '.join(footer))}</div></div>'''), unsafe_allow_html=True)
     if fantasy_weights(card):ui_fantasy_contributions(card,result)
@@ -10809,6 +10854,10 @@ def ui_board(page):
         return
     st.subheader('Saved plays' if page == 'Saved' else 'Your NBA plays')
     view = (st.segmented_control('Board view', ['Top plays', 'All props'], default=st.session_state.get('mobile_view', 'Top plays'), key='mobile_view_buttons', width='stretch') or 'Top plays') if page != 'Saved' else 'All props'
+    market_filter='All';sharp_sort='Model score'
+    if page=='Plays':
+        market_filter=st.segmented_control('Market',['All','✓ Sharp aligned (53.5%+)','🔥 Sharp +EV (54%+)'],default='All',key='plays_market_filter',width='stretch') or 'All'
+        sharp_sort=st.segmented_control('Sort by',['Model score','Highest sharp %'],default='Model score',key='plays_sharp_sort',width='stretch') or 'Model score'
     stat = st.segmented_control('Stat', ['All','Points','Rebounds','Assists','PRA','Fantasy Score'], default=st.session_state.get('mobile_stat_pills','All'), key='mobile_stat_pills',label_visibility='collapsed',width='stretch') or 'All'
     kind='Fantasy' if stat=='Fantasy Score' else 'All'
     with st.expander('Filters & Search'):
@@ -10822,7 +10871,7 @@ def ui_board(page):
         if coverage:st.caption(f"Saved board: {coverage.get('ready',0)}/{coverage.get('imported',0)} calculated before tipoff")
         auto=workflow_store.get('automation',slate_day()) or {}
         if auto.get('feed_partial') or auto.get('fantasy_partial'):st.caption('Partial feed · Missing provider pages are excluded.')
-        st.caption('Top plays ranks projected gaps; estimates are experimental. Save requires the existing line and side checks.')
+        st.caption('Market filters use saved no-vig quotes and confirmed offered sides. Sharp +EV is a 54% threshold screen; entry payout EV is not calculated. Save follows the original model side and existing checks.')
     if page == 'Saved':
         records = [v['card'] for v in saved.values()]
         st.caption('Saved lines stay fixed. Comparisons use the latest imported board; opening this page does not refresh prices.')
@@ -10862,6 +10911,15 @@ def ui_board(page):
                (str(c.get('Line Type','')).lower() in ('standard','regular') if tier=='Standard' else
                 str(c.get('Line Type','')).lower() not in ('standard','regular','goblin','demon') if tier=='Unverified' else
                 str(c.get('Line Type','')).lower()==tier.lower()))]
+    sharp_infos={}
+    if page=='Plays' and (market_filter!='All' or sharp_sort=='Highest sharp %'):
+        # Narrow candidate rows once; exact semantic matching still happens in engine_no_vig.
+        board_by_player={}
+        for row in rows:
+            board_by_player.setdefault(normalize_player(ui_name(row.get('Player',''))),[]).append(row)
+        sharp_infos={identity(c):consensus_edge_info(c,(saved_prediction(forecasts,c) or {}).get('result') or {},
+            board_by_player.get(normalize_player(ui_name(c.get('Player',''))),[])) for c in records}
+        records=[c for c in records if consensus_matches_filter(sharp_infos[identity(c)],market_filter)]
     if view == 'Top plays':
         calculated = [c for c in records if identity(c) in forecasts
                    and not (health.get('players', {}).get(player_health_key(c)) or {}).get('blocked', False)]
@@ -10926,6 +10984,9 @@ def ui_board(page):
                 )
     if page != 'Saved':
         records = earliest_game_first(records)
+    if page=='Plays':
+        scores={key:((value or {}).get('result') or {}).get('standardized_gap') for key,value in forecasts.items()}
+        records=consensus_sort_records(records,sharp_infos,scores,sharp_sort)
     if not records:
         st.info("No matching upcoming picks for today (Pacific time). Try All props or clear filters. The app will not substitute tomorrow's games. Imports and calculation are under Settings.")
         return
