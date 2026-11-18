@@ -131,34 +131,80 @@ def calibrated_hit_probability(all_values, forecast, line, direction, columns, i
     p = (more if direction=="MORE" else less)/max(1e-12,more+less)
     return max(.01,min(.99,p)), "experimental-shrunk-normal"
 
-def _load_full_forecasts(store):
-    reader = getattr(store,"query",None)
-    if not callable(reader):
-        return store.items("forecast")
-    records, after = [], ""
-    while True:
-        page = reader("SELECT key,payload FROM sports_records WHERE namespace=? AND key>? ORDER BY key LIMIT 200",
-                      ("forecast",after),True)
-        records.extend((key,json.loads(payload)) for key,payload in page)
-        if len(page)<200:
-            return records
-        after = page[-1][0]
+def _batch_fetch(store, namespace, keys):
+    """Bounded SELECT batches; never read unrelated full evidence."""
+    keys=list(dict.fromkeys(str(k) for k in keys if k))
+    found={}
+    for offset in range(0,len(keys),50):
+        chunk=keys[offset:offset+50]
+        sql="SELECT key,payload FROM sports_records WHERE namespace=? AND key IN ("+",".join("?" for _ in chunk)+")"
+        args=(namespace,*chunk)
+        if callable(getattr(store,"query",None)):
+            rows=store.query(sql,args,True)
+        elif callable(getattr(store,"connection",None)):
+            with store.connection() as con:
+                if store.remote:sql=sql.replace("?","%s")
+                rows=con.execute(sql,args).fetchall()
+        else:
+            for key in chunk:
+                value=store.get(namespace,key)
+                if value is not None:found[key]=value
+            continue
+        found.update((str(key),json.loads(payload)) for key,payload in rows)
+    return found
 
-def run_backtest(store, env=None):
+def _replay_candidates(store, env, grades, max_samples, scope):
+    reader=getattr(store,"research_forecast_items",None)
+    light=reader() if callable(reader) else store.items("forecast")
+    records=env["unique_forecasts"](light)
+    records.sort(key=lambda item:(str(item[1].get("created_at","")),str(item[0])))
+    records.sort(key=lambda item:str((item[1].get("card") or {}).get("Start (UTC)","")),reverse=True)
+    selected=[];seen=set()
+    for key,frozen in records:
+        grade=grades.get(key) or {}
+        card=frozen.get("card") or {}
+        if grade.get("status")!="FINAL" or grade.get("outcome") not in ("WIN","LOSS"):continue
+        platform=str(card.get("Platform","")).lower()
+        tier=str(card.get("Line Type","")).lower()
+        if scope=="standard_one_per_stat" and (platform!="prizepicks" or tier not in ("standard","regular")):continue
+        if scope=="standard_one_per_stat":
+            signature=(str(frozen.get("event_id")),str(card.get("Player","")).lower(),
+                       tuple(sorted(env["market_columns"](card) or [])),str(card.get("Period","")).lower(),platform)
+            if signature in seen:continue
+            seen.add(signature)
+        selected.append((key,frozen))
+        if len(selected)>=max_samples:break
+    return selected
+
+def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'):
     env = env or _env_ref
     raw = getattr(store,"_store",store)
     grades = dict(raw.items("grade"))
-    cache = {}
+    if max_samples not in (300,600,1200):raise ValueError("Choose 300, 600 or 1200 samples")
+    if scope not in ("standard_one_per_stat","all_selectable"):raise ValueError("Unsupported replay scope")
+    candidates=_replay_candidates(raw,env,grades,max_samples,scope)
+    full=_batch_fetch(raw,"forecast",[key for key,_ in candidates])
+    refs=set()
+    for frozen in full.values():
+        for field in ("games","advanced"):
+            value=(frozen.get("result") or {}).get(field)
+            if isinstance(value,dict) and value.get("source_ref"):refs.add(value["source_ref"])
+    sources=_batch_fetch(raw,"source",refs)
+    cache = {key:value.get("data") for key,value in sources.items()}
     def resolve(value):
         if isinstance(value,dict) and value.get("source_ref"):
             ref = value["source_ref"]
             if ref not in cache:
-                cache[ref]=(raw.get("source",ref) or {}).get("data")
+                cache[ref]=None
             return cache[ref]
         return value
     rows, excluded = [], Counter()
     # Per original line/market, never replace a frozen outcome with a later forecast.
-    for key,frozen in env["unique_forecasts"](_load_full_forecasts(raw)):
+    for key,_light in candidates:
+        frozen=full.get(key)
+        if not frozen:
+            excluded["missing_full_forecast"]+=1
+            continue
         grade = grades.get(key) or {}
         if grade.get("status")!="FINAL" or grade.get("outcome") not in ("WIN","LOSS"):
             excluded["not_final_decided"]+=1
@@ -237,6 +283,7 @@ def run_backtest(store, env=None):
             if old_probability is not None and (not math.isfinite(old_probability) or not 0<=old_probability<=1):old_probability=None
             rows.append(dict(day=start.tz_convert("America/Los_Angeles").date().isoformat(),event=str(frozen.get("event_id")),
                 player=str(result.get("player_id")),stat=result.get("stat_group",card.get("Stat")),
+                platform=str(card.get("Platform","")).lower(),tier=str(card.get("Line Type","")).lower(),
                 actual=actual,v1_proj=v1,v2_proj=projection,v1_win=int(grade["outcome"]=="WIN"),
                 v2_win=int(actual>line if v2_dir=="MORE" else actual<line),
                 v1_prob=old_probability,v2_prob=probability,prior_available=bool(hist.SEASON.ne(season).any()),
@@ -247,7 +294,7 @@ def run_backtest(store, env=None):
         return {"picks":0,"excluded":dict(excluded),"status":"no_replayable_records","version":ENGINE_VERSION}
     frame=pd.DataFrame(rows)
     # Alternate thresholds share one player-game/market of weight.
-    frame["weight"]=1/frame.groupby(["day","event","player","stat"]).actual.transform("count")
+    frame["weight"]=1/frame.groupby(["day","event","player","stat","platform","tier"]).actual.transform("count")
     def summary(group):
         w=group.weight
         cal=group.dropna(subset=["v1_prob","v2_prob"])
@@ -260,6 +307,8 @@ def run_backtest(store, env=None):
         return out
     result=summary(frame)
     result.update(version=ENGINE_VERSION,status="retrospective_diagnostic",excluded=dict(excluded),
+        scope=scope,max_samples=max_samples,selected_candidates=len(candidates),
+        by_platform_tier=[dict(platform=platform,tier=tier,**summary(group)) for (platform,tier),group in frame.groupby(["platform","tier"])],
         days=sorted(frame.day.unique()),prior_history_rows=int(frame.prior_available.sum()),
         vegas_rows=int(frame.vegas_available.sum()),by_stat=[dict(stat=stat,**summary(group)) for stat,group in frame.groupby("stat")],
         by_day=[dict(day=day,**summary(group)) for day,group in frame.groupby("day")],
@@ -272,10 +321,13 @@ def print_cli_backtest(store):
 def render_backtest_panel(store, st):
     with st.expander("v2 Projection Backtest (offline · no API calls)"):
         st.caption("Experimental saved-data replay. Current live model stays active; no forecasts or grades are overwritten.")
+        scope_label=st.selectbox("Backtest scope",["PrizePicks Standard: one line per player/stat/game","All selectable: separate platform and tier reports"],key="v2_bt_scope")
+        scope="standard_one_per_stat" if scope_label.startswith("PrizePicks") else "all_selectable"
+        limit=st.selectbox("Max recent candidates",[300,600,1200],index=1,key="v2_bt_limit")
         if st.button("Run v2 Backtest",key="run_v2_backtest_btn"):
             try:
                 with st.spinner("Replaying saved pregame evidence..."):
-                    st.session_state["_v2_backtest_result"]=run_backtest(store)
+                    st.session_state["_v2_backtest_result"]=run_backtest(store,max_samples=limit,scope=scope)
             except Exception as error:
                 st.error("Replay failed: "+type(error).__name__+". Live projections remain unchanged.")
         result=st.session_state.get("_v2_backtest_result")
@@ -284,6 +336,7 @@ def render_backtest_panel(store, st):
                 st.info("No settled records with replayable pregame evidence.")
             else:
                 st.write({k:result[k] for k in ("picks","player_game_markets","v1_hit","v2_hit","v1_mae","v2_mae","v1_brier","v2_brier")})
+                st.dataframe(pd.DataFrame(result["by_platform_tier"]),hide_index=True,width="stretch")
                 st.dataframe(pd.DataFrame(result["by_stat"]),hide_index=True,width="stretch")
                 st.dataframe(pd.DataFrame(result["by_day"]),hide_index=True,width="stretch")
                 st.caption(result["limitation"])
