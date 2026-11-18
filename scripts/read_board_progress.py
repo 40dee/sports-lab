@@ -139,6 +139,23 @@ def main():
         report["current_suggestions"][key]={k:value.get(k) for k in ("created_at","eligible_players","tier_mode","quote_mode","sizes","excluded")}
         for ids in (value.get("sizes") or {}).values():selected_ids.update(ids)
     report["selected_combo_examples"]=[value for key,value in current_combos.items() if key in selected_ids]
+    selected_forecasts={leg["forecast_id"] for combo in report["selected_combo_examples"] for leg in combo["legs"]}
+    if selected_forecasts:
+        stmt={"sql":"SELECT key,payload FROM sports_records WHERE namespace='forecast' AND key IN ("+",".join("?" for _ in selected_forecasts)+")","args":[{"type":"text","value":key} for key in selected_forecasts],"want_rows":True}
+        request=Request("https://"+parsed.netloc+"/v2/pipeline",
+            data=json.dumps({"requests":[{"type":"execute","stmt":stmt},{"type":"close"}]}).encode(),
+            headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"})
+        with urlopen(request,timeout=30) as response:
+            rows=json.load(response)["results"][0]["response"]["result"].get("rows",[])
+        report["selected_forecast_features"]={}
+        for row in rows:
+            key,payload=[cell["value"] for cell in row];frozen=json.loads(payload)
+            report["selected_forecast_features"][key]={k:(frozen.get("result") or {}).get(k) for k in ("minutes","baseline","projection","ranking_games","standardized_gap","stat_group","components")}
+    for row in model_rows:
+        ns,key,payload=[cell["value"] for cell in row];v=json.loads(payload)
+        if ns=="pick_reliability_evaluation":
+            report["minutes_patterns"]=[p for p in v.get("patterns",[]) if p.get("feature")=="minutes"]
+            report["ranking_evaluation"]=v.get("folds")
     print("BOARD_PROGRESS_JSON " + json.dumps(report, sort_keys=True))
     return 0
 
