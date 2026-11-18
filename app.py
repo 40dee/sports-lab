@@ -977,12 +977,60 @@ def combo_pool(store, reference=None, tier_mode="mixed", quote_mode="verified"):
     return kept, excluded
 
 
+def combo_pair_pattern(leg_a, leg_b):
+    """Classify opponent stat/direction pairs; unknown identities never earn a bonus."""
+    event_a,event_b=leg_a.get('event_id'),leg_b.get('event_id')
+    if event_a in (None,'') or event_b in (None,'') or str(event_a)!=str(event_b):return None,None
+    team_a,team_b=leg_a.get('team_id'),leg_b.get('team_id')
+    directions=(leg_a.get('direction'),leg_b.get('direction'))
+    if (team_a in (None,'') or team_b in (None,'') or str(team_a)==str(team_b)
+            or any(value not in ('MORE','LESS') for value in directions)):
+        return 'fallback',None
+    def stat(leg):
+        value=str(leg.get('stat_group') or '').strip().upper()
+        return '+'.join(sorted(part.strip() for part in value.split('+')))
+    a,b=stat(leg_a),stat(leg_b)
+    volume={'PTS','AST','FG3M','AST+PTS','PTS+REB','AST+REB','AST+PTS+REB','PRIZEPICKS FANTASY'}
+    same=directions[0]==directions[1]
+    if a in volume and b in volume:return 'volume',same
+    if (a in ('PTS','FG3M') and b=='REB') or (b in ('PTS','FG3M') and a=='REB'):
+        return 'scoring-rebound',same
+    if (a=='TOV' and b in ('STL','BLK+STL')) or (b=='TOV' and a in ('STL','BLK+STL')):
+        return 'turnover-steal',same
+    return 'fallback',None
+
+
+def combo_pair_correlation(leg_a, leg_b, policy):
+    """User-specified heuristic rank adjustment, not a measured correlation coefficient."""
+    pattern,same=combo_pair_pattern(leg_a,leg_b)
+    if pattern is None:return 0.
+    diverse=policy=='diverse-v1'
+    if pattern=='volume':return (-.04 if same else -.22) if diverse else (.03 if same else -.14)
+    if pattern=='scoring-rebound':return (-.12 if same else -.04) if diverse else (-.06 if same else .02)
+    if pattern=='turnover-steal':return (-.03 if same else -.18) if diverse else (.04 if same else -.12)
+    return -.16 if diverse else -.08
+
+
+def combo_same_game_note(combo):
+    if combo.get('rules_version')!='distinct-teams-exposure-v5':
+        return 'Historical combo: same-game adjustments follow its original saved rules.'
+    contexts=set()
+    legs=combo.get('legs') or []
+    for i,a in enumerate(legs):
+        for b in legs[i+1:]:
+            pattern,same=combo_pair_pattern(a,b)
+            if pattern is None:continue
+            if pattern=='fallback':contexts.add('unclassified')
+            elif (not same if pattern=='scoring-rebound' else same):contexts.add('positively aligned')
+            else:contexts.add('opposing')
+    return 'Same-game pair context (heuristic): '+', '.join(sorted(contexts))+'.' if contexts else ''
+
+
 def combo_rank(legs, policy):
     scores = [min(1.5, x['score']) for x in legs]
-    same_game = len(legs)-len({x['event_id'] for x in legs})
     same_stat = len(legs)-len({x['stat_group'] for x in legs})
-    return .65 * min(scores) + .35 * sum(scores)/len(scores) - (
-        .16 if policy == 'diverse-v1' else .08)*same_game - .02*same_stat
+    pair_adjustment=sum(combo_pair_correlation(a,b,policy) for i,a in enumerate(legs) for b in legs[i+1:])
+    return .65 * min(scores) + .35 * sum(scores)/len(scores) + pair_adjustment - .02*same_stat
 
 
 def combo_player_exposure(store, tier_mode, quote_mode, size, reference=None):
@@ -1073,14 +1121,14 @@ def combo_snapshot(legs, policy, reference=None):
         if sum(x['event_id']==leg['event_id'] for x in legs)>2:
             raise ValueError('At most two players per game in this builder.')
     ranking_context=next((leg.get('ranking_model') for leg in legs if leg.get('ranking_model')),None)
-    key_data=[slate_day(stamp),policy,'distinct-teams-exposure-v4',
+    key_data=[slate_day(stamp),policy,'distinct-teams-exposure-v5',
         sorted([x['forecast_id'],identity(x['card']),x['direction']] for x in legs)]
     if ranking_context:key_data.append(ranking_context)
     key=hashlib.sha256(encode(key_data).encode()).hexdigest()
     return {'id': key, 'created_at': stamp.isoformat(), 'day': slate_day(stamp),
         'size': len(legs), 'policy':policy, 'platform':'prizepicks', 'kind':'paper',
         'legs':json_safe(legs), 'ranking_score':combo_rank(legs,policy),
-        'rules_version':'distinct-teams-exposure-v4', 'ranking_model':ranking_context or {'version':'original-gap-v1'}, 'payout_terms':None,
+        'rules_version':'distinct-teams-exposure-v5', 'ranking_model':ranking_context or {'version':'original-gap-v1'}, 'payout_terms':None,
         'note':'Directional paper result. No entry submitted. No multiplied hit probabilities.'}
 
 
@@ -1108,7 +1156,7 @@ def combo_inputs_version(store, reference=None):
     board=store.get('board','board') or {}
     health=store.get('health',slate_day(current)) or {}
     prep=store.get('preparation','last') or {}
-    return ['distinct-teams-exposure-v4',store.get('combo_ranking','mode','learned_blend'),(store.get('pick_reliability_evaluation','latest') or {}).get('input_digest'),board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
+    return ['distinct-teams-exposure-v5',store.get('combo_ranking','mode','learned_blend'),(store.get('pick_reliability_evaluation','latest') or {}).get('input_digest'),board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
             prep.get('ready'),int(current.timestamp()//300)]
 
 
@@ -1600,13 +1648,14 @@ def render_combos(wf, st):
                 st.caption(('Ready for platform review · ' if valid else 'Needs review · ')+note)
                 games=len({leg['event_id'] for leg in combo['legs']})
                 st.caption(f'{games} games · {size-games} extra same-game legs · Related outcomes may move together. Special tiers may change payouts.')
+                if games<size:st.caption(combo_same_game_note(combo))
                 exposure=combo_player_exposure(wf.store,tier_mode,quote_mode,size)
                 shared=sum(exposure.get(str(leg['player_id']),0)>0 for leg in combo['legs'])
                 if shared:
                     st.caption(f'Player overlap: {shared} of {size} also appear in other saved sizes or played entries. These slips share outcomes.')
                 st.markdown(combo_legs_html(combo['legs']),unsafe_allow_html=True)
                 ranking_version=(combo.get('ranking_model') or {}).get('version','original-gap-v1')
-                st.caption('Ranking: '+ranking_version+' · Balances weakest and average separation, with game/stat penalties. Learned influence is capped and experimental; frozen MORE/LESS projections are unchanged.')
+                st.caption('Ranking: '+ranking_version+' · Balances weakest and average separation, with pair adjustments and a repeated-stat penalty. Learned influence is capped and experimental; frozen MORE/LESS projections are unchanged.')
                 combo_played_button(wf.store,combo,st,'suggestion')
                 with st.expander('Optional: entry ID, stake and payout details'):
                     st.caption('Only record after submitting in PrizePicks and before the first game. Copy the entry’s actual payout schedule; no standard rates are assumed.')
