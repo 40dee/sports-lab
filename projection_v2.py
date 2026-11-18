@@ -187,6 +187,7 @@ def run_backtest(store, env=None):
             hist["GAME_DATE"]=pd.to_datetime(hist.GAME_DATE,utc=True,errors="coerce")
             hist["MIN"]=pd.to_numeric(hist.MIN,errors="coerce")
             hist=hist[(hist.GAME_DATE<created)&hist.MIN.between(.01,70)].drop_duplicates("GAME_ID").sort_values("GAME_DATE",ascending=False)
+            hist=hist[hist.GAME_ID.astype(str).ne(str(frozen.get("event_id")))]
             season = frozen.get("season")
             if not season:
                 raise ValueError("missing_season")
