@@ -1009,8 +1009,10 @@ def combo_candidates(pool, size, policy, exposure=None):
     game_limit=1 if len({leg['event_id'] for leg in pool})>=size else 2
     exposure=dict(exposure or {})
     selected=[]
+    ranks={}
     def rank(indexes):
-        return (-combo_rank([pool[j] for j in indexes],policy),indexes)
+        if indexes not in ranks:ranks[indexes]=(-combo_rank([pool[j] for j in indexes],policy),indexes)
+        return ranks[indexes]
     for option in range(3):
         counts=dict(exposure)
         for old in selected:
@@ -1046,8 +1048,8 @@ def combo_candidates(pool, size, policy, exposure=None):
             and indexes not in selected and not any(
                 len(set(indexes)&set(old))>max(1,size-2) for old in selected)]
         if not eligible:break
-        best=max(combo_rank([pool[j] for j in indexes],policy) for indexes in eligible)
-        comparable=[indexes for indexes in eligible if combo_rank([pool[j] for j in indexes],policy)>=best-.10]
+        best=max(-rank(indexes)[0] for indexes in eligible)
+        comparable=[indexes for indexes in eligible if -rank(indexes)[0]>=best-.10]
         chosen=min(comparable,key=lambda indexes:(reuse(indexes),rank(indexes)))
         selected.append(chosen)
     return [[pool[j] for j in indexes] for indexes in selected]
@@ -1383,6 +1385,8 @@ def update_combos(store, generate=False, reference=None, quote_mode="verified"):
                         generated+=1
                     policies[policy]=[s['id'] for s in snapshots]
                 suggestions['sizes'][str(size)]=policies[models['policy']]
+                # Subsequent sizes must see this pass's selections, not only the prior pass.
+                store.put('combo_suggestions',slate_day(current)+(':'+tier_mode if tier_mode!='mixed' else '')+(':research' if quote_mode=='research' else ''),suggestions)
                 # First complete paired daily cohort is frozen, never cherry-picked later.
                 if quote_mode=='verified' and tier_mode=='mixed' and all(len(v)==3 for v in policies.values()):
                     store.put('combo_cohort',slate_day(current)+':'+str(size),
