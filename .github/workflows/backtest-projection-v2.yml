@@ -1,0 +1,26 @@
+name: Offline v2 projection backtest
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - scripts/backtest_projection_v2.py
+      - .github/workflows/backtest-projection-v2.yml
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - name: Replay saved forecasts without paid API keys
+        run: python scripts/backtest_projection_v2.py
