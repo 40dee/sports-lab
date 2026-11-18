@@ -4638,6 +4638,7 @@ def render_workflow(wf, st, rows, mode="settings"):
 
     if mode == "settings":
         preparation_panel(wf, st, rows)
+        projection_v2.render_backtest_panel(wf.store, st)
     if (mode == "settings" or rows) and st.checkbox("Show calculated board table", key="show_calculated_board_table"):
         saved_index = forecast_index(saved_forecast_records(wf.store,combo_clock())) if rows else {}
         calculated = wf.board(
@@ -8606,6 +8607,8 @@ if not _database_online:
     )
 
 workflow = Workflow(globals(), workflow_store)
+import projection_v2
+projection_v2.install(globals())  # Offline replay only; live engine is unchanged.
 _local_workspace_load = workspace_load
 
 
@@ -10053,6 +10056,13 @@ if "--prepare-saved" in sys.argv:
         print(encode(prepare_saved_board(workflow, board, budget_seconds=420, max_picks=300)))
     else:
         print("No active preparation request for today's Pacific date. No feed or odds requests made.")
+    raise SystemExit(0)
+
+
+if "--backtest" in sys.argv:
+    if not _database_online:
+        raise SystemExit("Permanent database unavailable; backtest skipped.")
+    projection_v2.print_cli_backtest(workflow_store)
     raise SystemExit(0)
 
 
