@@ -48,6 +48,28 @@ class CaptureTests(unittest.TestCase):
         card=f.decode(game,NOW.isoformat(),NOW)[0]
         self.assertNotIn('Sportsbook Quotes',card)
         self.assertEqual(card['Line Type'],'Standard')
+    def test_legacy_snapshot_recovers_exact_saved_evidence_without_refetch(self):
+        game=self.game();get=Mock(side_effect=[response([game]),response(game)])
+        store=Store()
+        cards,_=f.download(store,'key',NOW,get,markets=f.BOARD_MARKETS)
+        saved=store.query('SELECT key,payload FROM sports_records WHERE namespace=? AND key LIKE ?',
+                          ('source','the_odds_api_daily_v2:%'),True)
+        import json
+        key,payload=saved[0];snapshot=json.loads(payload)
+        for card in snapshot['rows']:card.pop('Sportsbook Quotes',None)
+        store.put('source',key,snapshot)
+        restored,_=f.download(store,'key',NOW,get,markets=f.BOARD_MARKETS)
+        self.assertEqual(get.call_count,2)
+        self.assertEqual(len(restored[0]['Sportsbook Quotes']),4)
+        self.assertEqual(restored[0]['Provider fetched at'],cards[0]['Provider fetched at'])
+        # A later game response cannot retrofit new prices into the earlier capture.
+        source=store.query('SELECT key,payload FROM sports_records WHERE namespace=? AND key LIKE ?',
+                           ('source','the_odds_api_game_v2:%'),True)[0]
+        body=json.loads(source[1]);body['fetched_at']='2026-11-10T00:31:00Z';store.put('source',source[0],body)
+        for card in snapshot['rows']:card.pop('Sportsbook Quotes',None)
+        store.put('source',key,snapshot)
+        restored,_=f.download(store,'key',NOW,get,markets=f.BOARD_MARKETS)
+        self.assertNotIn('Sportsbook Quotes',restored[0])
     def test_teammate_absence_does_not_invent_minutes_or_return(self):
         report=from_availability({'available':True,'teammates':[
             {'player_id':'1','status':'Out'},{'player_id':'2','status':'Out'},

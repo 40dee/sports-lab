@@ -199,6 +199,26 @@ def prune_unavailable_lines(rows, report):
     return kept
 
 
+def reuse_saved_sportsbooks(store, rows, profile, fingerprint):
+    """Recover discarded evidence only from the card's exact original capture."""
+    import copy
+    cards=copy.deepcopy(rows)
+    cache={}
+    for card in cards:
+        event=str(card.get('Provider Event ID') or '')
+        if not event or card.get('Platform')!='prizepicks':continue
+        if event not in cache:
+            cache[event]=store.get('source','the_odds_api_game_v2:'+profile+fingerprint+':'+event) or {}
+        saved=cache[event]
+        body=saved.get('event')
+        captured=stamp(saved.get('fetched_at'))
+        original=stamp(card.get('Provider fetched at'))
+        if not captured or original!=captured or not isinstance(body,dict) or str(body.get('id'))!=event:
+            continue
+        attach_quotes([card],body,saved['fetched_at'],captured,MARKETS)
+    return cards
+
+
 def download(store, api_key, current=None, get=None, markets=None):
     markets = tuple(markets or FANTASY_MARKETS)
     if not markets or any(m.removesuffix('_alternate') not in MARKETS for m in markets) or len(set(markets)) != len(markets):
@@ -222,14 +242,15 @@ def download(store, api_key, current=None, get=None, markets=None):
         # board must never make stale lines look freshly verified.
         saved_report=reclassify_saved_coverage(store,snapshot['report'],profile,fingerprint,markets)
         saved_report.update(http_requests=0,games_requested=0,reused_snapshot=True)
-        store.put('source',snapshot_key,dict(snapshot,complete=saved_report['complete'],report=saved_report))
+        saved_rows=reuse_saved_sportsbooks(store,snapshot.get('rows') or [],profile,fingerprint)
+        store.put('source',snapshot_key,dict(snapshot,rows=saved_rows,complete=saved_report['complete'],report=saved_report))
         store.put('source','the_odds_api_fallback_latest',saved_report)
         coverage=saved_report.get('game_coverage') or []
         store.put('board_download',day,{'day':day,'provider':'The Odds API','state':'saved snapshot',
             'updated_at':datetime.now(timezone.utc).isoformat(),'games_total':saved_report.get('games_available'),
             'games_done':len(coverage),'games_with_lines':sum(any(g.get('market_counts',{}).values()) for g in coverage),
             'lines':len(snapshot.get('rows') or [])})
-        return snapshot.get('rows') or [],saved_report
+        return saved_rows,saved_report
     claimed=store.query(
         'INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING RETURNING key',
         ('daily_board_capture',snapshot_key,'{}',current.isoformat()),fetch=True)
