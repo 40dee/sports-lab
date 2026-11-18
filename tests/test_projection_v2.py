@@ -63,3 +63,24 @@ class ReplayTests(unittest.TestCase):
   away,_=v2.vegas_environment_factor("B","PTS",ctx,adv,str.lower)
   self.assertGreater(home,1)
   self.assertLess(away,1)
+
+class BoundedReadTests(unittest.TestCase):
+ def test_batches_are_bounded_and_missing_keys_do_not_fetch_individually(self):
+  class Store:
+   def __init__(self):self.calls=[]
+   def query(self,sql,args,fetch):
+    self.calls.append(args)
+    return [(key,json.dumps({"key":key})) for key in args[1:]]
+   def get(self,*args):raise AssertionError("No individual remote reads")
+  store=Store()
+  found=v2._batch_fetch(store,"source",[str(i) for i in range(121)])
+  self.assertEqual(len(found),121)
+  self.assertEqual(len(store.calls),3)
+  self.assertTrue(all(len(args)<=51 for args in store.calls))
+ def test_standard_scope_never_includes_other_platforms_or_special_tiers(self):
+  store,env=ReplayTests().setup_data()
+  grades=dict(store.items("grade"))
+  for key,f in store.items("forecast"):
+   f["card"]["Line Type"]="Goblin";store.put("forecast",key,f)
+  self.assertEqual(v2._replay_candidates(store,env,grades,600,"standard_one_per_stat"),[])
+  self.assertEqual(len(v2._replay_candidates(store,env,grades,600,"all_selectable")),2)
