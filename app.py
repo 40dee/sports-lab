@@ -1556,7 +1556,7 @@ def render_combos(wf, st):
             if key[1] in ('combo_suggestions','health','combo_model'):
                 cache.pop(key,None)
     st.subheader('Combos')
-    st.markdown("""<style>
+    st.markdown(ui_html("""<style>
     [class*="st-key-combo_option_"]{background:radial-gradient(ellipse at 100% 0%,#8b5cf614,transparent 65%),#0d1822;border:1px solid #1d3242!important;border-radius:16px!important;padding:18px!important;box-shadow:0 8px 24px #00000024;}
     [class*="st-key-combo_option_"] [data-testid="stExpander"] details{background:#0d1822!important;border:1px solid #1d3242!important;border-radius:10px!important;overflow:hidden;}
     [class*="st-key-combo_option_"] [data-testid="stExpander"] summary{background:#102431!important;color:#cbd9e2!important;}
@@ -1567,7 +1567,7 @@ def render_combos(wf, st):
     .combo-choice.more{color:#64e4b0;}.combo-choice.less{color:#ff8caa;}
     .combo-projection{text-align:right;}.combo-projection span{display:block;font-size:10px;color:#9db1c0;}.combo-projection strong{display:block;margin-top:3px;font-size:18px;color:#23e689;}
     @media(max-width:600px){.combo-leg{grid-template-columns:minmax(0,1fr) 66px 68px;gap:7px;padding:11px 9px;}.combo-player strong{font-size:12px;}.combo-player span{font-size:10px;}[class*="st-key-combo_option_"]{padding:12px!important;}}
-    </style>""",unsafe_allow_html=True)
+    </style>"""),unsafe_allow_html=True)
     mode=st.segmented_control('Combo view',['Suggestions','Results & learning','Played entries'],default='Suggestions',key='combo_mode') or 'Suggestions'
     if mode=='Suggestions':
         try:refresh_combo_health(wf)
@@ -1686,7 +1686,7 @@ def render_combos(wf, st):
                 shared=sum(exposure.get(str(leg['player_id']),0)>0 for leg in combo['legs'])
                 if shared:
                     st.caption(f'Player overlap: {shared} of {size} also appear in other saved sizes or played entries. These slips share outcomes.')
-                st.markdown(combo_legs_html(combo['legs'],{leg['forecast_id']:wf.store.get('forecast',leg['forecast_id']) for leg in combo['legs']}),unsafe_allow_html=True)
+                st.markdown(ui_html(combo_legs_html(combo['legs'],{leg['forecast_id']:wf.store.get('forecast',leg['forecast_id']) for leg in combo['legs']})),unsafe_allow_html=True)
                 ranking_version=(combo.get('ranking_model') or {}).get('version','original-gap-v1')
                 st.caption('Ranking: '+ranking_version+' · Balances weakest and average separation, with pair adjustments and a repeated-stat penalty. Learned influence is capped and experimental; frozen MORE/LESS projections are unchanged.')
                 combo_played_button(wf.store,combo,st,'suggestion')
@@ -4544,9 +4544,9 @@ def render_results_dashboard(wf, st):
     wins, losses, pending = (int(visible['Outcome'].eq(value).sum()) for value in ('WIN', 'LOSS', 'PENDING'))
     metrics=[('Settled picks',wins+losses),('Wins',wins),('Losses',losses),
              ('Hit rate',f'{wins/(wins+losses):.1%}' if wins+losses else '—')]
-    st.markdown('<div class="sl-results-kpis">'+''.join(
+    st.markdown(ui_html('<div class="sl-results-kpis">'+''.join(
         '<div class="sl-results-kpi"><span>'+ui_text(label)+'</span><strong>'+ui_text(value)+'</strong></div>'
-        for label,value in metrics)+'</div>',unsafe_allow_html=True)
+        for label,value in metrics)+'</div>'),unsafe_allow_html=True)
     daily = results_daily_summary(visible)
     if wins + losses:
         st.vega_lite_chart({'data': {'values': daily}, 'height': 210,
@@ -10206,6 +10206,11 @@ if _password:
 import html as _html
 
 
+def ui_html(value):
+    """Prevent Markdown code blocks after optional HTML fragments are empty."""
+    return '\n'.join(line.strip() for line in str(value).splitlines() if line.strip())
+
+
 def ui_text(value):
     return _html.escape(str(value if value is not None else ''))
 
@@ -10403,7 +10408,7 @@ def ui_card(card, frozen, saved=False):
     elif not result:footer.append((workflow_store.get('calculation_status',identity(card)) or {}).get('reason') or 'Projection pending')
     else:footer.append('Saved pregame · Estimates experimental')
     tier_label=tier_note or tier or platform
-    st.markdown(f'''<div class="sl-card sl-compact">
+    st.markdown(ui_html(f'''<div class="sl-card sl-compact">
       <div class="sl-person">{portrait}<div class="sl-player-info">
       <h3>{ui_text(name)}{marker_html}</h3><div class="sl-team">{ui_text(card.get('Game', ''))} · {ui_text(tipoff)}</div>
       <div class="sl-prop">{ui_text(stat)} · Line {line_text}</div></div>
@@ -10413,16 +10418,17 @@ def ui_card(card, frozen, saved=False):
       <span class="sl-badge">{ui_text(tier_label)}</span></div>
       <div class="sl-badges">{ui_card_badges(result,direction)}</div>
       {ui_sparkline(result.get("recent_values"),line,direction)}
-      <div class="sl-footer">{ui_text(' · '.join(footer))}</div></div>''', unsafe_allow_html=True)
+      <div class="sl-footer">{ui_text(' · '.join(footer))}</div></div>'''), unsafe_allow_html=True)
     if fantasy_weights(card):ui_fantasy_contributions(card,result)
     key = identity(card)
-    left, right = st.columns([3, 1])
-    if left.button('View research ›', key='detail_' + key, use_container_width=True):
-        st.session_state['selected_prop_card'] = dict(card)
-        st.rerun()
-    if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, disabled=not saved and (not fresh or not pick_is_selectable(card, result)), use_container_width=True):
-        ui_save_pick(card, frozen)
-        st.rerun()
+    with st.container(key='pick_actions_'+key):
+        left, right = st.columns([7, 3], gap='small')
+        if left.button('View research ›', key='detail_' + key, use_container_width=True):
+            st.session_state['selected_prop_card'] = dict(card)
+            st.rerun()
+        if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, disabled=not saved and (not fresh or not pick_is_selectable(card, result)), use_container_width=True):
+            ui_save_pick(card, frozen)
+            st.rerun()
 
 
 def ui_history(card, frozen=None):
@@ -10700,11 +10706,11 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
                 if photo else '<div class="sl-photo sl-detail-photo sl-initial">' + ui_text(''.join(w[0] for w in name.split()[:2])) + '</div>')
     line = ui_number(card.get('Line'))
     line_text = f'{line:g}' if line is not None else '—'
-    st.markdown(f'''<div class="sl-detail-heading"><div class="sl-person">{portrait}<div>
+    st.markdown(ui_html(f'''<div class="sl-detail-heading"><div class="sl-person">{portrait}<div>
     <div class="sl-eyebrow">PLAYER BREAKDOWN</div><h2>{ui_text(name)} {ui_tier_marker(card)}</h2>
     <div class="sl-team">{ui_text(card.get('Game', ''))}</div>
     <div class="sl-prop">{ui_text(ui_stat(card))} · {ui_text(str(card.get('Platform', '')).upper())}{(' · Line type unverified') if str(card.get('Platform', '')).lower() == 'prizepicks' and str(card.get('Line Type', '')).strip().lower() not in ('standard', 'regular', 'goblin', 'demon') else ' · '+ui_text(card.get('Line Type',''))}</div>
-    </div></div><div class="sl-badges">{ui_card_badges(result,result.get('direction'))}</div></div>''', unsafe_allow_html=True)
+    </div></div><div class="sl-badges">{ui_card_badges(result,result.get('direction'))}</div></div>'''), unsafe_allow_html=True)
     if result:
         direction = str(result.get('direction', '')).upper()
         side = ('↑ MORE' if direction == 'MORE' else '↓ LESS' if direction == 'LESS' else 'Not calculated')
@@ -10714,9 +10720,9 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
         projection = ui_number(result.get('projection'))
         probability = ui_number(result.get('estimated_hit_probability'))
         if not pick_is_selectable(card, result): probability = None
-        st.markdown(f'''<div class="sl-hero"><div class="sl-side {side_class}">{ui_text(side)} {line_text}</div>
+        st.markdown(ui_html(f'''<div class="sl-hero"><div class="sl-side {side_class}">{ui_text(side)} {line_text}</div>
         <div class="sl-proj"><small>Model projection</small><b>{f'{projection:.2f}' if projection is not None else '—'}</b></div>
-        <div class="sl-proj"><small>Estimated hit</small><b>{f'{probability:.0%}' if probability is not None else '—'}</b></div></div>''', unsafe_allow_html=True)
+        <div class="sl-proj"><small>Estimated hit</small><b>{f'{probability:.0%}' if probability is not None else '—'}</b></div></div>'''), unsafe_allow_html=True)
         st.caption('Frozen pregame forecast · Experimental probability estimate')
         if not pick_is_selectable(card, result):
             st.warning(pick_side_note(card, result))
@@ -11047,6 +11053,15 @@ st.markdown("""<style>
  .st-key-mobile_stat_pills button {padding:5px 8px!important;flex-shrink:0;}
  .st-key-mobile_stat_pills button p {font-size:.73rem!important;white-space:nowrap;}
  .sl-compact .sl-person h3{font-size:.94rem;}.sl-compact .sl-side{font-size:.72rem;padding:6px;max-width:95px;}
+}
+
+@media(max-width:600px){
+ [class*="st-key-pick_actions_"] [data-testid="stHorizontalBlock"]{flex-wrap:nowrap!important;gap:6px!important;align-items:center;}
+ [class*="st-key-pick_actions_"] [data-testid="stColumn"]{min-width:0!important;}
+ [class*="st-key-pick_actions_"] [data-testid="stColumn"]:first-child{flex:7 1 0%!important;width:70%!important;}
+ [class*="st-key-pick_actions_"] [data-testid="stColumn"]:last-child{flex:3 1 0%!important;width:30%!important;}
+ [class*="st-key-pick_actions_"] button{min-height:34px!important;padding:4px 6px!important;}
+ [class*="st-key-pick_actions_"] button p{font-size:.75rem!important;white-space:nowrap;}
 }
 </style>""", unsafe_allow_html=True)
 def render_pp_tier_refresh():
