@@ -5,6 +5,28 @@ import projection_v2 as v2
 import test_combo_regression as fixtures
 
 class ReplayTests(unittest.TestCase):
+ def test_all_history_and_disjoint_tiers_use_frozen_book_pairs(self):
+  store,env=self.setup_data()
+  for i,(key,f) in enumerate(store.items('forecast')):
+   f['result']['selection_allowed']=None
+   f['result']['standardized_gap']=.25 if i==0 else .5
+   f['result']['market']={'book':'draftkings','match_method':'teams-time-player-stat-period-line','more':.6 if i==0 else .4,'less':.4 if i==0 else .6}
+   store.put('forecast',key,f)
+  report=v2.run_backtest(store,env,max_samples=None)
+  self.assertEqual(report['picks'],2)
+  self.assertIsNone(report['max_samples'])
+  for version in ('v1','v2'):
+   tiers=[r for r in report['by_edge_tier'] if r['version']==version]
+   self.assertEqual(sum(r['picks'] for r in tiers),2)
+   groups=[r for r in report['by_sportsbook_agreement'] if r['version']==version]
+   self.assertEqual(sum(r['picks'] for r in groups),2)
+  v1={r['agreement']:r['picks'] for r in report['by_sportsbook_agreement'] if r['version']=='v1'}
+  self.assertEqual(v1,{'Agrees':1,'Disagrees':1,'Neutral':0,'Unavailable':0})
+ def test_unverified_saved_market_cannot_be_used_for_agreement(self):
+  self.assertIsNone(v2.saved_book_direction({'book':'draftkings','more':.6,'less':.4}))
+  verified={'book':'draftkings','match_method':'teams-time-player-stat-period-line','more':.5,'less':.5}
+  self.assertEqual(v2.saved_book_direction(verified),'NEUTRAL')
+  self.assertIsNone(v2.saved_book_direction(dict(verified,more=.7)))
  def setup_data(self):
   store=fixtures.populated(2)
   tree=fixtures.tree
@@ -84,3 +106,4 @@ class BoundedReadTests(unittest.TestCase):
    f["card"]["Line Type"]="Goblin";store.put("forecast",key,f)
   self.assertEqual(v2._replay_candidates(store,env,grades,600,"standard_one_per_stat"),[])
   self.assertEqual(len(v2._replay_candidates(store,env,grades,600,"all_selectable")),2)
+

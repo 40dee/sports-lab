@@ -14,8 +14,11 @@ exec(compile(ast.Module(body=nodes,type_ignores=[]),"app.py","exec"),env)
 if not env["_database_online"]:
     raise SystemExit("Permanent storage unavailable")
 projection_v2.install(env)
-projection_v2.print_cli_backtest(env["workflow_store"])
+projection_v2.print_cli_backtest(env["workflow_store"],max_samples=None)
 
 # Bounded 600-candidate Standard replay; batched saved-evidence reads.
 
 # Report stat, direction, gap/probability cutoffs and exact replay cohort IDs.
+
+
+# Full saved settled Standard cohort, disjoint edge tiers and frozen sportsbook agreement.

@@ -166,7 +166,7 @@ def _replay_candidates(store, env, grades, max_samples, scope):
         card=frozen.get("card") or {}
         if grade.get("status")!="FINAL" or grade.get("outcome") not in ("WIN","LOSS"):continue
         platform=str(card.get("Platform","")).lower()
-        tier=str(card.get("Line Type","")).lower()
+        tier=str(card.get("Line Type") or card.get("Line type") or "").lower()
         if scope=="standard_one_per_stat" and (platform!="prizepicks" or tier not in ("standard","regular")):continue
         if scope=="standard_one_per_stat":
             signature=(str(frozen.get("event_id")),str(card.get("Player","")).lower(),
@@ -174,35 +174,55 @@ def _replay_candidates(store, env, grades, max_samples, scope):
             if signature in seen:continue
             seen.add(signature)
         selected.append((key,frozen))
-        if len(selected)>=max_samples:break
+        if max_samples is not None and len(selected)>=max_samples:break
     return selected
+
+def _saved_replays(store, candidates):
+    """Bound memory to 50 forecasts and their saved inputs, including all-history runs."""
+    for offset in range(0,len(candidates),50):
+        batch=candidates[offset:offset+50]
+        full=_batch_fetch(store,"forecast",[key for key,_ in batch])
+        refs=set()
+        for frozen in full.values():
+            for field in ("games","advanced"):
+                value=(frozen.get("result") or {}).get(field)
+                if isinstance(value,dict) and value.get("source_ref"):
+                    refs.add(value["source_ref"])
+        cache={key:value.get("data") for key,value in _batch_fetch(store,"source",refs).items()}
+        for key,_ in batch:
+            yield key,full.get(key),cache
+
+def saved_book_direction(market):
+    """Use frozen exact-match evidence only, never today's odds for an old game."""
+    if not isinstance(market, dict) or market.get('book') != 'draftkings':
+        return None
+    if market.get('match_method') != 'teams-time-player-stat-period-line':
+        return None
+    try:
+        more, less = float(market['more']), float(market['less'])
+        if not all(math.isfinite(p) and 0 < p < 1 for p in (more, less)):
+            return None
+        if abs(more + less - 1) > 1e-6:
+            return None
+        return 'NEUTRAL' if abs(more-less) < 1e-9 else 'MORE' if more > less else 'LESS'
+    except (KeyError, TypeError, ValueError):
+        return None
+
 
 def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'):
     env = env or _env_ref
     raw = getattr(store,"_store",store)
     grades = dict(raw.items("grade"))
-    if max_samples not in (300,600,1200):raise ValueError("Choose 300, 600 or 1200 samples")
+    if max_samples not in (None,300,600,1200):raise ValueError("Choose all history, 300, 600 or 1200 samples")
     if scope not in ("standard_one_per_stat","all_selectable"):raise ValueError("Unsupported replay scope")
     candidates=_replay_candidates(raw,env,grades,max_samples,scope)
-    full=_batch_fetch(raw,"forecast",[key for key,_ in candidates])
-    refs=set()
-    for frozen in full.values():
-        for field in ("games","advanced"):
-            value=(frozen.get("result") or {}).get(field)
-            if isinstance(value,dict) and value.get("source_ref"):refs.add(value["source_ref"])
-    sources=_batch_fetch(raw,"source",refs)
-    cache = {key:value.get("data") for key,value in sources.items()}
-    def resolve(value):
-        if isinstance(value,dict) and value.get("source_ref"):
-            ref = value["source_ref"]
-            if ref not in cache:
-                cache[ref]=None
-            return cache[ref]
-        return value
     rows, excluded = [], Counter()
     # Per original line/market, never replace a frozen outcome with a later forecast.
-    for key,_light in candidates:
-        frozen=full.get(key)
+    for key,frozen,cache in _saved_replays(raw,candidates):
+        def resolve(value):
+            if isinstance(value,dict) and value.get("source_ref"):
+                return cache.get(value["source_ref"])
+            return value
         if not frozen:
             excluded["missing_full_forecast"]+=1
             continue
@@ -216,8 +236,10 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
             created = pd.to_datetime(frozen["created_at"],utc=True,errors="coerce")
             if pd.isna(start) or pd.isna(created) or created>=start:
                 raise ValueError("late_or_missing_timestamp")
-            if not result.get("selection_allowed",True) or result.get("tie"):
+            if result.get("selection_allowed") is False or result.get("tie"):
                 raise ValueError("original_not_selectable")
+            if not env["pick_is_selectable"](card,result):
+                raise ValueError("original_side_not_offered")
             actual,line,v1 = float(grade["actual"]),float(card["Line"]),float(result["projection"])
             if not all(math.isfinite(v) for v in (actual,line,v1)) or line<=0 or actual==line:
                 raise ValueError("invalid_numbers_or_push")
@@ -294,7 +316,7 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
                 platform=str(card.get("Platform","")).lower(),tier=str(card.get("Line Type","")).lower(),
                 actual=actual,v1_proj=v1,v2_proj=projection,v1_win=int(grade["outcome"]=="WIN"),
                 v2_win=int(actual>line if v2_dir=="MORE" else actual<line),
-                v1_prob=old_probability,v2_prob=probability,prior_available=bool(hist.SEASON.ne(season).any()),
+                v1_prob=old_probability,v2_prob=probability,book_direction=saved_book_direction(result.get("market")),prior_available=bool(hist.SEASON.ne(season).any()),
                 vegas_available=has_vegas))
         except (KeyError,TypeError,ValueError,ZeroDivisionError,OverflowError) as error:
             excluded[str(error)[:100]]+=1
@@ -326,6 +348,25 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
                 group=frame[numeric.ge(threshold)]
                 cutoffs.append(dict(version=version,metric=field,cutoff=threshold,picks=len(group),
                     hit_rate=float(np.average(group[version+"_win"],weights=group.weight)) if len(group) else None))
+    edge_tiers=[]
+    agreement=[]
+    for version in ("v1","v2"):
+        gap=pd.to_numeric(frame[version+"_gap"],errors="coerce")
+        for label,mask in (("<0.25",gap.lt(.25)),("0.25–<0.50",gap.ge(.25)&gap.lt(.5)),
+                           ("0.50+",gap.ge(.5)),("Unavailable",gap.isna())):
+            group=frame[mask]
+            edge_tiers.append(dict(version=version,tier=label,picks=len(group),
+                hit_rate=float(np.average(group[version+"_win"],weights=group.weight)) if len(group) else None))
+        for label,mask in (("Agrees",frame.book_direction.eq(frame[version+"_dir"])),
+                           ("Disagrees",frame.book_direction.isin(["MORE","LESS"])&frame.book_direction.ne(frame[version+"_dir"])),
+                           ("Neutral",frame.book_direction.eq("NEUTRAL")),
+                           ("Unavailable",frame.book_direction.isna())):
+            group=frame[mask]
+            agreement.append(dict(version=version,agreement=label,picks=len(group),
+                hit_rate=float(np.average(group[version+"_win"],weights=group.weight)) if len(group) else None))
+    result["by_edge_tier"]=edge_tiers
+    result["by_sportsbook_agreement"]=agreement
+    result["sportsbook_note"]="Only frozen semantically verified DraftKings pairs are used. Missing or legacy unverified quotes remain unavailable; no current odds are fetched."
     result["by_direction"]=by_direction
     result["by_confidence_cutoff"]=cutoffs
     result["by_original_direction"]=[dict(direction=direction,**summary(group)) for direction,group in frame.groupby("v1_dir")]
@@ -340,15 +381,15 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
         limitation="Uses only stored pregame logs and frozen matchup factors. Historical logs may contain only L15, preventing prior-season shrinkage. Fixed heuristics were not selected on an untouched holdout. Not a production promotion or proof of calibrated probabilities.")
     return result
 
-def print_cli_backtest(store):
-    print("V2_BACKTEST_JSON "+json.dumps(run_backtest(store),allow_nan=False),flush=True)
+def print_cli_backtest(store, max_samples=600):
+    print("V2_BACKTEST_JSON "+json.dumps(run_backtest(store,max_samples=max_samples),allow_nan=False),flush=True)
 
 def render_backtest_panel(store, st):
     with st.expander("v2 Projection Backtest (offline · no API calls)"):
         st.caption("Experimental saved-data replay. Current live model stays active; no forecasts or grades are overwritten.")
         scope_label=st.selectbox("Backtest scope",["PrizePicks Standard: one line per player/stat/game","All selectable: separate platform and tier reports"],key="v2_bt_scope")
         scope="standard_one_per_stat" if scope_label.startswith("PrizePicks") else "all_selectable"
-        limit=st.selectbox("Max recent candidates",[300,600,1200],index=1,key="v2_bt_limit")
+        limit=st.selectbox("Max recent candidates",[300,600,1200,None],index=1,format_func=lambda value: "All saved settled history" if value is None else str(value),key="v2_bt_limit")
         if st.button("Run v2 Backtest",key="run_v2_backtest_btn"):
             try:
                 with st.spinner("Replaying saved pregame evidence..."):
@@ -366,7 +407,11 @@ def render_backtest_panel(store, st):
                 st.caption("Direction and cutoff rows use each version's own direction and scores; denominators can differ. Gap is separation, not a calibrated confidence or profit estimate.")
                 st.dataframe(pd.DataFrame(result["by_direction"]),hide_index=True,width="stretch")
                 st.dataframe(pd.DataFrame(result["by_confidence_cutoff"]),hide_index=True,width="stretch")
+                st.dataframe(pd.DataFrame(result.get("by_edge_tier",[])),hide_index=True,width="stretch")
+                st.dataframe(pd.DataFrame(result.get("by_sportsbook_agreement",[])),hide_index=True,width="stretch")
+                st.caption(result.get("sportsbook_note",""))
                 st.dataframe(pd.DataFrame(result["by_day"]),hide_index=True,width="stretch")
                 st.caption(result["limitation"])
                 st.caption(f'Prior-season evidence: {result["prior_history_rows"]} rows · Usable Vegas context: {result["vegas_rows"]} rows')
             st.write({"excluded":result["excluded"]})
+

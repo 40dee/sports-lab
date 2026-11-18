@@ -67,7 +67,8 @@ class ResultsDisplayTests(unittest.TestCase):
         frozen['card']['Period'] = 'result'
         key = fixtures.env['identity'](frozen['card'])
         frozen['id'] = key
-        frozen['result'].update(selection_allowed=True, estimated_hit_probability=.6)
+        # Legacy forecasts have no selection_allowed key; verified Standard sides still count.
+        frozen['result'].update(estimated_hit_probability=.6)
         store.put('forecast', key, frozen)
         store.put('grade', key, {'status': 'FINAL', 'outcome': 'LOSS', 'actual': 18})
         later = copy.deepcopy(frozen)
