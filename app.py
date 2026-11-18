@@ -8859,6 +8859,18 @@ def fantasy_date_label(value, reference=None):
     return prefix + stamp.strftime('%b ') + str(stamp.day) + (f', {stamp.year}' if stamp.year != today.year else '')
 
 
+def fantasy_quote_review_note(item, card, line_checks, reference=None):
+    if not item.get('upcoming'):return 'Saved pregame projection: this game has started.'
+    fresh,note=line_freshness(card,reference,line_checks)
+    if fresh:return None
+    if note.startswith('Saved quote captured '):
+        field='Tier Fetched At' if card.get('Tier Source')=='prizepicksapi.com' else 'Odds checked (UTC)'
+        stamp=utc_timestamp(card.get(field))
+        if pd.notna(stamp) and slate_day(stamp)==slate_day(reference):
+            return 'Daily saved board · Captured '+stamp.tz_convert(SLATE_TIMEZONE).strftime('%I:%M %p PT')
+    return note
+
+
 def compact_fantasy_card_html(item, status=None):
     from html import escape
     card = item['card']
@@ -8881,7 +8893,9 @@ def compact_fantasy_card_html(item, status=None):
     if not pick_is_selectable(card, result):
         note += '<div class="fc-note">' + text(pick_side_note(card, result)) + '</div>'
     if item.get('review_note'):
-        note += '<div class="fc-note">' + text(item['review_note']) + ' Saved model direction: ' + text(direction) + '.</div>'
+        captured=str(item['review_note']).startswith('Daily saved board')
+        note_class='fc-capture' if captured else 'fc-note'
+        note += '<div class="'+note_class+'">' + text(item['review_note']) + ('' if captured else ' Saved model direction: ' + text(direction) + '.') + '</div>'
     marker = ui_tier_marker(card)
     tier = card.get('Line Type') or 'Unverified'
     return f'''<div class="fc-card">
@@ -8927,6 +8941,7 @@ def render_fantasy_plays(wf, st):
     [class*="st-key-fantasy_tile_"] [data-testid="stButton"] button{background:transparent;border:0;text-align:left;justify-content:flex-start;padding:0;min-height:30px;color:#f4f1ff;font-weight:750;}
     [class*="st-key-fantasy_tile_"] [data-testid="stButton"] button:hover{color:#c9b4f4;}
     .fc-card:hover{border-color:#8d75c2;box-shadow:0 8px 26px #00000038;}
+    .fc-capture{font-size:10px;color:#aaa4bb;margin-top:8px;}
     .fc-name{font-size:15px;font-weight:750;line-height:1.25;overflow-wrap:anywhere;color:#f4f1ff;}
     .fc-game{font-size:11px;color:#b5a0e5;margin:5px 0;line-height:1.3;}
     .fc-meta{font-size:10px;color:#a6a0b8;display:flex;justify-content:space-between;gap:5px;}
@@ -8993,8 +9008,7 @@ def render_fantasy_plays(wf, st):
         eligible_signatures={market_signature(item['card']) for item in upcoming}
         visible = upcoming if fantasy_board_view=='Selectable only' else [
             dict(item,card=current_cards.get(market_signature(item['card']),item['card']),
-                **({'review_note':'Saved pregame projection: this game has started.' if not item['upcoming'] else 'Saved forecast only: line, availability or offered direction needs verification.'}
-                   if market_signature(item['card']) not in eligible_signatures else {})) for item in upcoming_all]
+                review_note=fantasy_quote_review_note(item,current_cards.get(market_signature(item['card']),item['card']),line_checks)) for item in upcoming_all]
         if upcoming_all and not upcoming and fantasy_board_view=='All saved lines':
             st.warning('Showing saved pregame projections for review in All saved lines; these are not current slip recommendations. The cards retain their original MORE/LESS projections, not verified live PrizePicks offers.')
             reasons = {}
