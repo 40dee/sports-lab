@@ -1019,8 +1019,13 @@ def combo_candidates(pool, size, policy, exposure=None):
             for j in old:
                 player=str(pool[j]['player_id'])
                 counts[player]=counts.get(player,0)+1
+        team_counts={}
+        for leg in pool:
+            team=str(leg['team_id'])
+            team_counts[team]=team_counts.get(team,0)+counts.get(str(leg['player_id']),0)
         def reuse(indexes):
-            return sum(counts.get(str(pool[j]['player_id']),0) for j in indexes)
+            return (sum(counts.get(str(pool[j]['player_id']),0) for j in indexes),
+                    sum(team_counts.get(str(pool[j]['team_id']),0) for j in indexes))
         beam=[()]
         for _ in range(size):
             next_beam=[]
