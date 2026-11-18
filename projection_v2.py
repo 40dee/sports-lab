@@ -1,6 +1,7 @@
 """Experimental v2 replay. No provider calls, writes, or live model replacement."""
 from __future__ import annotations
 import io
+import hashlib
 import json
 import math
 from collections import Counter
@@ -281,7 +282,14 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
             old_probability=result.get("estimated_hit_probability")
             old_probability=float(old_probability) if old_probability is not None else None
             if old_probability is not None and (not math.isfinite(old_probability) or not 0<=old_probability<=1):old_probability=None
-            rows.append(dict(day=start.tz_convert("America/Los_Angeles").date().isoformat(),event=str(frozen.get("event_id")),
+            dispersion=env["score_frame"](sample.head(15),card).dropna().std(ddof=1)
+            v2_gap=abs(projection-line)/dispersion if pd.notna(dispersion) and dispersion>1e-9 else None
+            v1_gap=result.get("standardized_gap")
+            try:
+                v1_gap=float(v1_gap)
+                if not math.isfinite(v1_gap):v1_gap=None
+            except (TypeError,ValueError):v1_gap=None
+            rows.append(dict(id=key,v1_dir=direction,v2_dir=v2_dir,v1_gap=v1_gap,v2_gap=v2_gap,day=start.tz_convert("America/Los_Angeles").date().isoformat(),event=str(frozen.get("event_id")),
                 player=str(result.get("player_id")),stat=result.get("stat_group",card.get("Stat")),
                 platform=str(card.get("Platform","")).lower(),tier=str(card.get("Line Type","")).lower(),
                 actual=actual,v1_proj=v1,v2_proj=projection,v1_win=int(grade["outcome"]=="WIN"),
@@ -306,6 +314,23 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
         out["calibration_n"]=len(cal)
         return out
     result=summary(frame)
+    by_direction=[]
+    cutoffs=[]
+    for version in ("v1","v2"):
+        for direction,group in frame.groupby(version+"_dir"):
+            by_direction.append(dict(version=version,direction=direction,picks=len(group),
+                hit_rate=float(np.average(group[version+"_win"],weights=group.weight))))
+        for field,thresholds in (("gap",(.25,.40,.60)),("prob",(.55,.58))):
+            for threshold in thresholds:
+                numeric=pd.to_numeric(frame[version+"_"+field],errors="coerce")
+                group=frame[numeric.ge(threshold)]
+                cutoffs.append(dict(version=version,metric=field,cutoff=threshold,picks=len(group),
+                    hit_rate=float(np.average(group[version+"_win"],weights=group.weight)) if len(group) else None))
+    result["by_direction"]=by_direction
+    result["by_confidence_cutoff"]=cutoffs
+    result["by_original_direction"]=[dict(direction=direction,**summary(group)) for direction,group in frame.groupby("v1_dir")]
+    result["cohort_ids"]=sorted(frame.id.tolist())
+    result["cohort_digest"]=hashlib.sha256(json.dumps(result["cohort_ids"]).encode()).hexdigest()
     result.update(version=ENGINE_VERSION,status="retrospective_diagnostic",excluded=dict(excluded),
         scope=scope,max_samples=max_samples,selected_candidates=len(candidates),
         by_platform_tier=[dict(platform=platform,tier=tier,**summary(group)) for (platform,tier),group in frame.groupby(["platform","tier"])],
@@ -338,6 +363,9 @@ def render_backtest_panel(store, st):
                 st.write({k:result[k] for k in ("picks","player_game_markets","v1_hit","v2_hit","v1_mae","v2_mae","v1_brier","v2_brier")})
                 st.dataframe(pd.DataFrame(result["by_platform_tier"]),hide_index=True,width="stretch")
                 st.dataframe(pd.DataFrame(result["by_stat"]),hide_index=True,width="stretch")
+                st.caption("Direction and cutoff rows use each version's own direction and scores; denominators can differ. Gap is separation, not a calibrated confidence or profit estimate.")
+                st.dataframe(pd.DataFrame(result["by_direction"]),hide_index=True,width="stretch")
+                st.dataframe(pd.DataFrame(result["by_confidence_cutoff"]),hide_index=True,width="stretch")
                 st.dataframe(pd.DataFrame(result["by_day"]),hide_index=True,width="stretch")
                 st.caption(result["limitation"])
                 st.caption(f'Prior-season evidence: {result["prior_history_rows"]} rows · Usable Vegas context: {result["vegas_rows"]} rows')
