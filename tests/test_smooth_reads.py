@@ -28,6 +28,17 @@ class SmoothReadTests(unittest.TestCase):
    'result':{'direction':'MORE','projection':14.5,'estimated_hit_probability':.61,'history_evidence':'x'*20000},'snapshot':{'raw':'x'*50000}}
   self.store.put('forecast','first',self.frozen)
   self.store.put('grade','first',{'outcome':'WIN','actual':15})
+ def test_recent_values_survive_store_and_compact_view(self):
+  values=[12.,8.,14.]
+  self.frozen['result']['recent_values']=values
+  self.store.put('forecast','first',self.frozen)
+  local=dict(env)
+  nodes=[n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='compact_forecast' or isinstance(n,ast.ClassDef) and n.name=='CompactViewStore']
+  exec(compile(ast.Module(body=nodes,type_ignores=[]),'app.py','exec'),local)
+  for records in (self.store.forecast_items(),local['CompactViewStore'](self.store).items('forecast')):
+   self.assertEqual(dict(records)['first']['result']['recent_values'],values)
+  fallback=SimpleNamespace(items=lambda _: [('first',self.frozen)])
+  self.assertEqual(dict(local['CompactViewStore'](fallback).items('forecast'))['first']['result']['recent_values'],values)
  def test_results_transfer_only_needed_fields_and_keep_exact_results(self):
   compact=self.store.research_forecast_items()
   self.assertLess(len(json.dumps(compact)),len(json.dumps(self.frozen))/50)

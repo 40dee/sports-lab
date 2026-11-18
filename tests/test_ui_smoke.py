@@ -12,7 +12,7 @@ class NavigationTests(unittest.TestCase):
             ('board_run',day):{'stage':'preparing','import_complete':False,'started_at':stamp},
             ('board_download',day):{'games_total':10,'games_done':4,'games_with_lines':4,'lines':100,'state':'partial'},
             ('preparation','last'):{'run_at':stamp,'total':100,'ready':25,'pending':70,'unavailable':5}}
-        for page in ('Plays','Fantasy','Combos'):
+        for page in ('Plays','Combos'):
             app.session_state['sports_lab_page_buttons']=page
             app.run()
             self.assertFalse(app.exception,list(app.exception))
@@ -49,7 +49,7 @@ class NavigationTests(unittest.TestCase):
         self.assertIn('>PASS</div>',cards[0])
         self.assertIn('0.49',cards[0])
         self.assertNotIn('↓ LESS</div>',cards[0])
-        self.assertTrue(any('Model estimate: LESS' in item.value for item in app.caption))
+        self.assertTrue(any('Model estimate: LESS' in item.value for item in app.markdown))
         self.assertTrue(all(button.disabled for button in app.button if button.label=='☆ Save'))
         self.assertEqual(store.get('forecast',key)['result']['direction'],'LESS')
 
@@ -62,7 +62,8 @@ class NavigationTests(unittest.TestCase):
         app.run()
         self.assertFalse(app.exception,list(app.exception))
         self.assertEqual(app.session_state['mobile_tier'],'Demon')
-        app.session_state['sports_lab_page_buttons']='Fantasy'
+        app.session_state['sports_lab_page_buttons']='Plays'
+        app.session_state['mobile_stat_pills']='Fantasy Score'
         app.run()
         self.assertFalse(app.exception,list(app.exception))
         self.assertEqual(app.session_state['fantasy_tier_filter'],'Standard')
@@ -70,7 +71,7 @@ class NavigationTests(unittest.TestCase):
     def test_all_pages_render_without_provider_credentials(self):
         app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
         self.assertFalse(app.exception,list(app.exception))
-        for page in ('Plays','Fantasy','Combos','Saved','Results','Settings'):
+        for page in ('Plays','Combos','Saved','Results','Settings'):
             with self.subTest(page=page):
                 app.session_state['sports_lab_page_buttons']=page
                 app.run()
@@ -149,20 +150,22 @@ class NavigationTests(unittest.TestCase):
         app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
         app.session_state['_sports_lab_offline_records_v1']=store.records
         app.session_state['v4_rows']=board['v4_rows']
-        app.session_state['sports_lab_page_buttons']='Fantasy'
+        app.session_state['sports_lab_page_buttons']='Plays'
+        app.session_state['mobile_stat_pills']='Fantasy Score'
         app.session_state['fantasy_board_scope_v2']='All saved lines'
         app.run()
         self.assertFalse(app.exception,list(app.exception))
         self.assertTrue(any('Showing saved pregame projections for review' in item.value for item in app.warning))
-        cards=[item.value for item in app.markdown if 'fc-card' in item.value and 'Player 0' in item.value]
+        cards=[item.value for item in app.markdown if 'sl-card sl-compact' in item.value and 'Player 0' in item.value]
         self.assertTrue(cards)
-        self.assertTrue(any('↑ MORE' in card and 'Saved model direction: MORE' in card for card in cards))
+        self.assertTrue(any('↑ MORE' in card and 'Verify line' in card for card in cards))
         self.assertFalse(any('No selectable upcoming Fantasy plays' in item.value for item in app.info))
-        self.assertTrue(any('Standard: 1' in item.value and 'Goblin: 1' in item.value and 'Demon: 1' in item.value for item in app.caption))
+        self.assertEqual(app.session_state['sports_lab_page'],'Plays')
+        self.assertEqual(app.session_state['mobile_stat_pills'],'Fantasy Score')
         self.assertEqual(app.session_state['fantasy_tier_filter'],'Standard')
         app.run()
         self.assertFalse(app.exception,list(app.exception))
-        cards=[item.value for item in app.markdown if '<div class="fc-card">' in item.value]
+        cards=[item.value for item in app.markdown if 'sl-card sl-compact' in item.value]
         self.assertEqual(len(cards),1)
         self.assertIn('Player 0',cards[0])
         self.assertNotIn('Player 1',cards[0])
@@ -185,5 +188,6 @@ class NavigationTests(unittest.TestCase):
         self.assertFalse(app.exception,list(app.exception))
         self.assertTrue(any(b.label=='Import and calculate these lines' for b in app.button))
         self.assertTrue(any(b.label=='Check account usage — no quota cost' for b in app.button))
+
 
 

@@ -29,7 +29,7 @@ class FantasyParityTests(unittest.TestCase):
         store.put('forecast',key,old)
         store.put('grade',key,{'status':'FINAL','outcome':'WIN','actual':45.5})
         store.put('board','board',board)
-        app=AppTest.from_file(str(fixtures.SOURCE),default_timeout=60).run()
+        app=AppTest.from_string(Path(fixtures.SOURCE).read_text().replace('\nrender_app_pages()\n','\nrender_fantasy_plays(workflow,st)\n'),default_timeout=60).run()
         app.session_state['_sports_lab_offline_records_v1']=store.records
         app.session_state['sports_lab_page_buttons']='Fantasy'
         app.session_state['fantasy_view_buttons_v2']='Results'
@@ -40,3 +40,4 @@ class FantasyParityTests(unittest.TestCase):
         self.assertTrue(any('1 green · 0 red' in x.value for x in app.caption))
         self.assertTrue(any(x.key=='fantasy_research_'+key and x.label.strip()=='Player 0' for x in app.button))
         self.assertTrue(any(x.label=='Fantasy directional hit rate' and x.value=='100.0%' for x in app.metric))
+

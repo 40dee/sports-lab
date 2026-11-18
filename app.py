@@ -1289,14 +1289,17 @@ def board_download_progress(store, **values):
     store.put('board_download',day,record)
 
 
-def render_live_board_status(store, st):
+def render_live_board_status(store, st, detailed=True):
     # Fragment refreshes must see other workers, not the browser's read cache.
     cache=getattr(store,'_read_cache',None)
     if isinstance(cache,dict):
         for namespace,key in (('board_run',slate_day()),('board_download',slate_day()),('preparation','last')):
             cache.pop(('get',namespace,key),None)
             cache.pop(('items',namespace,None),None)
-    render_board_run_status(store,st)
+    if detailed:
+        render_board_run_status(store,st)
+    else:
+        render_board_status_pill(store,st)
     run=store.get('board_run',slate_day()) or {}
     token=(run.get('stage'),run.get('finished_at'))
     prior=st.session_state.get('_board_live_stage')
@@ -1306,6 +1309,33 @@ def render_live_board_status(store, st):
             if key[1] in {'board','coverage','health','combo_suggestions','automation'} or (
                     key[1]=='forecast' and key[0] in ('compact_forecast','coverage_forecast','research_forecast')):
                 cache.pop(key,None)
+
+
+def render_board_status_pill(store, st):
+    """Read-only summary; worker completion never certifies pick eligibility."""
+    from html import escape
+    run=store.get('board_run',slate_day()) or {}
+    stage=run.get('stage')
+    coverage=store.get('coverage',slate_day()) or {}
+    if stage=='importing':
+        progress=store.get('board_download',slate_day()) or {}
+        total=progress.get('games_total')
+        label='Importing board'+(f" · {progress.get('games_done',0)}/{total} games" if total else '')
+    elif stage=='preparing':
+        progress=store.get('preparation','last') or {}
+        began,started=utc_timestamp(progress.get('run_at')),utc_timestamp(run.get('started_at'))
+        current=pd.notna(began) and pd.notna(started) and began>=started
+        label='Preparing picks'+(f" · {progress.get('ready',0)}/{progress['total']}" if current and progress.get('total') else '')
+    elif stage=='finished':
+        label='Saved board'
+        if coverage.get('board_scan_at')==run.get('board_scan_at') and coverage.get('ready') is not None:
+            label+=f" · {coverage['ready']} projections"
+        if not run.get('import_complete'):label+=' · Partial feed'
+        stamp=utc_timestamp(run.get('finished_at'))
+        if pd.notna(stamp):label+=' · '+stamp.tz_convert(SLATE_TIMEZONE).strftime('%I:%M %p PT')
+    elif stage=='failed':label='Worker interrupted · See Settings'
+    else:label='Waiting for saved board'
+    st.markdown('<div class="sl-status" role="status">● '+escape(label)+'</div>',unsafe_allow_html=True)
 
 
 def board_run_stage(store, stage, import_complete=None):
@@ -1481,15 +1511,16 @@ def combo_results_rows(store):
     return rows
 
 
-def combo_legs_html(legs):
+def combo_legs_html(legs, forecasts=None):
     from html import escape
     text=lambda value:escape(str(value))
     rows=[]
     for leg in legs:
         card=leg['card'];side=leg['direction']
+        evidence=((forecasts or {}).get(leg.get('forecast_id')) or {}).get('result') or leg.get('result') or {}
         direction_class='more' if side=='MORE' else 'less'
-        rows.append('<div class="combo-leg"><div class="combo-player"><strong>'+text(ui_name(card['Player']))+
-            '</strong><span>'+text(ui_stat(card))+' · '+text(card.get('Line Type') or 'Unverified')+
+        rows.append('<div class="combo-leg"><div class="combo-player"><strong>'+text(ui_name(card['Player']))+' '+ui_tier_marker(card)+
+            '</strong>'+ui_card_badges(evidence,side)+'<span>'+text(ui_stat(card))+' · '+text(card.get('Line Type') or 'Unverified')+
             ' · '+text(leg['games'])+' history games</span></div><div class="combo-choice '+direction_class+'">'+
             ('↑ ' if side=='MORE' else '↓ ')+text(side)+'<strong>'+text(card['Line'])+
             '</strong></div><div class="combo-projection"><span>Projection</span><strong>'+format(leg['projection'],'.2f')+
@@ -1526,15 +1557,15 @@ def render_combos(wf, st):
                 cache.pop(key,None)
     st.subheader('Combos')
     st.markdown("""<style>
-    [class*="st-key-combo_option_"]{background:radial-gradient(ellipse at 100% 0%,#8b5cf614,transparent 65%),#15151f;border:1px solid #393449!important;border-radius:16px!important;padding:18px!important;box-shadow:0 8px 24px #00000024;}
-    [class*="st-key-combo_option_"] [data-testid="stExpander"] details{background:#15151f!important;border:1px solid #393449!important;border-radius:10px!important;overflow:hidden;}
-    [class*="st-key-combo_option_"] [data-testid="stExpander"] summary{background:#211d30!important;color:#cbbce7!important;}
+    [class*="st-key-combo_option_"]{background:radial-gradient(ellipse at 100% 0%,#8b5cf614,transparent 65%),#0d1822;border:1px solid #1d3242!important;border-radius:16px!important;padding:18px!important;box-shadow:0 8px 24px #00000024;}
+    [class*="st-key-combo_option_"] [data-testid="stExpander"] details{background:#0d1822!important;border:1px solid #1d3242!important;border-radius:10px!important;overflow:hidden;}
+    [class*="st-key-combo_option_"] [data-testid="stExpander"] summary{background:#102431!important;color:#cbd9e2!important;}
     .combo-legs{margin:4px 0 10px;display:grid;gap:8px;}
-    .combo-leg{display:grid;grid-template-columns:minmax(0,1fr) 88px 88px;gap:12px;align-items:center;padding:13px 14px;background:#0e0f18;border:1px solid #2d293d;border-radius:11px;color:#f4f1ff;}
-    .combo-player strong{font-size:14px;display:block;}.combo-player span{display:block;margin-top:4px;font-size:11px;color:#aaa1bb;}
+    .combo-leg{display:grid;grid-template-columns:minmax(0,1fr) 88px 88px;gap:12px;align-items:center;padding:13px 14px;background:#07121b;border:1px solid #1d3242;border-radius:11px;color:#f4f1ff;}
+    .combo-player strong{font-size:14px;display:block;}.combo-player span{display:block;margin-top:4px;font-size:11px;color:#9db1c0;}
     .combo-choice{font-size:11px;text-align:center;font-weight:700;}.combo-choice strong{display:block;font-size:18px;margin-top:3px;color:#f4f1ff;}
     .combo-choice.more{color:#64e4b0;}.combo-choice.less{color:#ff8caa;}
-    .combo-projection{text-align:right;}.combo-projection span{display:block;font-size:10px;color:#aaa1bb;}.combo-projection strong{display:block;margin-top:3px;font-size:18px;color:#c9b4f4;}
+    .combo-projection{text-align:right;}.combo-projection span{display:block;font-size:10px;color:#9db1c0;}.combo-projection strong{display:block;margin-top:3px;font-size:18px;color:#23e689;}
     @media(max-width:600px){.combo-leg{grid-template-columns:minmax(0,1fr) 66px 68px;gap:7px;padding:11px 9px;}.combo-player strong{font-size:12px;}.combo-player span{font-size:10px;}[class*="st-key-combo_option_"]{padding:12px!important;}}
     </style>""",unsafe_allow_html=True)
     st.caption('PrizePicks · 2–6 players from different teams · Saved paper suggestions, not submitted entries')
@@ -1653,7 +1684,7 @@ def render_combos(wf, st):
                 shared=sum(exposure.get(str(leg['player_id']),0)>0 for leg in combo['legs'])
                 if shared:
                     st.caption(f'Player overlap: {shared} of {size} also appear in other saved sizes or played entries. These slips share outcomes.')
-                st.markdown(combo_legs_html(combo['legs']),unsafe_allow_html=True)
+                st.markdown(combo_legs_html(combo['legs'],{leg['forecast_id']:wf.store.get('forecast',leg['forecast_id']) for leg in combo['legs']}),unsafe_allow_html=True)
                 ranking_version=(combo.get('ranking_model') or {}).get('version','original-gap-v1')
                 st.caption('Ranking: '+ranking_version+' · Balances weakest and average separation, with pair adjustments and a repeated-stat penalty. Learned influence is capped and experimental; frozen MORE/LESS projections are unchanged.')
                 combo_played_button(wf.store,combo,st,'suggestion')
@@ -2137,6 +2168,13 @@ class Workflow:
                 axis=1,
                 min_count=len(columns),
             ).dropna()
+
+        recent_sample=sample[sample['GAME_DATE'] < min(pd.Timestamp.now(tz='UTC'),pd.to_datetime(card['Start (UTC)'],utc=True))].sort_values('GAME_DATE',ascending=False)
+        if 'GAME_ID' in recent_sample:recent_sample=recent_sample.drop_duplicates('GAME_ID')
+        recent_sample=recent_sample.head(10)
+        recent_scores=(self.e['score_frame'](recent_sample,card) if 'score_frame' in self.e else
+                       recent_sample[columns].apply(pd.to_numeric,errors='coerce').sum(axis=1,min_count=len(columns)))
+        result['recent_values']=[float(value) for value in reversed(recent_scores.tolist()) if pd.notna(value) and math.isfinite(float(value))]
 
         spread = (
             float(values.std(ddof=1))
@@ -9036,12 +9074,12 @@ def render_fantasy_plays(wf, st):
             return
     st.caption('PrizePicks NBA · Original saved pregame projections')
     st.markdown('''<style>
-    .fc-card{background:radial-gradient(ellipse at 100% 0%,#8b5cf615,transparent 65%),linear-gradient(145deg,#1b1b28,#11121b);border:1px solid #393449;border-radius:15px;padding:13px 14px 11px;margin:5px 0 2px;color:#f4f1ff;box-shadow:0 8px 22px #00000024;transition:border-color .16s ease,box-shadow .16s ease;}
-    [class*="st-key-fantasy_tile_"]{background:linear-gradient(145deg,#1b1b28,#11121b);border:1px solid #393449;border-radius:15px;padding:10px 12px 0;margin:5px 0 2px;}
+    .fc-card{background:radial-gradient(ellipse at 100% 0%,#8b5cf615,transparent 65%),linear-gradient(145deg,#1b1b28,#11121b);border:1px solid #1d3242;border-radius:15px;padding:13px 14px 11px;margin:5px 0 2px;color:#f4f1ff;box-shadow:0 8px 22px #00000024;transition:border-color .16s ease,box-shadow .16s ease;}
+    [class*="st-key-fantasy_tile_"]{background:linear-gradient(145deg,#1b1b28,#11121b);border:1px solid #1d3242;border-radius:15px;padding:10px 12px 0;margin:5px 0 2px;}
     [class*="st-key-fantasy_tile_"] .fc-card{background:transparent;border:0;box-shadow:none;padding:0 0 10px;margin:0;}
     [class*="st-key-fantasy_tile_"] .fc-name{display:none;}
     [class*="st-key-fantasy_tile_"] [data-testid="stButton"] button{background:transparent;border:0;text-align:left;justify-content:flex-start;padding:0;min-height:30px;color:#f4f1ff;font-weight:750;}
-    [class*="st-key-fantasy_tile_"] [data-testid="stButton"] button:hover{color:#c9b4f4;}
+    [class*="st-key-fantasy_tile_"] [data-testid="stButton"] button:hover{color:#23e689;}
     .fc-card:hover{border-color:#8d75c2;box-shadow:0 8px 26px #00000038;}
     .fc-capture{font-size:10px;color:#aaa4bb;margin-top:8px;}
     .fc-name{font-size:15px;font-weight:750;line-height:1.25;overflow-wrap:anywhere;color:#f4f1ff;}
@@ -9053,11 +9091,11 @@ def render_fantasy_plays(wf, st):
     .fc-values b{font-size:15px;color:#f4f1ff;display:block;margin-top:3px;}
     .fc-more{color:#64e4b0!important;font-weight:700;}.fc-less{color:#ff8caa!important;font-weight:700;}
     .fc-note{color:#ddbd8c;font-size:10px;margin-top:7px;line-height:1.4;}
-    .stApp [data-testid="stColumn"]:has(.fc-card) [data-testid="stExpander"] details{background:#15151f!important;border:1px solid #393449!important;border-radius:11px!important;overflow:hidden;}
-    .stApp [data-testid="stColumn"]:has(.fc-card) [data-testid="stExpander"] summary{background:#1c1a2a!important;color:#cbbce7!important;}
+    .stApp [data-testid="stColumn"]:has(.fc-card) [data-testid="stExpander"] details{background:#0d1822!important;border:1px solid #1d3242!important;border-radius:11px!important;overflow:hidden;}
+    .stApp [data-testid="stColumn"]:has(.fc-card) [data-testid="stExpander"] summary{background:#1c1a2a!important;color:#cbd9e2!important;}
     .stApp [data-testid="stColumn"]:has(.fc-card) [data-testid="stExpander"] summary:hover{background:#252136!important;}
     .fc-breakdown{width:100%;border-collapse:collapse;background:#13131d;border:1px solid #302c40;border-radius:8px;font-size:12px;color:#dfd9ed;}
-    .fc-breakdown th{padding:8px 7px;background:#211d30;color:#bcaad9;font-size:10px;font-weight:600;text-align:right;border-bottom:1px solid #3a314f;}
+    .fc-breakdown th{padding:8px 7px;background:#102431;color:#bcaad9;font-size:10px;font-weight:600;text-align:right;border-bottom:1px solid #3a314f;}
     .fc-breakdown td{padding:8px 7px;text-align:right;border-bottom:1px solid #ffffff0a;font-variant-numeric:tabular-nums;}
     .fc-breakdown th:first-child,.fc-breakdown td:first-child{text-align:left;}
     .fc-breakdown tr:last-child td{border-bottom:0;}
@@ -10261,6 +10299,62 @@ def ui_tier_marker(card):
     return {'goblin': '👹', 'demon': '😈'}.get(tier, '')
 
 
+def ui_sparkline(values, line, direction):
+    """Oldest to newest saved pregame values; ties stay neutral."""
+    line=ui_number(line)
+    if not isinstance(values,list) or line is None or direction not in ('MORE','LESS'):return ''
+    values=[ui_number(v) for v in values[-10:]]
+    values=[v for v in values if v is not None]
+    if not values:return ''
+    low=min(0,line,*values);high=max(line,*values)
+    scale=40/max(high-low,1)
+    y=lambda value:46-(value-low)*scale
+    bars=[]
+    for i,value in enumerate(values):
+        color='#91acbc' if value==line else '#23e689' if (value>line)==(direction=='MORE') else '#e04f5f'
+        bars.append(f'<rect x="{i*16+3}" y="{y(value):.2f}" width="10" height="{max(1,46-y(value)):.2f}" rx="2" fill="{color}"><title>{value:g}</title></rect>')
+    return ('<svg class="sl-sparkline" viewBox="0 0 164 50" role="img" aria-label="Saved pregame results, oldest to newest; green hit, red miss, gray tie">'+
+            ''.join(bars)+f'<line x1="0" x2="164" y1="{y(line):.2f}" y2="{y(line):.2f}" stroke="#91acbc" stroke-dasharray="3 3"/></svg>')
+
+
+def ui_card_badges(result, direction):
+    badges=[]
+    market=result.get('market') or {}
+    probability=ui_number(market.get(str(direction).lower())) if direction in ('MORE','LESS') else None
+    if probability is not None and 0<=probability<=1:
+        label='Consensus' if (market.get('book_count') or len(market.get('books') or []))>1 else 'Sportsbook'
+        badges.append('<span class="sl-badge" title="Saved no-vig quote for this model direction; not a current offer">'+
+                      ('✓ ' if probability>=.535 else '⚠️ ' if probability<.49 else '')+label+f' {probability:.0%}</span>')
+    context=result.get('teammate_context') or {}
+    teammates=context.get('out_teammates') or []
+    if context.get('available') and teammates:
+        names=', '.join(str(item.get('name') or item.get('player_name') or 'Teammate') for item in teammates)
+        badges.append('<span class="sl-badge" title="'+ui_text(names+' · Saved injury context; no usage adjustment inferred')+'">🏥 Teammate Out · '+str(len(teammates))+'</span>')
+    return ''.join(badges)
+
+
+def ui_fantasy_contributions(card, result):
+    """Show the six frozen component estimates, including negative turnovers."""
+    weights=fantasy_weights(card)
+    components={item.get('Stat'):item for item in result.get('components') or []}
+    labels={'PTS':'Points','REB':'Rebounds','AST':'Assists','STL':'Steals','BLK':'Blocks','TOV':'Turnovers'}
+    rows=[]
+    for stat,label in labels.items():
+        value=ui_number((components.get(stat) or {}).get('Projection'))
+        weight=weights.get(stat)
+        contribution=value*weight if value is not None and weight is not None else None
+        rows.append({'Stat':label,'Projection':f'{value:.2f}' if value is not None else '—',
+                     'Weight':f'{weight:g}' if weight is not None else '—',
+                     'Fantasy points':f'{contribution:+.2f}' if contribution is not None else '—'})
+    with st.expander('How the projection adds up'):
+        st.markdown('<table class="sl-fantasy-table"><thead><tr><th>Stat</th><th>Proj.</th><th>×</th><th>FP</th></tr></thead><tbody>'+
+                    ''.join('<tr>'+''.join('<td>'+ui_text(value)+'</td>' for value in row.values())+'</tr>' for row in rows)+
+                    '</tbody></table>',unsafe_allow_html=True)
+        projection=ui_number(result.get('projection'))
+        st.markdown('**Projected fantasy score · '+(f'{projection:.2f}' if projection is not None else '—')+'**')
+        st.caption('Saved component contributions precede any learned blend; the final projection may differ. Missing inputs are shown as —.')
+
+
 def ui_card(card, frozen, saved=False):
     """Mobile-first pick card. Only frozen model values are displayed."""
     result = (frozen or {}).get('result') or {}
@@ -10295,45 +10389,31 @@ def ui_card(card, frozen, saved=False):
     proj_text = f'{projection:.2f}' if projection is not None else '—'
     prob_text = f'{probability:.0%}' if probability is not None else '—'
     stat = ui_stat(card)
+    start_time=utc_timestamp(card.get('Start (UTC)'))
+    tipoff=start_time.tz_convert(SLATE_TIMEZONE).strftime('%I:%M %p PT') if pd.notna(start_time) else 'Time unavailable'
+    footer=[]
+    if health.get('blocked'):footer.append('Unavailable · '+str(health.get('note') or 'Player status requires review'))
+    elif health.get('statuses'):footer.append('Injury: '+', '.join(health['statuses']))
+    if result and not pick_is_selectable(card,result):footer.append(pick_side_note(card,result))
+    elif not fresh:footer.append(freshness_note+' · Verify line')
+    elif not result:footer.append((workflow_store.get('calculation_status',identity(card)) or {}).get('reason') or 'Projection pending')
+    else:footer.append('Saved pregame · Estimates experimental')
+    tier_label=tier_note or tier or platform
     st.markdown(f'''<div class="sl-card sl-compact">
       <div class="sl-person">{portrait}<div class="sl-player-info">
-      <h3>{ui_text(name)}{marker_html}</h3><div class="sl-team">{ui_text(card.get('Game', ''))}</div>
-      <div class="sl-prop">{ui_text(stat)} <span class="sl-dot">·</span> Line {line_text}</div>
-      <div class="sl-muted">{ui_text(platform)}{(' · ' + ui_text(tier_note)) if tier_note else ''}</div>
-      </div></div>
-      <div class="sl-pickline"><div class="sl-side {direction_class}" title="Offered direction check; the frozen model estimate is preserved below">{ui_text(direction_text)}</div>
-      <div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
-      <div class="sl-proj"><small>Experimental estimate</small><b>{prob_text}</b></div></div>
-      </div>''', unsafe_allow_html=True)
-    if not result:
-        state = workflow_store.get('calculation_status', identity(card)) or {}
-        if state.get('reason'):
-            st.caption(state['reason'])
-    if health.get('blocked'):
-        st.warning('Unavailable for current plays: ' + health.get('note', 'Player status requires review') + '. Original prediction retained for the audit.')
-    elif health.get('statuses'):
-        st.caption('Latest injury status: ' + ', '.join(health['statuses']) + ' · checked ' + str(health.get('checked_at')))
-    if today_pregame(card.get('Start (UTC)')):
-        # Daily cached quotes age normally; reserve alerts for actual missing
-        # metadata or failed checks. This does not certify a current offer.
-        quote_field='Tier Fetched At' if card.get('Tier Source')=='prizepicksapi.com' else 'Odds checked (UTC)'
-        quote_stamp=utc_timestamp(card.get(quote_field))
-        if card.get('Tier Source')=='prizepicksapi.com':
-            observed=utc_timestamp(card.get('Tier Observed At'))
-            if pd.notna(observed) and pd.notna(quote_stamp):quote_stamp=min(quote_stamp,observed)
-        daily_cached=(not fresh and freshness_note.startswith('Saved quote captured ')
-                      and pd.notna(quote_stamp) and slate_day(quote_stamp)==slate_day())
-        if daily_cached:
-            st.caption('Daily saved board · Captured '+quote_stamp.tz_convert('America/Los_Angeles').strftime('%I:%M %p PT'))
-        else:
-            st.caption(('' if fresh else '⚠ ')+freshness_note)
-            if result and not fresh:
-                st.caption('Saved model direction: '+direction+' · Verify the exact line before using this forecast.')
-    if result:
-        st.caption(pick_side_note(card, result))
+      <h3>{ui_text(name)}{marker_html}</h3><div class="sl-team">{ui_text(card.get('Game', ''))} · {ui_text(tipoff)}</div>
+      <div class="sl-prop">{ui_text(stat)} · Line {line_text}</div></div>
+      <div class="sl-side {direction_class}">{ui_text(direction_text)}</div></div>
+      <div class="sl-pickline"><div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
+      <div class="sl-proj"><small>Est. hit</small><b>{prob_text}</b></div>
+      <span class="sl-badge">{ui_text(tier_label)}</span></div>
+      <div class="sl-badges">{ui_card_badges(result,direction)}</div>
+      {ui_sparkline(result.get("recent_values"),line,direction)}
+      <div class="sl-footer">{ui_text(' · '.join(footer))}</div></div>''', unsafe_allow_html=True)
+    if fantasy_weights(card):ui_fantasy_contributions(card,result)
     key = identity(card)
     left, right = st.columns([3, 1])
-    if left.button('Research  ›', key='detail_' + key, use_container_width=True):
+    if left.button('View research ›', key='detail_' + key, use_container_width=True):
         st.session_state['selected_prop_card'] = dict(card)
         st.rerun()
     if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, disabled=not saved and (not fresh or not pick_is_selectable(card, result)), use_container_width=True):
@@ -10466,7 +10546,7 @@ def pick_chart_spec(games, line, direction):
              'x': {'field': 'Game', 'type': 'ordinal', 'sort': None,
                    'axis': {'title': None, 'labelAngle': -45, 'labelLimit': 110}},
              'y': {'field': 'Value', 'type': 'quantitative', 'scale': {'domain': domain}, 'axis': {'title': None}},
-             'color': {'field': 'Outcome', 'type': 'nominal', 'scale': {'domain': ['Hit','Miss','Tie'], 'range': ['#38ffa0','#ff4564','#f3d66b']}, 'legend': None},
+             'color': {'field': 'Outcome', 'type': 'nominal', 'scale': {'domain': ['Hit','Miss','Tie'], 'range': ['#23e689','#e04f5f','#91acbc']}, 'legend': None},
              'tooltip': [{'field':'Date'}, {'field':'Matchup'}, {'field':'Value','title':'Stat result'}, {'field':'Outcome'}]}},
         {'data': {'values': [{'Line': float(line)}]},
          'mark': {'type':'rule','strokeDash':[7,4],'color':'#ffffff','strokeWidth':2},
@@ -10558,6 +10638,38 @@ def ui_pick_context_strip(card, result):
     st.caption('Saved with the forecast · Spread-based blowout context, not a calibrated probability or an automatic minutes deduction.')
 
 
+def ui_drivers(card, result):
+    components=result.get('components') or []
+    def factor(key):
+        values=[ui_number(c.get(key)) for c in components]
+        values=[v for v in values if v is not None]
+        return sum(values)/len(values) if values else None
+    minutes=ui_number(result.get('minutes'));pace=factor('Pace factor');position=factor('Position factor')
+    position_label='Unavailable' if position is None else 'Favorable' if position>1.01 else 'Tough' if position<.99 else 'Neutral'
+    context=result.get('game_context') or {};risk=context.get('risk') if context.get('available') else None
+    risk_label={'Lower':'🟢 Lower','Moderate':'🟡 Moderate','Higher':'🔴 Higher'}.get(risk,'Unavailable')
+    availability=result.get('availability') or {}
+    starting=availability.get('starting_status') or 'Not confirmed'
+    tiles=[('Minutes outlook',f'{minutes:.1f} min' if minutes is not None else 'Unavailable'),
+           ('Pace adjustment',f'{pace:.2f}×' if pace is not None else 'Unavailable'),('Position matchup',position_label),
+           ('Blowout indicator',risk_label),('Starting status',starting)]
+    st.markdown('#### What drives this pick')
+    st.markdown('<div class="sl-drivers">'+''.join('<div class="sl-context-tile"><small>'+ui_text(k)+'</small><strong>'+ui_text(v)+'</strong></div>' for k,v in tiles)+'</div>',unsafe_allow_html=True)
+    if fantasy_weights(card):ui_fantasy_contributions(card,result)
+
+
+def ui_hit_strip(card, history, frozen):
+    line=ui_number(card.get('Line'));direction=(frozen.get('result') or {}).get('direction')
+    if line is None or direction not in ('MORE','LESS'):return
+    labels=[]
+    for window in ('L5','L10','L15'):
+        sample=pick_history_sample(history,card,window=window,reference=frozen.get('created_at'))
+        values=sample['VALUE'];decided=values[values!=line]
+        hits=((decided>line) if direction=='MORE' else (decided<line)).sum()
+        labels.append(window+' · '+(f'{hits/len(decided):.0%}' if len(decided) else '—'))
+    st.markdown('<div class="sl-hit-strip">'+'<span></span>'.join(ui_text(x) for x in labels)+'</div>',unsafe_allow_html=True)
+
+
 def ui_frozen_sources(result):
     with st.expander('Calculation & saved data sources'):
         if not result:
@@ -10567,11 +10679,17 @@ def ui_frozen_sources(result):
 
 
 def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='‹  Plays'):
-    if st.button(back_label, key='back_to_plays'):
+    back,save=st.columns([3,1])
+    if back.button('< Back', key='back_to_plays'):
         st.session_state.pop(selection_key, None)
         st.rerun()
     frozen = ui_matched_forecast(card,forecasts=forecasts)
     result = (frozen or {}).get('result') or {}
+    watched={k:v for k,v in workflow_store.items('watchlist') if v.get('active',True)}
+    saved=any(k==(frozen or {}).get('id') or v.get('forecast_id')==(frozen or {}).get('id') for k,v in watched.items()) if frozen else False
+    fresh=line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))[0]
+    if save.button('★ Saved' if saved else '☆ Save',key='detail_save_'+identity(card),disabled=not saved and (not fresh or not pick_is_selectable(card,result))):
+        ui_save_pick(card,frozen);st.rerun()
     name = ui_name(card.get('Player', ''))
     photo = ui_photo(frozen)
     portrait = (f'<img class="sl-photo sl-detail-photo" src="{ui_text(photo)}" alt="Player portrait">'
@@ -10581,8 +10699,8 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
     st.markdown(f'''<div class="sl-detail-heading"><div class="sl-person">{portrait}<div>
     <div class="sl-eyebrow">PLAYER BREAKDOWN</div><h2>{ui_text(name)} {ui_tier_marker(card)}</h2>
     <div class="sl-team">{ui_text(card.get('Game', ''))}</div>
-    <div class="sl-prop">{ui_text(ui_stat(card))} · {ui_text(str(card.get('Platform', '')).upper())}{(' · Line type unverified') if str(card.get('Platform', '')).lower() == 'prizepicks' and str(card.get('Line Type', '')).strip().lower() not in ('standard', 'regular', 'goblin', 'demon') else ''}</div>
-    </div></div></div>''', unsafe_allow_html=True)
+    <div class="sl-prop">{ui_text(ui_stat(card))} · {ui_text(str(card.get('Platform', '')).upper())}{(' · Line type unverified') if str(card.get('Platform', '')).lower() == 'prizepicks' and str(card.get('Line Type', '')).strip().lower() not in ('standard', 'regular', 'goblin', 'demon') else ' · '+ui_text(card.get('Line Type',''))}</div>
+    </div></div><div class="sl-badges">{ui_card_badges(result,result.get('direction'))}</div></div>''', unsafe_allow_html=True)
     if result:
         direction = str(result.get('direction', '')).upper()
         side = ('↑ MORE' if direction == 'MORE' else '↓ LESS' if direction == 'LESS' else 'Not calculated')
@@ -10600,7 +10718,6 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
             st.warning(pick_side_note(card, result))
     else:
         st.info('No frozen forecast yet. Use Calculate board in Settings; no sample projection is substituted.')
-    ui_pick_context_strip(card, result)
     tab = st.segmented_control('Pick research', ['Overview', 'Matchup', 'Market', 'History'],
                                default='Overview', key='pick_sections_' + identity(card),
                                label_visibility='collapsed', width='stretch') or 'Overview'
@@ -10608,11 +10725,10 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
     try:
         if tab == 'Overview':
             history = ui_history(card, frozen)
-            if fantasy_weights(card) and history is not None:
-                ui_fantasy_rates(card, history, result)
-            availability = result.get('availability') or {}
-            statuses = [str(entry.get('status', 'Unknown')) for entry in availability.get('entries', [])]
-            st.caption('Availability at forecast: ' + (', '.join(statuses) if statuses else 'No confirmed playing or starting status in the saved report.'))
+            if history is not None:
+                ui_recent_chart(card,history,frozen)
+                ui_hit_strip(card,history,frozen)
+            ui_drivers(card,result)
             ui_frozen_sources(result)
         elif tab == 'Matchup':
             render_player_availability(card)
@@ -10653,13 +10769,7 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
             render_card_history(card)
             history = ui_history(card, frozen)
             ui_frozen_sources(result)
-        # One shared chart below the selected research section.
-        if history is None:
-            history = ui_history(card, frozen)
-        if history is not None:
-            st.divider()
-            st.markdown('#### Recent performance')
-            ui_recent_chart(card, history, frozen)
+            if history is not None:ui_recent_chart(card,history,frozen)
     except Exception:
         st.warning('This research section could not load. Your frozen forecast remains unchanged.')
 
@@ -10672,23 +10782,10 @@ def ui_board(page):
     health = workflow_store.get('health', slate_day()) or {}
     coverage = workflow_store.get('coverage', slate_day()) or {}
     line_checks=dict(workflow_store.items('odds_refresh'))
-    if page == 'Plays':
-        if coverage:
-            st.caption(f"Saved board: {coverage['ready']}/{coverage['imported']} calculated before tipoff · {coverage['missed_start']} missed their start · checked {coverage['checked_at']}")
-        if health:
-            st.caption(f"Player checks: {health['roster_matched']}/{len(health['players'])} roster matches · {health['injury_checked']} injury checks · {health['blocked']} unavailable · checked {health['checked_at']}")
-        auto = workflow_store.get('automation', slate_day()) or {}
-        if auto.get('feed_partial') or auto.get('fantasy_partial'):
-            st.warning('The imported board is incomplete. Missing provider pages are excluded from these counts; see Settings for feed status.')
     for card in rows:
         frozen = saved_prediction(forecasts, card)
         if frozen:
             forecasts[identity(card)] = frozen
-    if page == 'Plays' and any(
-        today_pregame(f.get('card', {}).get('Start (UTC)'))
-        and f.get('result', {}).get('availability', {}).get('identity_parser') != 2
-        for f in forecasts.values()):
-        st.warning('Some saved picks predate the injury-matching repair. Their original projections are preserved; recheck player availability before using them.')
     saved = {key: value for key, value in workflow_store.items('watchlist') if value.get('active', True)}
     saved_lookup=dict(saved)
     for saved_key,value in saved.items():
@@ -10701,19 +10798,21 @@ def ui_board(page):
         ui_detail(selected, forecasts)
         return
     st.subheader('Saved plays' if page == 'Saved' else 'Your NBA plays')
-    st.caption('NBA is connected. Other sports will appear here when their engines and feeds are ready.')
-    platform_options=['All', 'PrizePicks', 'Kalshi']+(['DraftKings'] if page=='Saved' else [])
-    if st.session_state.get('mobile_platform_buttons') not in platform_options:st.session_state.pop('mobile_platform_buttons',None)
-    platform = (st.segmented_control('Platform', platform_options, default='All', key='mobile_platform_buttons', width='stretch') or 'All')
-    kind = (st.segmented_control('Pick type', ['Player Props', 'Fantasy'], default=st.session_state.get('mobile_kind', 'Player Props'), key='mobile_kind_buttons', width='stretch') or 'Player Props')
-    if page == 'Plays' and kind == 'Fantasy':
-        if platform not in ('All', 'PrizePicks'):
-            st.info('Fantasy Score is supported for PrizePicks NBA. Choose PrizePicks or open the Fantasy tab.')
-        else:
-            render_fantasy_plays(workflow, st)
-        return
     view = (st.segmented_control('Board view', ['Top plays', 'All props'], default=st.session_state.get('mobile_view', 'Top plays'), key='mobile_view_buttons', width='stretch') or 'Top plays') if page != 'Saved' else 'All props'
-    search = st.text_input('Find player', placeholder='Search by name…', key='mobile_search')
+    stat = st.segmented_control('Stat', ['All','Points','Rebounds','Assists','PRA','Fantasy Score'], default=st.session_state.get('mobile_stat_pills','All'), key='mobile_stat_pills',label_visibility='collapsed',width='stretch') or 'All'
+    kind='Fantasy' if stat=='Fantasy Score' else 'All'
+    with st.expander('Filters & Search'):
+        platform_options=['All', 'PrizePicks', 'Kalshi']+(['DraftKings'] if page=='Saved' else [])
+        if st.session_state.get('mobile_platform_buttons') not in platform_options:st.session_state.pop('mobile_platform_buttons',None)
+        platform=st.segmented_control('Platform',platform_options,default='All',key='mobile_platform_buttons',width='stretch') or 'All'
+        tier=st.selectbox('PrizePicks line type',['All','Standard','Goblin','Demon','Unverified'],index=1,key='mobile_tier')
+        game_window=(st.segmented_control('Game window',['All upcoming','Later games'],default='All upcoming',key='mobile_game_window') or 'All upcoming') if page!='Saved' else 'All upcoming'
+        search=st.text_input('Find player',placeholder='Search by name…',key='mobile_search')
+        compact_lines=st.checkbox('Group repeated lines (show strongest threshold per player/stat)',value=(view=='Top plays'),key='mobile_group_repeated_lines',help='Display only; original lines and forecasts remain saved.') if page!='Saved' else False
+        if coverage:st.caption(f"Saved board: {coverage.get('ready',0)}/{coverage.get('imported',0)} calculated before tipoff")
+        auto=workflow_store.get('automation',slate_day()) or {}
+        if auto.get('feed_partial') or auto.get('fantasy_partial'):st.caption('Partial feed · Missing provider pages are excluded.')
+        st.caption('Top plays ranks projected gaps; estimates are experimental. Save requires the existing line and side checks.')
     if page == 'Saved':
         records = [v['card'] for v in saved.values()]
         st.caption('Saved lines stay fixed. Comparisons use the latest imported board; opening this page does not refresh prices.')
@@ -10721,14 +10820,6 @@ def ui_board(page):
         records = [card for card in rows if str(card.get('Platform','')).lower()!='draftkings']
         # Keep every not-yet-started game visible, including late tipoffs.
         # This is a display filter only; eligibility and MORE/LESS stay unchanged.
-        upcoming_games = sorted({(str(c.get('Game') or 'NBA game'), str(c.get('Start (UTC)')))
-                                 for c in rows if today_pregame(c.get('Start (UTC)'))}, key=lambda item:item[1])
-        if upcoming_games:
-            st.caption(f'{len(upcoming_games)} upcoming games still on the saved board (including late games).')
-        else:
-            st.warning('No unstarted games remain on the saved board. A new import is needed; older games cannot be treated as live.')
-        game_window = st.segmented_control('Game window', ['All upcoming', 'Later games'],
-                                           default='All upcoming', key='mobile_game_window') or 'All upcoming'
         if game_window == 'Later games':
             cutoff = pd.Timestamp.now(tz='UTC') + pd.Timedelta(minutes=60)
             records = [c for c in records if pd.notna(utc_timestamp(c.get('Start (UTC)')))
@@ -10742,8 +10833,10 @@ def ui_board(page):
                 continue
         if platform != 'All' and str(card.get('Platform')).lower() != platform.lower():
             continue
-        if bool(fantasy_weights(card)) != (kind == 'Fantasy'):
-            continue
+        stat_columns=set(market_columns(card))
+        required={'Points':{'PTS'},'Rebounds':{'REB'},'Assists':{'AST'},'PRA':{'PTS','REB','AST'}}
+        if stat=='Fantasy Score' and not fantasy_weights(card):continue
+        if stat in required and (fantasy_weights(card) or stat_columns!=required[stat]):continue
         if search.strip() and search.strip().lower() not in ui_name(card['Player']).lower():
             continue
         unique.setdefault(market_signature(card), card)
@@ -10755,13 +10848,10 @@ def ui_board(page):
             st.info('No PrizePicks Fantasy Score lines are imported for today. In Settings, rebuild the saved PrizePicks feed without API calls. The feed must contain an actual fantasy line.')
         elif view == 'Top plays' and not any(identity(c) in forecasts for c in records):
             st.info('Fantasy lines are imported but not calculated yet. Choose All props to inspect them; calculate the board in Settings to create forecasts.')
-    a, b = st.columns(2)
-    stats = ['All'] + sorted({ui_stat(card) for card in records})
-    stat = a.selectbox('Stat', stats, key='mobile_stat')
-    tiers = ['All', 'Standard', 'Goblin', 'Demon', 'Unverified']
-    tier = b.selectbox('PrizePicks line type', tiers, index=1, key='mobile_tier')
-    records = [c for c in records if (stat == 'All' or ui_stat(c) == stat)
-               and (tier == 'All' or (c.get('Platform') == 'prizepicks' and c.get('Line Type') == tier))]
+    records = [c for c in records if tier=='All' or (str(c.get('Platform','')).lower()=='prizepicks' and
+               (str(c.get('Line Type','')).lower() in ('standard','regular') if tier=='Standard' else
+                str(c.get('Line Type','')).lower() not in ('standard','regular','goblin','demon') if tier=='Unverified' else
+                str(c.get('Line Type','')).lower()==tier.lower()))]
     if view == 'Top plays':
         calculated = [c for c in records if identity(c) in forecasts
                    and not (health.get('players', {}).get(player_health_key(c)) or {}).get('blocked', False)]
@@ -10775,18 +10865,11 @@ def ui_board(page):
         elif len(calculated)>len(verified):
             st.caption(f'{len(calculated)-len(verified)} saved forecasts need line verification or are passes; they remain visible below with review labels.')
         records.sort(key=lambda c: ui_number(forecasts[identity(c)]['result'].get('standardized_gap'), -1), reverse=True)
-        st.caption('Ranked by projected gap relative to recent variability. This is not a proven probability or profit ranking. All props remains available.')
     else:
         records.sort(key=lambda c: (str(c['Player']), ui_stat(c), float(c['Line'])))
     # Display-only grouping: alternate thresholds are still retained as
     # separate immutable forecast identities for audit and grading.
     if page != 'Saved' and records:
-        compact_lines = st.checkbox(
-            'Group repeated lines (show strongest threshold per player/stat)',
-            value=(view == 'Top plays'),
-            key='mobile_group_repeated_lines',
-            help='Only changes the visible cards. All original lines and frozen forecasts remain saved. Turn off to inspect every threshold.',
-        )
         if compact_lines:
             groups = {}
             for candidate in records:
@@ -10833,16 +10916,12 @@ def ui_board(page):
                 )
     if page != 'Saved':
         records = earliest_game_first(records)
-    stamp = st.session_state.get('v4_scan_at')
-    if stamp:
-        st.caption('Base board scan (UTC): ' + str(stamp) + ' · Native feeds may have separate timestamps. Browsing uses saved data.')
-    st.caption(f'{len(records)} matching picks · Estimated hit percentages are experimental.')
     if not records:
         st.info("No matching upcoming picks for today (Pacific time). Try All props or clear filters. The app will not substitute tomorrow's games. Imports and calculation are under Settings.")
         return
     per_page = 24
     pages = max(1, (len(records) + per_page - 1) // per_page)
-    page_number = int(st.number_input('Page', min_value=1, max_value=pages, value=1, step=1, key='mobile_page_' + page + '_' + kind + '_' + platform + '_' + str(len(records))))
+    page_number = int(st.number_input('Page', min_value=1, max_value=pages, value=1, step=1, key='mobile_page_' + page + '_' + kind + '_' + platform + '_' + str(len(records)))) if pages>1 else 1
     visible = records[(page_number - 1) * per_page:page_number * per_page]
     for offset in range(0, len(visible), 2):
         card_columns = st.columns(2, gap='small')
@@ -10870,40 +10949,44 @@ if not st.session_state.get('_standard_landing_v1'):
     st.session_state['fantasy_tier_filter'] = 'Standard'
     st.session_state['_standard_landing_v1'] = True
 st.markdown("""<style>
+.sl-sparkline{display:block;width:164px;height:50px;margin:6px auto;}
+.sl-drivers{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin:8px 0;}
+.sl-drivers .sl-context-tile:first-child{grid-column:1/-1;}
+.sl-hit-strip{display:flex;justify-content:space-around;padding:9px;background:#0d1822;border:1px solid #1d3242;border-radius:10px;font-size:.78rem;}
 :root { color-scheme:dark; }
-.stApp {background:radial-gradient(ellipse at 50% 0%,#251040 0%,#0e071c 44%,#070311 100%);color:#f3f8ff;}
+.stApp {background:radial-gradient(ellipse at 50% 0%,#07121b 0%,#07121b 44%,#07121b 100%);color:#f3f8ff;}
 .stApp h1,.stApp h2,.stApp h3,.stApp h4,.stApp p,.stApp label {color:#f3f8ff;}
 .stApp [data-testid="stCaptionContainer"] p {color:#a9b9cb;}
 .block-container {max-width:1040px;padding-top:1.2rem;padding-bottom:6rem;}
-.sl-card {background:linear-gradient(135deg,#100820,#080412);border:2px solid #f3d66b;border-radius:19px;padding:17px 17px 12px;margin:18px 0 6px;box-shadow:3px 4px 0 #7135b1,0 12px 28px #0005;}
+.sl-card {background:linear-gradient(135deg,#0d1822,#0d1822);border:2px solid #1d3242;border-radius:19px;padding:17px 17px 12px;margin:18px 0 6px;box-shadow:3px 4px 0 #23e689,0 12px 28px #0005;}
 .sl-person {display:flex;align-items:center;gap:16px;min-width:0;}
 .sl-person h3 {margin:0;color:white;font-size:1.3rem;line-height:1.25;}
-.sl-photo {width:78px;height:86px;object-fit:cover;border-radius:14px;background:#241047;flex-shrink:0;}
-.sl-initial {display:flex;align-items:center;justify-content:center;font-size:24px;color:#38ffa0;}
-.sl-team {color:#b278ff;font-weight:700;font-size:.93rem;margin-top:3px;}
-.sl-muted {color:#c4b7d9;font-size:.77rem;margin-top:5px;}
-.sl-prop {color:#f3d66b;font-size:.92rem;margin-top:4px;}
+.sl-photo {width:78px;height:86px;object-fit:cover;border-radius:14px;background:#102431;flex-shrink:0;}
+.sl-initial {display:flex;align-items:center;justify-content:center;font-size:24px;color:#23e689;}
+.sl-team {color:#91acbc;font-weight:700;font-size:.93rem;margin-top:3px;}
+.sl-muted {color:#9db1c0;font-size:.77rem;margin-top:5px;}
+.sl-prop {color:#1d3242;font-size:.92rem;margin-top:4px;}
 .sl-dot {color:#23e6a2;}
-.sl-pickline,.sl-hero {display:flex;align-items:center;justify-content:space-between;gap:9px;background:linear-gradient(120deg,#170b2a,#090413);border:1px solid #603491;border-radius:14px;padding:12px;margin-top:14px;}
+.sl-pickline,.sl-hero {display:flex;align-items:center;justify-content:space-between;gap:9px;background:linear-gradient(120deg,#0d1822,#0d1822);border:1px solid #1d3242;border-radius:14px;padding:12px;margin-top:14px;}
 .sl-side {font-size:1.08rem;font-weight:850;white-space:nowrap;text-align:center;border-radius:13px;padding:10px 14px;min-width:115px;}
-.sl-side.more {background:#38ffa0;border:2px solid #38ffa0;color:#07150e;box-shadow:0 0 17px #00d46c44;}
-.sl-side.less {background:#ff4564;border:2px solid #ff4564;color:#20050d;}
+.sl-side.more {background:#23e689;border:2px solid #23e689;color:#07150e;box-shadow:0 0 17px #00d46c44;}
+.sl-side.less {background:#e04f5f;border:2px solid #e04f5f;color:#20050d;}
 .sl-side.pending {background:#2c3b4c;color:#d9e2eb;font-size:.85rem;}
 .sl-proj {display:flex;flex-direction:column;align-items:center;min-width:0;text-align:center;}
 .sl-proj small {font-size:.69rem;color:#c1cedb;white-space:nowrap;}
-.sl-proj b {font-size:1.45rem;color:#38ffa0;line-height:1.3;}
+.sl-proj b {font-size:1.45rem;color:#23e689;line-height:1.3;}
 .sl-detail-heading {margin:8px 0 12px;}.sl-detail-heading h2 {margin:3px 0;font-size:1.7rem;}
 .sl-detail-photo {width:100px;height:110px;}.sl-eyebrow {font-size:.7rem;font-weight:800;letter-spacing:.12em;color:#9eb0c3;}
-.sl-hero {border:2px solid #f3d66b;padding:18px 14px;margin:16px 0 8px;}
+.sl-hero {border:2px solid #1d3242;padding:18px 14px;margin:16px 0 8px;}
 .sl-hero .sl-proj b {font-size:2rem;}
-.stApp [data-testid="stButton"] button {border-radius:13px;border:1px solid #8150b8;background:#170b2a;color:#f0f6fc;}
-.stApp button[data-variant="segmented_control"]{background:#100820!important;border-color:#7041a1!important;color:#cfc5e2!important;}
-.stApp button[data-variant="segmented_control"][aria-checked="true"]{background:#7135b1!important;border-color:#c28aff!important;color:#f4edff!important;}
-.stApp button[data-variant="segmented_control"]:hover{background:#28113f!important;}
-.stApp [data-testid="stButton"] button:hover {border-color:#38ffa0;color:#38ffa0;}
+.stApp [data-testid="stButton"] button {border-radius:13px;border:1px solid #1d3242;background:#0d1822;color:#f0f6fc;}
+.stApp button[data-variant="segmented_control"]{background:#0d1822!important;border-color:#1d3242!important;color:#cbd9e2!important;}
+.stApp button[data-variant="segmented_control"][aria-checked="true"]{background:#23e689!important;border-color:#23e689!important;color:#07121b!important;}
+.stApp button[data-variant="segmented_control"]:hover{background:#132b39!important;}
+.stApp [data-testid="stButton"] button:hover {border-color:#23e689;color:#23e689;}
 .stApp [data-testid="stRadio"] [role="radiogroup"] {gap:.35rem;}
 .stApp [data-testid="stRadio"] label {border-radius:12px;}
-.stApp [data-testid="stMetric"] {background:#0c0617;border:1px solid #7041a1;border-radius:12px;padding:10px;}
+.stApp [data-testid="stMetric"] {background:#0d1822;border:1px solid #1d3242;border-radius:12px;padding:10px;}
 @media(max-width:600px){.block-container{padding:1rem .65rem 6rem;}.sl-card{padding:12px;}.sl-photo{width:65px;height:75px;}.sl-detail-photo{width:82px;height:94px;}.sl-person h3{font-size:1.09rem;}.sl-detail-heading h2{font-size:1.25rem;}.sl-pickline,.sl-hero{padding:9px 6px;gap:5px;}.sl-side{font-size:.83rem;min-width:90px;padding:9px 5px;}.sl-proj small{font-size:.57rem;}.sl-proj b{font-size:1.17rem;}.sl-hero .sl-proj b{font-size:1.45rem;}}
 
 /* Board cards: compact two-column desktop layout, stacked by Streamlit on phones. */
@@ -10928,12 +11011,35 @@ st.markdown("""<style>
  .sl-compact .sl-pickline {padding:5px 7px;margin-top:6px;}
 }
 
-.stApp [data-testid="stSidebar"] {background:#100820;}
-.stApp [data-testid="stAlert"] {background:#160c25;border:1px solid #7041a1;}
-.stApp [data-baseweb="input"],.stApp [data-baseweb="select"] > div {background:#100820;color:#f3f8ff;border-color:#7041a1;}
-.sl-context-tile {background:#0c0617!important;border-color:#7041a1!important;}
-.combo-choice.more,.fc-more {color:#38ffa0!important;}
-.combo-choice.less,.fc-less {color:#ff4564!important;}
+.stApp [data-testid="stSidebar"] {background:#0d1822;}
+.stApp [data-testid="stAlert"] {background:#0d1822;border:1px solid #1d3242;}
+.stApp [data-baseweb="input"],.stApp [data-baseweb="select"] > div {background:#0d1822;color:#f3f8ff;border-color:#1d3242;}
+.sl-context-tile {background:#0d1822!important;border-color:#1d3242!important;}
+.combo-choice.more,.fc-more {color:#23e689!important;}
+.combo-choice.less,.fc-less {color:#e04f5f!important;}
+
+.sl-status {display:block;color:#9db1c0;font-size:.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0 0 8px;padding:5px 9px;background:#0d1822;border:1px solid #1d3242;border-radius:20px;}
+.sl-card {border:1px solid #1d3242;background:#0d1822;}
+.sl-compact .sl-person {align-items:center;}
+.sl-compact .sl-photo {width:52px;height:60px;}
+.sl-compact .sl-side {min-width:0;max-width:105px;flex-shrink:0;}
+.sl-compact .sl-prop {color:#dce8ef;}
+.sl-compact .sl-pickline {background:transparent;border:0;border-top:1px solid #1d3242;border-radius:0;justify-content:space-around;padding-top:9px;}
+.sl-badge {display:inline-block;font-size:.66rem;line-height:1.35;border:1px solid #1d3242;border-radius:6px;padding:3px 6px;color:#bcd0dc;background:#102431;}
+.sl-badges {display:flex;gap:5px;flex-wrap:wrap;}.sl-badges:empty{display:none;}
+.sl-footer {font-size:.63rem;color:#9db1c0;line-height:1.4;margin-top:6px;}
+.sl-fantasy-table {width:100%;border-collapse:collapse;font-size:.75rem;}
+.sl-fantasy-table th,.sl-fantasy-table td {padding:5px 3px;border-bottom:1px solid #1d3242;text-align:right;}
+.sl-fantasy-table th:first-child,.sl-fantasy-table td:first-child {text-align:left;}
+.st-key-sports_lab_page_buttons [data-testid="stButtonGroup"] {flex-wrap:nowrap!important;gap:2px!important;}
+.st-key-mobile_stat_pills [data-testid="stButtonGroup"] {flex-wrap:nowrap!important;overflow-x:auto;gap:3px!important;}
+@media(max-width:600px){
+ .st-key-sports_lab_page_buttons button {font-size:.72rem!important;padding:6px 5px!important;min-height:32px!important;min-width:0!important;}
+ .st-key-sports_lab_page_buttons button p {font-size:.72rem!important;white-space:nowrap;}
+ .st-key-mobile_stat_pills button {padding:5px 8px!important;flex-shrink:0;}
+ .st-key-mobile_stat_pills button p {font-size:.73rem!important;white-space:nowrap;}
+ .sl-compact .sl-person h3{font-size:.94rem;}.sl-compact .sl-side{font-size:.72rem;padding:6px;max-width:95px;}
+}
 </style>""", unsafe_allow_html=True)
 def render_pp_tier_refresh():
     rows = [row for row in st.session_state.get('v4_rows',[]) if today_pregame(row.get('Start (UTC)'))]
@@ -11127,9 +11233,12 @@ def render_native_kalshi_refresh():
 # trailing blocks. Only the lightweight status poll is a timed fragment.
 def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
-    st.caption("Model picks · Research · Results")
-    app_page = (st.segmented_control("Navigation", ["Plays", "Fantasy", "Combos", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
-    render_live_board_status(workflow.store,st)
+    if st.session_state.get('sports_lab_page_buttons')=='Fantasy' or st.session_state.get('sports_lab_page')=='Fantasy':
+        st.session_state['sports_lab_page_buttons']='Plays'
+        st.session_state['sports_lab_page']='Plays'
+        st.session_state['mobile_stat_pills']='Fantasy Score'
+    app_page = (st.segmented_control("Navigation", ["Plays", "Combos", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
+    render_live_board_status(workflow.store,st,detailed=(app_page=="Settings"))
     st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
         st.session_state.pop("selected_prop_card", None)
@@ -11297,8 +11406,6 @@ def render_app_pages():
         elif app_page == 'Combos':
             if 'unfinished' in board_note: st.caption(board_note)
             render_combos(workflow, st)
-        elif app_page == 'Fantasy':
-            render_fantasy_plays(workflow, st)
         elif app_page in ("Plays", "Saved"):
             if "unfinished" in board_note: st.caption(board_note)
             ui_board(app_page)
