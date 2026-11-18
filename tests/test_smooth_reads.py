@@ -25,18 +25,21 @@ class SmoothReadTests(unittest.TestCase):
    'Period':'result','Line':12.5,'Line Type':'Standard','Game':'Team A vs Team B',
    'Start (UTC)':'2026-11-13T00:10:00Z','Stat':'PTS','unused_provider_evidence':'x'*20000}
   self.frozen={'id':'first','card':self.card,'created_at':'2026-11-12T18:00:00Z','event_id':'123',
-   'result':{'direction':'MORE','projection':14.5,'history_evidence':'x'*20000},'snapshot':{'raw':'x'*50000}}
+   'result':{'direction':'MORE','projection':14.5,'estimated_hit_probability':.61,'history_evidence':'x'*20000},'snapshot':{'raw':'x'*50000}}
   self.store.put('forecast','first',self.frozen)
   self.store.put('grade','first',{'outcome':'WIN','actual':15})
  def test_results_transfer_only_needed_fields_and_keep_exact_results(self):
   compact=self.store.research_forecast_items()
   self.assertLess(len(json.dumps(compact)),len(json.dumps(self.frozen))/50)
-  self.assertEqual(compact[0][1]['result'],{'direction':'MORE','projection':14.5})
+  self.assertEqual(compact[0][1]['result'],{'direction':'MORE','projection':14.5,
+   'selection_allowed':None,'tie':None,'estimated_hit_probability':.61})
   self.assertEqual(self.store.get('forecast','first'),self.frozen)
-  actual=env['research_rows'](SimpleNamespace(store=self.store))
+  engine={'market_columns':lambda card:[card['Stat']]}
+  actual=env['research_rows'](SimpleNamespace(store=self.store,e=engine))
   full=SimpleNamespace(items=self.store.items,forecast_items=lambda:self.store.forecast_items())
-  expected=env['research_rows'](SimpleNamespace(store=full))
+  expected=env['research_rows'](SimpleNamespace(store=full,e=engine))
   self.assertEqual(actual,expected)
+  self.assertEqual(actual[0]['Estimated hit probability'],.61)
  def test_research_pagination_does_not_drop_records(self):
   with self.store.connection() as con:
    f=copy.deepcopy(self.frozen);f['snapshot']={};f['result'].pop('history_evidence');f['card'].pop('unused_provider_evidence')
@@ -74,3 +77,4 @@ class SmoothReadTests(unittest.TestCase):
  def test_unchanged_board_does_not_reload_live_page(self):
   st,store=self.poll('finished',same_revision=True);st.rerun.assert_not_called()
 if __name__=='__main__':unittest.main()
+

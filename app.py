@@ -295,7 +295,7 @@ class Store:
                     return ('jsonb_build_object' if postgres else 'json_object')+'('+','.join(pairs)+')'
                 fields=projection(('id','created_at','event_id'))
                 card=projection(card_fields,'card')
-                result=projection(('direction','projection','selection_allowed','tie'),'result')
+                result=projection(('direction','projection','selection_allowed','tie','estimated_hit_probability'),'result')
                 if postgres:
                     expression="("+fields+" || jsonb_build_object('card',"+card+",'result',"+result+"))::text"
                 else:
@@ -3151,6 +3151,7 @@ class Workflow:
                 "Line": card["Line"],
                 "Pick": result["direction"],
                 "Projection": result["projection"],
+                "Estimated hit probability": result.get("estimated_hit_probability"),
                 "Actual": (
                     grade.get("actual")
                     if grade
@@ -4422,6 +4423,22 @@ def render_results_dashboard(wf, st):
     else:
         st.info('No wins or losses match these filters yet. The graph appears after picks settle.')
     st.caption('Hit rate = wins ÷ (wins + losses). Hover for daily sample sizes. Ties, DNP and excluded picks do not count. This is not ROI.')
+
+    from result_scopes import results_breakdowns
+    with st.expander('MORE / LESS and confidence breakdowns', expanded=False):
+        breakdowns = results_breakdowns(visible.to_dict('records'))
+        st.caption('Uses the scope, date, platform and result filters above. Only FINAL pregame wins and losses count. Confidence uses the original saved probability; missing estimates stay unavailable. These estimates are experimental.')
+        for label, key in (('By direction', 'direction'), ('By saved confidence', 'confidence')):
+            st.markdown('#### ' + label)
+            rows = breakdowns[key]
+            if rows:
+                display = pd.DataFrame(rows)
+                for field in ('Hit rate', 'Average estimate'):
+                    if field in display:
+                        display[field] = display[field].map(lambda value: f'{value:.1%}' if pd.notna(value) else '—')
+                st.dataframe(display, hide_index=True, use_container_width=True)
+            else:
+                st.info('No settled pregame MORE/LESS picks match these filters.')
 
     render_combo_hit_rates(wf.store,st,date)
 
