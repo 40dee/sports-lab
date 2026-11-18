@@ -284,7 +284,7 @@ class Store:
                 # Results need identity and two prediction values, not complete
                 # model evidence, history windows, portraits or source snapshots.
                 card_fields=('Fixture ID','Platform','Player','Stat Key','Period','Line','Line Type',
-                             'Game','Start (UTC)','Stat','Available Sides')
+                             'Game','Start (UTC)','Stat')
                 def projection(fields,prefix=''):
                     pairs=[]
                     for field in fields:
@@ -3142,7 +3142,7 @@ class Workflow:
                 "Line type": card.get("Line Type","Unverified"),
                 "Stat columns": self.e["market_columns"](card),
                 "Period": card.get("Period","fullgame"),
-                "Selectable": result.get("selection_allowed") is True and pick_is_selectable(card,result),
+                "Selectable": result.get("selection_allowed") is True and result.get("direction") in ("MORE","LESS") and not result.get("tie"),
                 "Grade status": (grade or {}).get("status"),
                 "Start (UTC)": card.get("Start (UTC)"),
                 "Player": card["Player"],
