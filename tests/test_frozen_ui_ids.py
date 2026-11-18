@@ -21,6 +21,7 @@ class FrozenIDTests(unittest.TestCase):
         self.env=dict(fixtures.env,workflow_store=self.store,st=self.st,pd=pd,
                       ui_number=lambda value:float(value),ui_stat=lambda card:'Points',
                       resolve_player=Mock(side_effect=AssertionError('Must use frozen evidence')),
+                      current_season=lambda:'2026-27',
                       line_freshness=Mock(return_value=(True,'')),pick_side_note=lambda *args:'',
                       saved_prediction=Mock(return_value=self.frozen),now=lambda:'now')
         names={'ui_matched_forecast','ui_frozen_history','ui_history','ui_save_pick','ui_recent_chart','recent_board_passes'}
@@ -59,3 +60,12 @@ class FrozenIDTests(unittest.TestCase):
         self.env['saved_forecast_records']=Mock(side_effect=AssertionError('No full forecast read'))
         self.assertEqual(self.env['ui_matched_forecast'](self.card,{}),{})
         self.env['saved_forecast_records'].assert_not_called()
+    def test_extended_chart_windows_retain_full_history_support(self):
+        from contextlib import nullcontext
+        full=pd.DataFrame({'GAME_ID':['one','two']})
+        self.env['fetch_player_history']=Mock(return_value=full)
+        self.st.spinner=Mock(return_value=nullcontext())
+        self.st.session_state['chart_window_buttons_'+self.frozen['id']]='Season'
+        result=self.env['ui_history'](self.card,self.frozen)
+        self.assertEqual(len(result),2)
+        self.env['fetch_player_history'].assert_called_once_with('0',self.card['Player'],'2026-27')

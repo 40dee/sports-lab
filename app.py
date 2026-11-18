@@ -10294,21 +10294,36 @@ def ui_card(card, frozen, saved=False):
 
 def ui_history(card, frozen=None):
     frozen=ui_matched_forecast(card,frozen)
+    result=frozen.get('result') or {}
     saved_history=ui_frozen_history(frozen)
-    if saved_history is not None:return saved_history
-    player_id=(frozen.get("result") or {}).get("player_id")
-    matched = (str(player_id),str(card["Player"])) if player_id else resolve_player(str(card['Player']))
+    player_id=result.get('player_id')
+    season=frozen.get('season') or current_season()
+    key=f'{player_id}:{season}' if player_id is not None else None
+    cached=st.session_state.get('deep_history',{}).get(key)
+    if cached is not None:return cached
+    chart_id=frozen.get('id') or identity(card)
+    window=st.session_state.get('chart_window_buttons_'+chart_id,'L15')
+    location=st.session_state.get('chart_location_buttons_'+chart_id,'All')
+    need_deep=window in ('L20','Season','H2H') or location!='All'
+    if saved_history is not None and not need_deep:return saved_history
+    matched=(str(player_id),str(card['Player'])) if player_id is not None else resolve_player(str(card['Player']))
     if matched is None:
+        if saved_history is not None:
+            st.caption('Using the saved pregame log; extended history is unavailable.')
+            return saved_history
         st.info('No unique player match is available for the research breakdown.')
         return None
-    player_id, name = matched
-    season = current_season()
-    key = f'{player_id}:{season}'
-    history = st.session_state.get('deep_history', {}).get(key)
+    player_id,name=matched;key=f'{player_id}:{season}'
+    history=st.session_state.get('deep_history',{}).get(key)
     if history is None:
-        with st.spinner('Loading player research…'):
-            history = fetch_player_history(player_id, name, season)
-        st.session_state.setdefault('deep_history', {})[key] = history
+        try:
+            with st.spinner('Loading player research…'):
+                history=fetch_player_history(player_id,name,season)
+            st.session_state.setdefault('deep_history',{})[key]=history
+        except Exception:
+            if saved_history is None:raise
+            st.caption('Extended history unavailable; chart uses the saved pregame log.')
+            return saved_history
     return history
 
 
