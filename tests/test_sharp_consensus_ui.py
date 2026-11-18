@@ -4,7 +4,7 @@ from unittest.mock import Mock
 TREE=ast.parse((Path(__file__).resolve().parents[1]/'app.py').read_text())
 class SharpConsensusTests(unittest.TestCase):
  def setUp(self):
-  self.env={'math':math,'engine_no_vig':Mock(return_value=None),'identity':lambda c:c['id']}
+  self.env={'line_edge_info':lambda *args:None,'math':math,'engine_no_vig':Mock(return_value=None),'identity':lambda c:c['id']}
   names=('ui_number','pick_offered_sides','consensus_edge_info','consensus_matches_filter','consensus_sort_records','ui_sharp_side_badge')
   for name in names:
    node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name==name)

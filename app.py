@@ -10349,7 +10349,7 @@ def consensus_edge_info(card, result, board_rows=None):
     if not valid(market):
         market=(engine_no_vig(card) if board_rows is None else engine_no_vig(card,board_rows)) or {}
         source='matching saved board'
-    if not valid(market):return {'model_probability':None,'best_side':None,'best_probability':None,'book_count':0,'aligned':False,'sharp_ev':False}
+    if not valid(market):return {'line_edge':line_edge_info(card,result,board_rows),'model_probability':None,'best_side':None,'best_probability':None,'book_count':0,'aligned':False,'sharp_ev':False}
     direction=str(result.get('direction') or '').upper()
     offered=(pick_offered_sides(card) or ()) if str(card.get('Platform','')).lower()=='prizepicks' else ()
     probability=market.get(direction.lower()) if direction in ('MORE','LESS') else None
@@ -10363,15 +10363,32 @@ def consensus_edge_info(card, result, board_rows=None):
             'sharp_ev':best_probability is not None and best_probability>=.54}
 
 
+def line_edge_info(card, result, board_rows=None):
+    from line_edges import detect
+    rows=list(st.session_state.get('v4_rows',[]) if board_rows is None else board_rows)
+    rows+=card.get('Sportsbook Quotes') or []
+    rows+=st.session_state.get('_ui_saved_quote_rows',[]) if board_rows is None else []
+    player_key=normalize_player(ui_name(card.get('Player','')))
+    rows=[r for r in rows if normalize_player(ui_name(r.get('Player','')))==player_key]
+    return detect(card,result,rows,lambda c,r:engine_no_vig(c,r),pick_offered_sides(card) or (),market_columns(card),bool(fantasy_weights(card)))
+
+
+def ui_line_edge_badge(edge):
+    if not edge:return ''
+    juice=f" ({edge['price']:+.0f})" if edge['price'] is not None else ''
+    return '<span class="sl-badge" title="Heuristic estimate from saved two-way quotes; juice is a same-sign book average; conservative spread floor and 65% cap; not calibrated probability or payout EV.">🔥 Books at '+f"{edge['book_line']:g}"+juice+f" vs PP {edge['pp_line']:g} (est. {edge['probability']:.0%} {edge['side']} · {edge['book_count']} books)</span>"
+
+
 def consensus_matches_filter(info, mode):
-    return info.get('aligned',False) if mode=='✓ Sharp aligned (53.5%+)' else info.get('sharp_ev',False) if mode=='🔥 Sharp +EV (54%+)' else True
+    return info.get('aligned',False) if mode=='✓ Sharp aligned (53.5%+)' else bool(info.get('sharp_ev') or info.get('line_edge')) if mode=='🔥 Sharp +EV (54%+)' else True
 
 
 def consensus_sort_records(records, infos, scores, sort_by):
     field='best_probability' if sort_by=='Highest sharp %' else None
     def rank(card):
         key=identity(card)
-        value=(infos.get(key) or {}).get(field) if field else scores.get(key)
+        info=infos.get(key) or {}
+        value=max(info.get(field) or -1,(info.get('line_edge') or {}).get('probability',-1)) if field else scores.get(key)
         return ui_number(value,-1)
     return sorted(records,key=rank,reverse=True)
 
@@ -10473,7 +10490,7 @@ def ui_card(card, frozen, saved=False):
       <div class="sl-pickline"><div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
       <div class="sl-proj"><small>Est. hit</small><b>{prob_text}</b></div>
       <span class="sl-badge">{ui_text(tier_label)}</span></div>
-      <div class="sl-badges">{ui_card_badges(dict(result,market=sharp_info.get("market") or {}),direction)}{ui_sharp_side_badge(sharp_info,direction)}</div>
+      <div class="sl-badges">{ui_card_badges(dict(result,market=sharp_info.get("market") or {}),direction)}{ui_sharp_side_badge(sharp_info,direction)}{ui_line_edge_badge(sharp_info.get("line_edge"))}</div>
       {ui_sparkline(result.get("recent_values"),line,direction)}
       <div class="sl-footer">{ui_text(' · '.join(footer))}</div></div>'''), unsafe_allow_html=True)
     if fantasy_weights(card):ui_fantasy_contributions(card,result)
@@ -10857,6 +10874,13 @@ def ui_board(page):
     saved_lookup=dict(saved)
     for saved_key,value in saved.items():
         if value.get('forecast_id'):saved_lookup.setdefault(value['forecast_id'],value)
+    if page=='Plays':
+        quote_revision=(slate_day(),st.session_state.get('v4_scan_at'))
+        if st.session_state.get('_ui_quote_revision')!=quote_revision:
+            from line_edges import saved_quotes
+            try:st.session_state['_ui_saved_quote_rows']=saved_quotes(workflow_store,slate_day())[0]
+            except Exception:st.session_state['_ui_saved_quote_rows']=[]
+            st.session_state['_ui_quote_revision']=quote_revision
     selected = st.session_state.get('selected_prop_card')
     if selected is not None and page != 'Saved' and (str(selected.get('Platform','')).lower()=='draftkings' or not today_pregame(selected.get('Start (UTC)'))):
         st.session_state.pop('selected_prop_card', None)
@@ -10927,7 +10951,7 @@ def ui_board(page):
     if page=='Plays' and (market_filter!='All' or sharp_sort=='Highest sharp %'):
         # Narrow candidate rows once; exact semantic matching still happens in engine_no_vig.
         board_by_player={}
-        for row in rows:
+        for row in rows+st.session_state.get('_ui_saved_quote_rows',[]):
             board_by_player.setdefault(normalize_player(ui_name(row.get('Player',''))),[]).append(row)
         sharp_infos={identity(c):consensus_edge_info(c,(saved_prediction(forecasts,c) or {}).get('result') or {},
             board_by_player.get(normalize_player(ui_name(c.get('Player',''))),[])) for c in records}
