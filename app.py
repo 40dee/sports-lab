@@ -9756,17 +9756,27 @@ def board_coverage(wf, board, reference=None):
 
 
 def scheduled_board_refresh_due(current, starts, ledger):
-    """Start the daily board at 10:00 Pacific, or two hours before an earlier tipoff."""
+    """Spend the single daily capture near the dominant Pacific-time slate."""
     if ledger.get('refreshes') or not starts:
         return False
     current = utc_timestamp(current)
+    if pd.isna(current):
+        return False
     upcoming = [utc_timestamp(start) for start in starts
                 if pd.notna(utc_timestamp(start)) and utc_timestamp(start) > current]
     if not upcoming:
         return False
-    local = current.tz_convert(SLATE_TIMEZONE)
-    minutes = (min(upcoming) - current).total_seconds() / 60
-    return (local.hour, local.minute) >= (10, 0) or 0 < minutes <= 120
+    early_starts = [start for start in upcoming if start.tz_convert(SLATE_TIMEZONE).hour < 14]
+    main_starts = [start for start in upcoming if start.tz_convert(SLATE_TIMEZONE).hour >= 14]
+    if main_starts and (len(main_starts) >= len(early_starts) or len(main_starts) >= 3):
+        target = min(main_starts)
+        lead_minutes = 150
+    else:
+        # An early-heavy/all-early slate must retain its full two-hour lead,
+        # even before 10 AM. Later starts go through the main-slate branch.
+        target = min(upcoming)
+        lead_minutes = 120
+    return current >= target - pd.Timedelta(minutes=lead_minutes)
 
 
 def import_daily_prizepicks_board(wf, board, ledger, day):
@@ -10123,7 +10133,7 @@ if '--auto-board' in sys.argv:
         explicit_refresh='--refresh' in sys.argv
         scheduled='--scheduled' in sys.argv
         if scheduled:
-            # GitHub wakes every 10 minutes; bootstrap at 10:00 Pacific.
+            # GitHub wakes every 10 minutes; capture near the dominant slate.
             # Local-time comparison handles daylight saving automatically.
             current=pd.Timestamp.now(tz='UTC')
             today=slate_day(current)
@@ -10139,8 +10149,7 @@ if '--auto-board' in sys.argv:
                 print('No upcoming NBA games verified; paid board refresh skipped.')
                 raise SystemExit(0)
             ledger=workflow_store.get('automation',today) or {}
-            # Catch a delayed tick after 14:30 Pacific without importing twice.
-            # Earlier games retain their existing one-hour preparation window.
+            # Delayed ticks remain due; the ledger and daily capture guard prevent duplicates.
             explicit_refresh=scheduled_board_refresh_due(current,starts,ledger)
         report = daily_cached_board_run(workflow,capture_due=explicit_refresh or not scheduled)
         print(encode(report))
