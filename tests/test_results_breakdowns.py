@@ -85,15 +85,16 @@ class ResultsDisplayTests(unittest.TestCase):
         app.session_state['sports_lab_page_buttons'] = 'Results'
         app.run()
         self.assertFalse(app.exception, list(app.exception))
-        metrics = {m.label: m.value for m in app.metric}
-        self.assertEqual(metrics['Settled picks'], '1')
+        grid=next(m.value for m in app.markdown if '<div class="sl-results-kpis">' in m.value)
+        self.assertIn('<span>Settled picks</span><strong>1</strong>',grid)
+        self.assertEqual(grid.count('class="sl-results-kpi"'),4)
         direction = next(d.value for d in app.dataframe if 'Direction' in d.value.columns and 'Settled picks' in d.value.columns)
         self.assertEqual(direction.iloc[0]['Losses'], 1)
         self.assertEqual(direction.iloc[0]['Average estimate'], '60.0%')
         app.selectbox(key='results_scope').select('All research (raw)').run()
         self.assertFalse(app.exception, list(app.exception))
-        metrics = {m.label: m.value for m in app.metric}
-        self.assertEqual(metrics['Settled picks'], '2')
+        grid=next(m.value for m in app.markdown if '<div class="sl-results-kpis">' in m.value)
+        self.assertIn('<span>Settled picks</span><strong>2</strong>',grid)
         app.selectbox(key='results_outcome').select('WIN').run()
         direction = next(d.value for d in app.dataframe if 'Direction' in d.value.columns and 'Settled picks' in d.value.columns)
         self.assertEqual(direction.iloc[0]['Settled picks'], 1)
