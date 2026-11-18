@@ -63,6 +63,23 @@ def features(card, result):
     }
 
 
+def selectable_learning_record(card, result):
+    """Use only playable model sides; PrizePicks specials never train learners."""
+    if result.get('selection_allowed') is False or result.get('tie'):
+        return False
+    direction=str(result.get('direction') or '').strip().upper()
+    if direction not in ('MORE','LESS'):return False
+    prizepicks=str(card.get('Platform','')).strip().lower()=='prizepicks'
+    if prizepicks and str(card.get('Line Type','')).strip().lower() not in ('standard','regular'):
+        return False
+    if 'Available Sides' in card:
+        sides=card.get('Available Sides')
+        if not isinstance(sides,(list,tuple,set)):return False
+        sides={str(side).strip().upper() for side in sides}
+        if sides-{'MORE','LESS'} or direction not in sides:return False
+    return True
+
+
 def examples(records, grades):
     """One player-game/market of weight, shared across its alternate thresholds."""
     rows = []
@@ -75,6 +92,9 @@ def examples(records, grades):
         grade = grades.get(key) or {}
         if str(card.get('Platform', '')).lower() != 'prizepicks':
             excluded['other_platform'] += 1
+            continue
+        if not selectable_learning_record(card,result):
+            excluded['not_selectable_standard'] += 1
             continue
         if grade.get('status') != 'FINAL' or grade.get('outcome') not in ('WIN', 'LOSS'):
             excluded['not_decided_final'] += 1
@@ -103,12 +123,9 @@ def examples(records, grades):
             excluded['duplicate_threshold'] += 1
             continue
         seen.add(identity)
-        side_values = card.get('Available Sides')
-        offered = (direction in side_values if isinstance(side_values, (list, tuple))
-                   else str(card.get('Line Type', '')).lower() in ('standard', 'regular'))
         rows.append(dict(id=key, day=start.astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat(),
             event=event, player=player, market=market, correct=int(correct), features=features(card, result),
-            selectable=offered, gap=number(result.get('standardized_gap')) or 0,
+            selectable=True, gap=number(result.get('standardized_gap')) or 0,
             history=number(result.get('ranking_games')) or 0))
     counts = Counter((r['event'], r['player'], r['market']) for r in rows)
     for row in rows:
@@ -201,6 +218,7 @@ def learn(records, grades):
         examples=len(rows), effective_examples=profile['effective_examples'], ranking_examples=len(ranking_rows), ranking_effective_examples=model['effective_examples'], graded_dates=len({r['day'] for r in rows}),
         last_graded_date=profile['trained_through'], input_digest=digest, excluded=excluded,
         patterns=patterns, folds=folds, activation='shadow_only',
-        scope='All settled PrizePicks markets, including Fantasy. Never changes frozen MORE/LESS predictions.',
-        method='Pregame features only. Earlier Pacific dates train; later dates test. Alternate thresholds share player-game/market weight. Ranking trains and tests only selectable Standard rows meeting the history/gap checks. All-projection patterns also include passes. Top-six diagnostic uses distinct player-games, not full combo constraints or payouts.')
+        scope='Selectable Standard/Regular PrizePicks lines, including Fantasy. Never changes frozen MORE/LESS predictions.',
+        method='Pregame features only. Earlier Pacific dates train; later dates test. Alternate thresholds share player-game/market weight. Ranking trains and tests only selectable Standard rows meeting the history/gap checks. All pattern weights exclude special tiers, passes and unoffered model sides. Top-six diagnostic uses distinct player-games, not full combo constraints or payouts.')
     return model, report
+

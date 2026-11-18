@@ -25,6 +25,7 @@ class BlendTests(unittest.TestCase):
     def test_original_and_learned_snapshots_have_distinct_ids_and_mode_invalidates_cache(self):
         store=fixtures.populated(6)
         model=self.model();store.put('pick_reliability_model','latest',model)
+        store.put('combo_ranking','mode','learned_blend')
         pool,_=fixtures.env['combo_pool'](store,fixtures.REF)
         learned=fixtures.env['combo_snapshot'](pool[:2],'balanced-v1',fixtures.REF)
         v1=fixtures.env['combo_inputs_version'](store,fixtures.REF)
@@ -34,3 +35,4 @@ class BlendTests(unittest.TestCase):
         self.assertNotEqual(learned['id'],original['id'])
         self.assertNotEqual(v1,fixtures.env['combo_inputs_version'](store,fixtures.REF))
         self.assertEqual(original['ranking_model']['version'],'original-gap-v1')
+

@@ -908,7 +908,7 @@ def combo_pool(store, reference=None, tier_mode="mixed", quote_mode="verified"):
     index = forecast_index(saved_forecast_records(store,current))
     line_checks=dict(store.items('odds_refresh'))
     from combo_reliability import context as ranking_context_for, adjust as adjust_rank
-    ranking_mode=store.get('combo_ranking','mode','learned_blend')
+    ranking_mode=store.get('combo_ranking','mode','original')
     reliability_model=store.get('pick_reliability_model','latest') or {}
     ranking_context=ranking_context_for(reliability_model,slate_day(current),ranking_mode)
     pool, excluded, seen = [], {}, set()
@@ -1156,7 +1156,7 @@ def combo_inputs_version(store, reference=None):
     board=store.get('board','board') or {}
     health=store.get('health',slate_day(current)) or {}
     prep=store.get('preparation','last') or {}
-    return ['distinct-teams-exposure-v5',store.get('combo_ranking','mode','learned_blend'),(store.get('pick_reliability_evaluation','latest') or {}).get('input_digest'),board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
+    return ['distinct-teams-exposure-v5',store.get('combo_ranking','mode','original'),(store.get('pick_reliability_evaluation','latest') or {}).get('input_digest'),board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
             prep.get('ready'),int(current.timestamp()//300)]
 
 
@@ -1592,7 +1592,7 @@ def render_combos(wf, st):
             st.caption('Suggestions rank projected separation, not entry payouts or expected return. Special tiers can lower payouts; check the actual PrizePicks entry. Browsing makes no odds requests.')
             with st.container():
                 st.markdown('**Ranking settings**')
-                rank_mode=wf.store.get('combo_ranking','mode','learned_blend')
+                rank_mode=wf.store.get('combo_ranking','mode','original')
                 choice=st.selectbox('Combo ranking',['Learned adjustment (experimental)','Original gap ranking'],
                     index=0 if rank_mode=='learned_blend' else 1,key='combo_ranking_choice')
                 desired='learned_blend' if choice.startswith('Learned') else 'original'
@@ -3286,7 +3286,7 @@ class Workflow:
         reviews = self.store.items("model_review")
 
         learning_forecasts = unique_forecasts(saved_forecast_records(self.store))
-        from pick_reliability import learn as learn_pick_reliability
+        from pick_reliability import learn as learn_pick_reliability, selectable_learning_record
         reliability_model, reliability_report = learn_pick_reliability(learning_forecasts, grades)
         reliability_report['evaluated_at'] = now()
         self.store.put('pick_reliability_model', 'latest', reliability_model)
@@ -3298,6 +3298,9 @@ class Workflow:
             result = frozen["result"]
             card = frozen["card"]
             grade = grades.get(key)
+
+            if not selectable_learning_record(card,result):
+                continue
 
             if (
                 not grade
