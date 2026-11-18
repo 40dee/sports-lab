@@ -985,10 +985,28 @@ def combo_rank(legs, policy):
         .16 if policy == 'diverse-v1' else .08)*same_game - .02*same_stat
 
 
-def combo_candidates(pool, size, policy):
+def combo_player_exposure(store, tier_mode, quote_mode, size, reference=None):
+    """Count peers in other visible sizes and user-marked entries, once per combo."""
+    day=slate_day(combo_clock(reference))
+    suffix=(':'+tier_mode if tier_mode!='mixed' else '')+(':research' if quote_mode=='research' else '')
+    saved=store.get('combo_suggestions',day+suffix) or {}
+    keys={key for count,ids in (saved.get('sizes') or {}).items() if str(count)!=str(size) for key in ids}
+    keys.update(v.get('combo_id') for _,v in store.items('combo_played') if v.get('active'))
+    keys.update(v.get('combo_id') for _,v in store.items('combo_actual'))
+    counts={}
+    for key in keys:
+        combo=store.get('combo',key) or {}
+        if combo.get('day')!=day:continue
+        for player in {str(leg['player_id']) for leg in combo.get('legs',[]) if leg.get('player_id') is not None}:
+            counts[player]=counts.get(player,0)+1
+    return counts
+
+
+def combo_candidates(pool, size, policy, exposure=None):
     import heapq
     # Bounded beam search, not an exhaustive optimizer or a probability model.
     game_limit=1 if len({leg['event_id'] for leg in pool})>=size else 2
+    exposure=dict(exposure or {})
     beam = [()]
     for _ in range(size):
         next_beam = []
@@ -1003,6 +1021,11 @@ def combo_candidates(pool, size, policy):
         # the beam before a complete slip is ever evaluated.
         rank = lambda indexes:(-combo_rank([pool[j] for j in indexes],policy),indexes)
         leaders = heapq.nsmallest(128,next_beam,key=rank)
+        if exposure and next_beam:
+            best=combo_rank([pool[j] for j in min(next_beam,key=rank)],policy)
+            comparable=[indexes for indexes in next_beam if combo_rank([pool[j] for j in indexes],policy)>=best-.10]
+            leaders+=heapq.nsmallest(128,comparable,key=lambda indexes:(
+                sum(exposure.get(str(pool[j]['player_id']),0) for j in indexes),rank(indexes)))
         by_game = {}
         for indexes in next_beam:
             game = pool[indexes[-1]]['event_id']
@@ -1011,24 +1034,22 @@ def combo_candidates(pool, size, policy):
         beam = list(dict.fromkeys(leaders+list(by_game.values())))
     eligible = [indexes for indexes in beam if len({pool[j]['team_id'] for j in indexes}) >= 2]
     selected = []
-    # Rank complete entries first; diversify alternatives without changing
-    # the strongest entry or adding a player who failed eligibility checks.
+    # Reduce shared-player concentration only among comparable qualifying entries.
+    # The score floor remains independent of previous suggestions and results.
     eligible.sort(key=lambda indexes:(-combo_rank([pool[j] for j in indexes],policy),indexes))
-    for indexes in eligible:
-        # Alternatives must replace at least one player in a two-pick entry,
-        # and at least two for larger entries when the pool permits it.
-        if any(len(set(indexes)&set(old)) > max(1,size-2) for old in selected): continue
-        selected.append(indexes)
-        if len(selected)==1: break
     while len(selected)<3:
         remaining=[indexes for indexes in eligible if indexes not in selected and not any(
             len(set(indexes)&set(old))>max(1,size-2) for old in selected)]
         if not remaining:break
-        used_teams={pool[j]['team_id'] for old in selected for j in old}
         best=max(combo_rank([pool[j] for j in indexes],policy) for indexes in remaining)
         comparable=[indexes for indexes in remaining if combo_rank([pool[j] for j in indexes],policy)>=best-.10]
+        counts=dict(exposure)
+        for old in selected:
+            for j in old:
+                player=str(pool[j]['player_id'])
+                counts[player]=counts.get(player,0)+1
         chosen=min(comparable,key=lambda indexes:(
-            -len({pool[j]['team_id'] for j in indexes}-used_teams),
+            sum(2*counts.get(str(pool[j]['player_id']),0)+1 for j in indexes),
             -combo_rank([pool[j] for j in indexes],policy),indexes))
         selected.append(chosen)
     return [[pool[j] for j in indexes] for indexes in selected]
@@ -1047,14 +1068,14 @@ def combo_snapshot(legs, policy, reference=None):
         if sum(x['event_id']==leg['event_id'] for x in legs)>2:
             raise ValueError('At most two players per game in this builder.')
     ranking_context=next((leg.get('ranking_model') for leg in legs if leg.get('ranking_model')),None)
-    key_data=[slate_day(stamp),policy,'distinct-teams-adaptive-games-v3',
+    key_data=[slate_day(stamp),policy,'distinct-teams-exposure-v4',
         sorted([x['forecast_id'],identity(x['card']),x['direction']] for x in legs)]
     if ranking_context:key_data.append(ranking_context)
     key=hashlib.sha256(encode(key_data).encode()).hexdigest()
     return {'id': key, 'created_at': stamp.isoformat(), 'day': slate_day(stamp),
         'size': len(legs), 'policy':policy, 'platform':'prizepicks', 'kind':'paper',
         'legs':json_safe(legs), 'ranking_score':combo_rank(legs,policy),
-        'rules_version':'distinct-teams-adaptive-games-v3', 'ranking_model':ranking_context or {'version':'original-gap-v1'}, 'payout_terms':None,
+        'rules_version':'distinct-teams-exposure-v4', 'ranking_model':ranking_context or {'version':'original-gap-v1'}, 'payout_terms':None,
         'note':'Directional paper result. No entry submitted. No multiplied hit probabilities.'}
 
 
@@ -1082,7 +1103,7 @@ def combo_inputs_version(store, reference=None):
     board=store.get('board','board') or {}
     health=store.get('health',slate_day(current)) or {}
     prep=store.get('preparation','last') or {}
-    return ['distinct-teams-adaptive-games-v3',store.get('combo_ranking','mode','learned_blend'),(store.get('pick_reliability_evaluation','latest') or {}).get('input_digest'),board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
+    return ['distinct-teams-exposure-v4',store.get('combo_ranking','mode','learned_blend'),(store.get('pick_reliability_evaluation','latest') or {}).get('input_digest'),board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
             prep.get('ready'),int(current.timestamp()//300)]
 
 
@@ -1114,7 +1135,7 @@ def combo_research_suggestions(store, tier_mode, size, reference=None):
     policy=(store.get('combo_model',str(size)) or {}).get('policy','balanced-v1')
     if policy not in COMBO_POLICIES:policy='balanced-v1'
     keys=[]
-    for legs in combo_candidates(pool,size,policy):
+    for legs in combo_candidates(pool,size,policy,combo_player_exposure(store,tier_mode,'research',size,current)):
         combo=combo_snapshot(legs,policy,current)
         combo['quote_mode']='research'
         store.put('combo',combo['id'],combo,immutable=True)
@@ -1358,7 +1379,7 @@ def update_combos(store, generate=False, reference=None, quote_mode="verified"):
                 models=store.get('combo_model',str(size)) or {'policy':'balanced-v1'}
                 policies={}
                 for policy in COMBO_POLICIES:
-                    snapshots=[combo_snapshot(legs,policy,current) for legs in combo_candidates(pool,size,policy)]
+                    snapshots=[combo_snapshot(legs,policy,current) for legs in combo_candidates(pool,size,policy,combo_player_exposure(store,tier_mode,quote_mode,size,current))]
                     for snapshot in snapshots:
                         store.put('combo',snapshot['id'],snapshot,immutable=True)
                         generated+=1
@@ -1468,6 +1489,7 @@ def render_combos(wf, st):
         if quote_mode=='research':
             st.warning('Saved-projection paper combos: quoted lines may be stale. Verify each live line, tier and offered side before using an entry. Injury, history, player identity and model direction checks still apply.')
         snapshot=wf.store.get('combo_suggestions',slate_day()+(':'+tier_mode if tier_mode!='mixed' else '')+(':research' if quote_mode=='research' else '')) or {}
+        st.caption('Alternatives reduce player reuse across combo sizes when qualifying entries rank within 0.10 points. Limited pools can still require overlap; diversification does not establish a higher hit rate.')
         st.caption('Standard only uses regular lines. Mixed tiers can include Goblins and Demons. Exact offered directions are required in both views.')
         st.caption('Suggestions rank projected separation, not entry payouts or expected return. Special tiers can lower payouts; check the actual PrizePicks entry. Browsing makes no odds requests.')
         with st.expander('Ranking settings'):
@@ -1559,6 +1581,10 @@ def render_combos(wf, st):
                 st.caption(('Ready for platform review · ' if valid else 'Needs review · ')+note)
                 games=len({leg['event_id'] for leg in combo['legs']})
                 st.caption(f'{games} games · {size-games} extra same-game legs · Related outcomes may move together. Special tiers may change payouts.')
+                exposure=combo_player_exposure(wf.store,tier_mode,quote_mode,size)
+                shared=sum(exposure.get(str(leg['player_id']),0)>0 for leg in combo['legs'])
+                if shared:
+                    st.caption(f'Player overlap: {shared} of {size} also appear in other saved sizes or played entries. These slips share outcomes.')
                 st.markdown(combo_legs_html(combo['legs']),unsafe_allow_html=True)
                 ranking_version=(combo.get('ranking_model') or {}).get('version','original-gap-v1')
                 st.caption('Ranking: '+ranking_version+' · Balances weakest and average separation, with game/stat penalties. Learned influence is capped and experimental; frozen MORE/LESS projections are unchanged.')
