@@ -314,7 +314,7 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
                 v1_gap=float(v1_gap)
                 if not math.isfinite(v1_gap):v1_gap=None
             except (TypeError,ValueError):v1_gap=None
-            rows.append(dict(id=key,created=created.isoformat(),graded_at=grade.get("graded_at"),line=line,
+            rows.append(dict(id=key,card=card,created=created.isoformat(),graded_at=grade.get("graded_at"),line=line,
                 columns=cols,is_fantasy=bool(weights),history_values=values.tolist(),game_variance=float(values.var(ddof=1)),
                 no_vegas_proj=no_vegas_projection,no_blowout_proj=projection*unadjusted_minutes/minutes,neither_proj=no_vegas_projection*unadjusted_minutes/minutes,
                 v1_dir=direction,v2_dir=v2_dir,v1_gap=v1_gap,v2_gap=v2_gap,day=start.tz_convert("America/Los_Angeles").date().isoformat(),event=str(frozen.get("event_id")),
@@ -391,6 +391,8 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
         result["pra_ablation"]=pra_ablation_report(frame)
         result["health_inventory"]=health_inventory(raw)
         result["sportsbook_inventory"]=sportsbook_inventory(raw)
+        from recovered_market_backtest import recovered_market_report
+        result["recovered_draftkings"]=recovered_market_report(raw,frame,env)
     return result
 
 def print_cli_backtest(store, max_samples=600):

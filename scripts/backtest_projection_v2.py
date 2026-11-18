@@ -24,3 +24,5 @@ projection_v2.print_cli_backtest(env["workflow_store"],max_samples=None)
 # Full saved settled Standard cohort, disjoint edge tiers and frozen sportsbook agreement.
 
 # Chronological uncertainty, PRA ablations and saved ESPN health inventory.
+
+# Recovered historical DraftKings probability buckets and model alignment (no API calls).

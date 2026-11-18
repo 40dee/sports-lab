@@ -7,7 +7,7 @@ import math
 from zoneinfo import ZoneInfo
 import requests
 from the_odds_api import BASE, quota, stamp
-from sportsbook_capture import REQUEST_BOOKS, attach_quotes
+from sportsbook_capture import REQUEST_BOOKS, attach_quotes, credit_ceiling
 
 MARKETS = {
     'player_points': ('Points','points'),
@@ -315,7 +315,7 @@ def download(store, api_key, current=None, get=None, markets=None):
             if fetched and fetched.astimezone(ZoneInfo('America/Los_Angeles')).date()==day:
                 body=cached['event'];captured=cached['fetched_at']
             else:
-                report['budget']=reserve(store,api_key,current,remaining,cost=len(markets),daily_allowance=min(180,len(games)*len(markets)))
+                report['budget']=reserve(store,api_key,current,remaining,cost=credit_ceiling(markets),daily_allowance=min(180,len(games)*len(markets)))
                 body=request('/events/'+event['id']+'/odds',{'bookmakers':REQUEST_BOOKS,
                     'regions':'us_dfs','markets':','.join(markets),'oddsFormat':'american','dateFormat':'iso'})
                 report['games_requested']+=1
@@ -408,7 +408,7 @@ def refresh_upcoming_quotes(store, api_key, cards, current=None, get=None, marke
         try:
             account=store.get('source','the_odds_api_quota:'+fingerprint) or {}
             if 'credits_remaining' not in account:raise ValueError('Verified backup credit balance unavailable.')
-            reserve(store,api_key,current,int(account['credits_remaining']),cost=len(markets),daily_allowance=184 if markets==FANTASY_MARKETS else 180)
+            reserve(store,api_key,current,int(account['credits_remaining']),cost=credit_ceiling(markets),daily_allowance=184 if markets==FANTASY_MARKETS else 180)
             report['http_requests']+=1
             response=get(BASE+'/events/'+event+'/odds',params={'apiKey':api_key,
                 'bookmakers':REQUEST_BOOKS,'regions':'us_dfs','markets':','.join(markets),

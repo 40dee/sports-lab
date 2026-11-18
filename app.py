@@ -1307,6 +1307,17 @@ def combo_board_ready(store, reference=None):
     return True,'Ready projections available; unavailable projections excluded.'
 
 
+def recent_board_passes(store, record):
+    query=getattr(store,'query',None)
+    if callable(query):
+        values=query('SELECT payload FROM sports_records WHERE namespace=? AND key LIKE ? AND key<>? ORDER BY key DESC LIMIT 5',
+            ('board_run_history',str(record.get('day'))+':%',str(record.get('day'))+':'+str(record.get('started_at'))),True)
+        return [json.loads(value[0]) for value in values]
+    return sorted([value for _,value in store.items('board_run_history')
+                   if value.get('day')==record.get('day') and value.get('started_at')!=record.get('started_at')],
+                  key=lambda value:value.get('started_at',''),reverse=True)[:5]
+
+
 def render_board_run_status(store, st):
     record=store.get('board_run',slate_day()) or {}
     if not record:
@@ -1360,7 +1371,7 @@ def render_board_run_status(store, st):
         else:
             st.info('Board worker is ' + str(stage) + '.')
         if st.button('Load earlier worker passes',key='load_board_run_history'):
-            history=[v for _,v in store.items('board_run_history') if v.get('day')==record.get('day') and v.get('started_at')!=record.get('started_at')]
+            history=recent_board_passes(store,record)
             for prior in sorted(history,key=lambda v:v.get('started_at',''),reverse=True)[:5]:
                 st.caption('Earlier pass Â· '+str(prior.get('started_at'))+' UTC Â· '+str(prior.get('stage'))+
                     ' Â· Import '+elapsed(prior.get('started_at'),prior.get('import_finished_at'))+
@@ -3732,12 +3743,36 @@ class TursoStore(Store):
         self.query('CREATE TABLE IF NOT EXISTS sports_records (namespace TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, updated TEXT NOT NULL, PRIMARY KEY(namespace,key))')
 
     def restore(self, value):
-        # Validate the complete backup before any remote writes. Original records win.
-        validator = OfflineSessionStore.__new__(OfflineSessionStore)
-        validator.records = {}
-        checked = validator.restore(value)
-        for (namespace, key), payload in validator.records.items():
-            self.put(namespace, key, payload, immutable=True)
+        # Validate every record before the first POST; original records always win.
+        validator=OfflineSessionStore.__new__(OfflineSessionStore)
+        validator.records={}
+        checked=validator.restore(value)
+        requests_batch=[];batch_bytes=0
+        def flush(batch):
+            if not batch:return
+            try:
+                response=self.http.post(self.endpoint,headers={'Authorization':'Bearer '+self.token},
+                    json={'requests':batch+[{'type':'close'}]},timeout=30)
+                if response.status_code!=200:raise RuntimeError('Restore request rejected.')
+                results=response.json().get('results') or []
+                if len(results)<len(batch):raise RuntimeError('Incomplete restore response.')
+                for item in results[:len(batch)]:
+                    if item.get('type')!='ok' or item.get('response',{}).get('type')!='execute':
+                        raise RuntimeError('Restore statement rejected.')
+            except Exception:
+                raise RuntimeError('Restore interrupted. Some rows may already be restored; retrying safely preserves existing records.') from None
+            finally:
+                cache=getattr(self,'_read_cache',None)
+                if isinstance(cache,dict):cache.clear()
+        for (namespace,key),payload in validator.records.items():
+            values=(namespace,key,encode(payload),now())
+            request={'type':'execute','stmt':{'sql':'INSERT INTO sports_records VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO NOTHING',
+                'args':[{'type':'text','value':value} for value in values],'want_rows':False}}
+            size=len(json.dumps(request).encode('utf-8'))
+            if requests_batch and (len(requests_batch)>=50 or batch_bytes+size>1000000):
+                flush(requests_batch);requests_batch=[];batch_bytes=0
+            requests_batch.append(request);batch_bytes+=size
+        flush(requests_batch)
         return checked
 
     def query(self, sql, values=(), fetch=False):
@@ -10125,26 +10160,48 @@ def ui_matches_family(a, b):
     return all(str(a.get(k)) == str(b.get(k)) for k in fields)
 
 
+def ui_matched_forecast(card, frozen=None, forecasts=None):
+    """Resolve semantic matches, then hydrate by their immutable original ID."""
+    if frozen is None:
+        lookup=forecasts if forecasts is not None else forecast_index(saved_forecast_records(workflow_store,card.get('Start (UTC)')))
+        frozen=saved_prediction(lookup,card)
+    if frozen and frozen.get('id'):
+        return workflow_store.get('forecast',frozen['id']) or frozen
+    return frozen or {}
+
+
+def ui_frozen_history(frozen):
+    import io
+    value=(frozen.get('result') or {}).get('games')
+    if isinstance(value,dict) and value.get('source_ref'):
+        value=(workflow_store.get('source',value['source_ref']) or {}).get('data')
+    if isinstance(value,str):
+        try:
+            history=pd.read_json(io.StringIO(value),orient='records')
+            if not history.empty and {'GAME_DATE','GAME_ID','MIN'}.issubset(history.columns):return history
+        except (ValueError,TypeError):pass
+    return None
+
+
 def ui_save_pick(card, frozen):
-    key = identity(card)
-    old = workflow_store.get('watchlist', key)
-    if old and old.get('active', True):
-        old['active'] = False
-        workflow_store.put('watchlist', key, old)
-    else:
-        fresh, note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
-        if not fresh:
-            st.info(note)
-            return False
-        if not frozen or not pick_is_selectable(card, frozen.get('result') or {}):
-            st.info(pick_side_note(card, (frozen or {}).get('result') or {}))
-            return False
-        workflow_store.put('watchlist', key, {
-            'active': True, 'saved_at': now(), 'card': json_safe(dict(card)),
-            'forecast_id': frozen['id'] if frozen else None,
-            'result': (frozen or {}).get('result'),
-            'board_observed_at': st.session_state.get('v4_scan_at'),
-        })
+    frozen=ui_matched_forecast(card,frozen)
+    key=frozen.get('id') or identity(card)
+    aliases=[(old_key,value) for old_key,value in workflow_store.items('watchlist')
+             if old_key in (key,identity(card)) or value.get('forecast_id')==key]
+    if any(value.get('active',True) for _,value in aliases):
+        for old_key,value in aliases:
+            workflow_store.put('watchlist',old_key,dict(value,active=False))
+        return False
+    fresh,note=line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
+    if not fresh:
+        st.info(note);return False
+    if not frozen or not pick_is_selectable(card,frozen.get('result') or {}):
+        st.info(pick_side_note(card,frozen.get('result') or {}));return False
+    workflow_store.put('watchlist',key,{
+        'active':True,'saved_at':now(),'card':json_safe(dict(card)),
+        'forecast_id':key,'result':frozen.get('result'),
+        'board_observed_at':st.session_state.get('v4_scan_at')})
+    return True
 
 
 def ui_tier_marker(card):
@@ -10235,8 +10292,12 @@ def ui_card(card, frozen, saved=False):
         st.rerun()
 
 
-def ui_history(card):
-    matched = resolve_player(str(card['Player']))
+def ui_history(card, frozen=None):
+    frozen=ui_matched_forecast(card,frozen)
+    saved_history=ui_frozen_history(frozen)
+    if saved_history is not None:return saved_history
+    player_id=(frozen.get("result") or {}).get("player_id")
+    matched = (str(player_id),str(card["Player"])) if player_id else resolve_player(str(card['Player']))
     if matched is None:
         st.info('No unique player match is available for the research breakdown.')
         return None
@@ -10353,6 +10414,9 @@ def pick_chart_spec(games, line, direction):
 
 
 def ui_recent_chart(card, history, frozen=None):
+    frozen=ui_matched_forecast(card,frozen)
+    if history is None:history=ui_frozen_history(frozen)
+    chart_id=frozen.get("id") or identity(card)
     if history is None or history.empty:
         st.info('No verified pregame game log is available for this player.')
         return
@@ -10369,10 +10433,10 @@ def ui_recent_chart(card, history, frozen=None):
         return
     st.markdown('#### ' + ui_stat(card) + ' Â· ' + direction + f' {line:g}')
     window = st.segmented_control('Window', ['L5','L10','L15','L20','Season','H2H'],
-                                  default='L15', key='chart_window_buttons_' + identity(card),
+                                  default='L15', key='chart_window_buttons_' + chart_id,
                                   width='stretch') or 'L15'
     location = st.segmented_control('Location', ['All','Home','Away'], default='All',
-                                    key='chart_location_buttons_' + identity(card),
+                                    key='chart_location_buttons_' + chart_id,
                                     width='stretch') or 'All'
     opponent_id = None
     if window == 'H2H':
@@ -10442,8 +10506,7 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='â
     if st.button(back_label, key='back_to_plays'):
         st.session_state.pop(selection_key, None)
         st.rerun()
-    frozen = forecasts.get(identity(card))
-    if frozen:frozen=workflow_store.get('forecast',frozen.get('id') or identity(card)) or frozen
+    frozen = ui_matched_forecast(card,forecasts=forecasts)
     result = (frozen or {}).get('result') or {}
     name = ui_name(card.get('Player', ''))
     photo = ui_photo(frozen)
@@ -10480,7 +10543,7 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='â
     history = None
     try:
         if tab == 'Overview':
-            history = ui_history(card)
+            history = ui_history(card, frozen)
             if fantasy_weights(card) and history is not None:
                 ui_fantasy_rates(card, history, result)
             availability = result.get('availability') or {}
@@ -10524,11 +10587,11 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='â
                 st.caption(str(shown.get('reason') or 'Game market context unavailable.'))
         else:
             render_card_history(card)
-            history = ui_history(card)
+            history = ui_history(card, frozen)
             ui_frozen_sources(result)
         # One shared chart below the selected research section.
         if history is None:
-            history = ui_history(card)
+            history = ui_history(card, frozen)
         if history is not None:
             st.divider()
             st.markdown('#### Recent performance')
@@ -10563,6 +10626,9 @@ def ui_board(page):
         for f in forecasts.values()):
         st.warning('Some saved picks predate the injury-matching repair. Their original projections are preserved; recheck player availability before using them.')
     saved = {key: value for key, value in workflow_store.items('watchlist') if value.get('active', True)}
+    saved_lookup=dict(saved)
+    for saved_key,value in saved.items():
+        if value.get('forecast_id'):saved_lookup.setdefault(value['forecast_id'],value)
     selected = st.session_state.get('selected_prop_card')
     if selected is not None and page != 'Saved' and (str(selected.get('Platform','')).lower()=='draftkings' or not today_pregame(selected.get('Start (UTC)'))):
         st.session_state.pop('selected_prop_card', None)
@@ -10719,10 +10785,10 @@ def ui_board(page):
         for column, card in zip(card_columns, visible[offset:offset + 2]):
             with column:
                 key = identity(card)
-                frozen = forecasts.get(key)
-                ui_card(card, frozen, key in saved)
-                if page == 'Saved':
-                    saved_value = saved[key]
+                frozen = saved_prediction(forecasts,card)
+                saved_value=saved_lookup.get((frozen or {}).get('id')) or saved_lookup.get(key)
+                ui_card(card, frozen, bool(saved_value))
+                if page == 'Saved' and saved_value:
                     st.caption('Saved at (UTC): ' + saved_value['saved_at'])
                     candidates = [row for row in rows if ui_matches_family(card, row)]
                     lines = sorted({float(row['Line']) for row in candidates if ui_number(row.get('Line')) is not None})

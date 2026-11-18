@@ -7,6 +7,13 @@ BOOKS = ('draftkings', 'fanduel', 'betmgm', 'bovada', 'pinnacle')
 REQUEST_BOOKS = ','.join(('prizepicks',) + BOOKS)
 
 
+def credit_ceiling(markets, bookmakers=REQUEST_BOOKS):
+    """Bookmaker keys override regions; each group of ten is one billed region."""
+    books={book.strip() for book in bookmakers.split(',') if book.strip()}
+    if not books:raise ValueError('At least one bookmaker is required.')
+    return len(set(markets))*math.ceil(len(books)/10)
+
+
 def capture_quotes(event, fetched_at, current, markets):
     rows = []
     for book in event.get('bookmakers') or []:
