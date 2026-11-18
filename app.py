@@ -284,7 +284,7 @@ class Store:
                 # Results need identity and two prediction values, not complete
                 # model evidence, history windows, portraits or source snapshots.
                 card_fields=('Fixture ID','Platform','Player','Stat Key','Period','Line','Line Type',
-                             'Game','Start (UTC)','Stat')
+                             'Game','Start (UTC)','Stat','Available Sides')
                 def projection(fields,prefix=''):
                     pairs=[]
                     for field in fields:
@@ -295,7 +295,7 @@ class Store:
                     return ('jsonb_build_object' if postgres else 'json_object')+'('+','.join(pairs)+')'
                 fields=projection(('id','created_at','event_id'))
                 card=projection(card_fields,'card')
-                result=projection(('direction','projection'),'result')
+                result=projection(('direction','projection','selection_allowed','tie'),'result')
                 if postgres:
                     expression="("+fields+" || jsonb_build_object('card',"+card+",'result',"+result+"))::text"
                 else:
@@ -3139,6 +3139,11 @@ class Workflow:
 
             rows.append({
                 "ID": key,
+                "Line type": card.get("Line Type","Unverified"),
+                "Stat columns": self.e["market_columns"](card),
+                "Period": card.get("Period","fullgame"),
+                "Selectable": result.get("selection_allowed") is True and pick_is_selectable(card,result),
+                "Grade status": (grade or {}).get("status"),
                 "Start (UTC)": card.get("Start (UTC)"),
                 "Player": card["Player"],
                 "Platform": card["Platform"],
@@ -4389,7 +4394,14 @@ def render_results_dashboard(wf, st):
     date = left.selectbox('Game date (Pacific)', dates, key='results_date')
     platform = center.selectbox('Platform', ['All platforms'] + sorted(frame['Platform'].unique().tolist()), key='results_platform')
     outcome = right.selectbox('Result', ['All results', 'WIN', 'LOSS', 'PENDING', 'TIE', 'DNP', 'LATE_EXCLUDED'], key='results_outcome')
-    visible = frame.copy()
+    from result_scopes import standard_playable_rows
+    scope=st.selectbox('Results scope',['Standard playable (1 per stat)','All research (raw)'],key='results_scope')
+    if scope=='Standard playable (1 per stat)':
+        ids={row['ID'] for row in standard_playable_rows(research)}
+        visible=frame[frame['ID'].isin(ids)].copy()
+    else:
+        visible=frame.copy()
+    st.caption('Standard scope: original selectable PrizePicks Standard lines, one earliest frozen line per player/stat/game. Selected before result filters; no winning alternate is chosen afterward. Raw research includes other tiers and passes.')
     if date != 'All dates': visible = visible[visible['Game date'] == date]
     if platform != 'All platforms': visible = visible[visible['Platform'] == platform]
     if outcome != 'All results': visible = visible[visible['Outcome'] == outcome]
@@ -4468,7 +4480,7 @@ def render_results_dashboard(wf, st):
     with st.expander('View all results', expanded=False):
         if len(visible):
             pages = max(1, math.ceil(len(visible)/25))
-            filters = (date, platform, outcome)
+            filters = (date, platform, outcome, scope)
             if st.session_state.get('_results_filters') != filters or st.session_state.get('results_page', 1) > pages:
                 st.session_state.pop('results_page', None)
                 st.session_state['_results_filters'] = filters
@@ -7201,73 +7213,11 @@ def engine_position(team, athlete, season):
 
 
 def engine_no_vig(card, rows=None):
-    fields = (
-        "Fixture ID", "Market ID", "Period", "Line", "Line Type",
-    )
-    pairs = {}
+    from market_compare import compare_no_vig
+    return compare_no_vig(card,st.session_state.get("v4_rows",[]) if rows is None else rows,
+                          normalize_player,engine_team_key,market_columns,fantasy_weights)
 
-    for row in (st.session_state.get("v4_rows", []) if rows is None else rows):
-        if row.get("Platform") != "draftkings":
-            continue
 
-        if any(
-            str(row.get(field)) != str(card.get(field))
-            for field in fields
-        ):
-            continue
-
-        if normalize_player(row.get("Player", "")) != (
-            normalize_player(card["Player"])
-        ):
-            continue
-
-        try:
-            price = float(row["Odds"])
-        except (TypeError, ValueError, KeyError):
-            continue
-
-        if not math.isfinite(price) or abs(price) < 100:
-            continue
-
-        probability = (
-            100 / (price + 100)
-            if price > 0
-            else -price / (-price + 100)
-        )
-
-        pair_identity = (
-            str(row["Player ID"]),
-            str(row["Market ID"]),
-        )
-        sides = pairs.setdefault(pair_identity, {})
-        direction = row.get("Direction")
-
-        if direction in ("MORE", "LESS"):
-            sides.setdefault(direction, set()).add(
-                (price, probability)
-            )
-
-    valid = []
-
-    for sides in pairs.values():
-        if set(sides) != {"MORE", "LESS"}:
-            continue
-        if any(len(sides[side]) != 1 for side in sides):
-            continue
-
-        over = next(iter(sides["MORE"]))
-        under = next(iter(sides["LESS"]))
-        total = over[1] + under[1]
-
-        valid.append({
-            "book": "draftkings",
-            "over_price": over[0],
-            "under_price": under[0],
-            "more": over[1] / total,
-            "less": under[1] / total,
-        })
-
-    return valid[0] if len(valid) == 1 else None
 def calculate_player_projection(
     history, card, season, team_name, position,
     advanced=None, position_data=None,
