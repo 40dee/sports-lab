@@ -9,7 +9,9 @@ class ComboExposureTests(unittest.TestCase):
   for leg in pool:leg['score']=1.0
   return pool
  def test_equal_ranked_options_use_new_players_when_available(self):
-  options=env['combo_candidates'](self.pool(),6,'balanced-v1')
+  pool=self.pool()
+  for leg in pool:leg['event_id']=leg['player_id']
+  options=env['combo_candidates'](pool,6,'balanced-v1')
   self.assertEqual(len(options),3)
   players=[{leg['player_id'] for leg in legs} for legs in options]
   self.assertEqual(len(set.union(*players)),18)
