@@ -122,6 +122,23 @@ def main():
     fields=("Player","Line","Line Type","Direction","Available Sides","Tier Fetched At","Tier Observed At","Tier Source","Tier Projection ID","Start (UTC)")
     report["fantasy_offer_cards"]=[{k:c.get(k) for k in fields} for c in (records.get("board",{}).get("v4_rows") or [])
         if "fantasy" in str(c.get("Stat","")).lower() and any(name in str(c.get("Player","")).lower() for name in ("mikal bridges","jalen brunson"))]
+    stmt={"sql":"SELECT namespace,key,payload FROM sports_records WHERE namespace='combo_ranking' OR (namespace IN ('combo','combo_suggestions') AND json_extract(payload,'$.day')=?)","args":[{"type":"text","value":day}],"want_rows":True}
+    request=Request("https://"+parsed.netloc+"/v2/pipeline",
+        data=json.dumps({"requests":[{"type":"execute","stmt":stmt},{"type":"close"}]}).encode(),
+        headers={"Authorization":"Bearer "+token,"Content-Type":"application/json"})
+    with urlopen(request,timeout=30) as response:
+        rows=json.load(response)["results"][0]["response"]["result"].get("rows",[])
+    current_combos={};suggestions={};ranking={}
+    for row in rows:
+        ns,key,payload=[cell["value"] for cell in row]
+        {"combo":current_combos,"combo_suggestions":suggestions,"combo_ranking":ranking}[ns][key]=json.loads(payload)
+    report["combo_ranking_setting"]=ranking
+    report["current_suggestions"]={}
+    selected_ids=set()
+    for key,value in suggestions.items():
+        report["current_suggestions"][key]={k:value.get(k) for k in ("created_at","eligible_players","tier_mode","quote_mode","sizes","excluded")}
+        for ids in (value.get("sizes") or {}).values():selected_ids.update(ids)
+    report["selected_combo_examples"]=[value for key,value in current_combos.items() if key in selected_ids]
     print("BOARD_PROGRESS_JSON " + json.dumps(report, sort_keys=True))
     return 0
 
