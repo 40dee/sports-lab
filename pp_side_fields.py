@@ -15,9 +15,10 @@ def projection_sides(row):
             result.append({'side':side,'available':True,'tier':side_tier});known=True
         elif type(row.get(side+'_available')) is bool:
             result.append({'side':side,'available':row[side+'_available'],'tier':row.get(side+'_tier') or side_tier});known=True
-    # Legacy Standard rows with no side fields use the existing regular-line rule.
-    # Empty compact arrays are different: other rows explicitly offer MORE only.
-    has_fields=any(k in row for k in ('selections','sides','more_available','less_available'))
-    if not known and not has_fields and str(tier).lower() in ('standard','regular'):
+    # Compact empty arrays omit offer metadata. Standard/Regular uses the
+    # existing two-sided regular-line rule; explicit offers/flags win above.
+    empty_metadata=not selections and (offered is None or offered==[] or offered=={})
+    has_flags=any(k in row for k in ('more_available','less_available'))
+    if not known and empty_metadata and not has_flags and str(tier).strip().lower() in ('standard','regular'):
         return [{'side':s,'tier':'standard','available':True} for s in ('more','less')],True
     return result,known

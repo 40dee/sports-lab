@@ -18,7 +18,7 @@ for key in ('pp_fantasy_daily_v1','pp_fantasy_compact_v1'):
         'samples':[{k:v for k,v in row.items() if k not in ('player','event')} for row in items[:2]]}
 print('FANTASY_SIDE_INSPECTION_JSON '+json.dumps(reports,default=str),flush=True)
 if '--rebuild' in sys.argv:
-    # Metadata-only rebuild: never recalculate projections or refresh any provider.
+    # Standard fallback metadata-only rebuild: never recalculate projections or refresh any provider.
     wf=env['workflow'];board=store.get('board','board') or {};items=[];stamps=[]
     for key in ('pp_fantasy_daily_v1','pp_fantasy_compact_v1'):
         saved=store.get('source',key) or {}
@@ -28,7 +28,10 @@ if '--rebuild' in sys.argv:
             items.append(env['normalize_pp_projection'](dict(item,_sports_lab_fetched_at=item.get('_sports_lab_fetched_at') or saved.get('fetched_at')),live_response=live))
         if saved.get('fetched_at'):stamps.append(saved['fetched_at'])
     if not stamps:raise SystemExit('No saved capture timestamp')
-    merged,count=env['pp_merge_tiers'](board.get('v4_rows') or [],items,max(stamps),fantasy_only=True)
+    try:merged,count=env['pp_merge_tiers'](board.get('v4_rows') or [],items,max(stamps),fantasy_only=True)
+    except ValueError as error:
+        print('FANTASY_SIDE_REBUILD_JSON '+json.dumps({'imported':0,'reason':str(error),'source_days':[store.get('source',key,{}).get('slate_day') for key in ('pp_fantasy_daily_v1','pp_fantasy_compact_v1')],'provider_requests':0,'frozen_forecasts_changed':0}),flush=True)
+        raise SystemExit(0)
     board['v4_rows']=merged;board['_side_metadata_revision']=env['now']();store.put('board','board',board)
     fantasy=[c for c in merged if env['fantasy_weights'](c)]
     counts=Counter()

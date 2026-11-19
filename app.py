@@ -1157,7 +1157,7 @@ def combo_inputs_version(store, reference=None):
     health=store.get('health',slate_day(current)) or {}
     prep=store.get('preparation','last') or {}
     return ['distinct-teams-exposure-v5',store.get('combo_ranking','mode','original'),(store.get('pick_reliability_evaluation','latest') or {}).get('input_digest'),board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
-            prep.get('ready'),int(current.timestamp()//300)]
+            prep.get('ready'),int(current.timestamp()//300),board.get('_side_metadata_revision')]
 
 
 def refresh_combo_health(wf, board=None, reference=None):
@@ -10452,7 +10452,7 @@ def ui_card(card, frozen, saved=False):
             direction_class='pending'
             probability=None
     fresh, freshness_note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
-    if result and not fresh:
+    if result and not fresh and not fantasy_weights(card):
         probability = None
     platform = str(card.get('Platform', '')).upper()
     tier = str(card.get('Line Type', '')).strip() if platform == 'PRIZEPICKS' else ''
@@ -10461,6 +10461,7 @@ def ui_card(card, frozen, saved=False):
     marker_html = f'<span title="{ui_text(tier)}">{marker}</span>' if marker else ''
     proj_text = f'{projection:.2f}' if projection is not None else '—'
     prob_text = f'{probability:.0%}' if probability is not None else '—'
+    prob_label='Saved est. hit' if fantasy_weights(card) and not fresh else 'Est. hit'
     stat = ui_stat(card)
     start_time=utc_timestamp(card.get('Start (UTC)'))
     tipoff=start_time.tz_convert(SLATE_TIMEZONE).strftime('%I:%M %p PT') if pd.notna(start_time) else 'Time unavailable'
@@ -10479,7 +10480,7 @@ def ui_card(card, frozen, saved=False):
       <div class="sl-prop">{ui_text(stat)} · Line {line_text}</div></div>
       <div class="sl-side {direction_class}">{ui_text(direction_text)}</div></div>
       <div class="sl-pickline"><div class="sl-proj"><small>Projection</small><b>{proj_text}</b></div>
-      <div class="sl-proj"><small>Est. hit</small><b>{prob_text}</b></div>
+      <div class="sl-proj"><small>{prob_label}</small><b>{prob_text}</b></div>
       <span class="sl-badge">{ui_text(tier_label)}</span></div>
       <div class="sl-badges">{ui_card_badges(dict(result,market=sharp_info.get("market") or {}),direction)}{ui_sharp_side_badge(sharp_info,direction)}{ui_line_edge_badge(sharp_info.get("line_edge"))}</div>
       {ui_sparkline(result.get("recent_values"),line,direction)}
@@ -10532,6 +10533,8 @@ def ui_history(card, frozen=None):
 
 
 def ui_fantasy_rates(card, history, result):
+    if history is None:
+        history=pd.DataFrame(columns=['GAME_DATE','GAME_ID','MIN','SEASON']+list(fantasy_weights(card) or {}))
     st.markdown('#### Fantasy points per minute')
     cutoff = min(pd.to_datetime(card['Start (UTC)'], utc=True), pd.Timestamp.now(tz='UTC'))
     games = history.copy()
@@ -10730,7 +10733,6 @@ def ui_drivers(card, result):
            ('Blowout indicator',risk_label),('Starting status',starting)]
     st.markdown('#### What drives this pick')
     st.markdown('<div class="sl-drivers">'+''.join('<div class="sl-context-tile"><small>'+ui_text(k)+'</small><strong>'+ui_text(v)+'</strong></div>' for k,v in tiles)+'</div>',unsafe_allow_html=True)
-    if fantasy_weights(card):ui_fantasy_contributions(card,result)
 
 
 def ui_hit_strip(card, history, frozen):
@@ -10804,6 +10806,7 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
                 ui_recent_chart(card,history,frozen)
                 ui_hit_strip(card,history,frozen)
             ui_drivers(card,result)
+            if fantasy_weights(card):ui_fantasy_rates(card,history,result)
             ui_frozen_sources(result)
         elif tab == 'Matchup':
             render_player_availability(card)
