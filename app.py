@@ -8151,9 +8151,11 @@ def render_saved_workspace(controls=True):
             remote_stamp = str(remote.get("v4_scan_at") or "")
             session_stamp = str(st.session_state.get("v4_scan_at") or "")
             if ("v4_rows" not in st.session_state or remote_stamp > session_stamp
+                    or remote.get("_side_metadata_revision")!=st.session_state.get("_ui_side_metadata_revision")
                     or (remote_stamp == session_stamp and
                         len(remote.get("v4_rows") or []) != len(st.session_state.get("v4_rows") or []))):
                 st.session_state.update(validate_board(remote))
+                st.session_state["_ui_side_metadata_revision"]=remote.get("_side_metadata_revision")
         elif "v4_rows" not in st.session_state:
             local = workspace_load("board")
             if local:
@@ -8875,19 +8877,19 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
         line = numeric_line(item.get("line"))
         if line is None or not item.get("id"):
             continue
+        from pp_side_fields import projection_sides
+        selections,sides_known=projection_sides(item)
         groups = {}
-        for selection in item.get("selections", []):
+        for selection in selections:
             side = str(selection.get("side", "")).upper()
             tier = labels.get(selection.get("tier"))
             if selection.get("available") is True and side in ("MORE", "LESS") and tier:
                 groups.setdefault(tier, set()).add(side)
         if not groups and str(item.get('tier','')).lower()=='standard':
-            # An explicit regular threshold is useful for research even when
-            # the provider omitted side availability. An empty explicit list
-            # keeps these records out of selectable picks and combos.
-            groups['Standard']=set()
+            # Preserve the threshold without falsely calling unknown sides a model PASS.
+            groups['Standard']=set() if sides_known else None
         for tier, sides in groups.items():
-            for side in sorted(sides) or ['MORE']:
+            for side in sorted(sides or ()) or ['MORE']:
                 row = dict(candidates[0])
                 # Native data must never inherit a manual-observation claim.
                 row.pop('Line Source',None);row.pop('Manual observed at',None)
@@ -8905,7 +8907,7 @@ def pp_merge_tiers(rows, projections, fetched, fantasy_only=False):
                     "Outcome ID": "ppfeed:" + str(item["id"]) + ":" + side,
                     "Odds": None, "mainLine Flag": None,
                     "Decoded": True, "Line Status": "Provider tier-labelled threshold",
-                    "Available Sides": sorted(sides),
+                    "Available Sides": sorted(sides) if sides is not None else None,
                     "Tier Source": "prizepicksapi.com",
                     "Tier Observed At": item.get("observed_at"),
                     "Tier Fetched At": item.get("_sports_lab_fetched_at") or fetched,
@@ -9406,7 +9408,7 @@ def pp_download_pages(store, cache_key, fetch_page, filters, max_pages=2, refere
 
 
 def normalize_pp_projection(item, live_response=False):
-    """Normalize compact transport; only explicit sides and tiers are used."""
+    """Normalize compact transport; preserve explicit and unknown side states."""
     if not isinstance(item,dict):return item
     row=dict(item)
     if not (isinstance(row.get('player'),dict) and isinstance(row.get('market'),dict)):
@@ -9417,19 +9419,8 @@ def normalize_pp_projection(item, live_response=False):
             market={'stat':stat,'period':row.get('period')},
             event={'id':row.get('event_id'),'opponent':row.get('opponent'),
                 'starts_at':row.get('event_starts_at') or row.get('starts_at')})
-    selections=row.get('selections')
-    if not isinstance(selections,list) or not selections:
-        selections=[];offered=row.get('sides');tier=row.get('tier')
-        for side in ('more','less'):
-            raw=(offered.get(side) if isinstance(offered,dict) else None)
-            side_tier=tier.get(side) if isinstance(tier,dict) else tier
-            if isinstance(raw,dict):
-                if raw.get('available') is True:selections.append(dict(raw,side=side,tier=raw.get('tier') or side_tier))
-            elif raw is True or (isinstance(offered,list) and side in [str(v).lower() for v in offered if isinstance(v,str)]):
-                selections.append({'side':side,'available':True,'tier':side_tier})
-            elif type(row.get(side+'_available')) is bool:
-                selections.append({'side':side,'available':row[side+'_available'],'tier':row.get(side+'_tier')})
-        row['selections']=selections
+    from pp_side_fields import projection_sides
+    row['selections']=projection_sides(row)[0]
     if live_response and row.get('is_demo') is not True:
         # Compact rows omit this redundant flag. The authenticated response's
         # meta.mode was checked before storing; explicit demo=True never passes.

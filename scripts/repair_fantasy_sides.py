@@ -29,7 +29,7 @@ if '--rebuild' in sys.argv:
         if saved.get('fetched_at'):stamps.append(saved['fetched_at'])
     if not stamps:raise SystemExit('No saved capture timestamp')
     merged,count=env['pp_merge_tiers'](board.get('v4_rows') or [],items,max(stamps),fantasy_only=True)
-    board['v4_rows']=merged;store.put('board','board',board)
+    board['v4_rows']=merged;board['_side_metadata_revision']=env['now']();store.put('board','board',board)
     fantasy=[c for c in merged if env['fantasy_weights'](c)]
     lookup=env['forecast_index'](env['saved_forecast_records'](store))
     counts=Counter()
