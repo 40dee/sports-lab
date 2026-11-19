@@ -16,10 +16,10 @@ from market_compare import compare_no_vig
 store=env['workflow_store'];day='2026-11-18'
 records=env['unique_forecasts'](store.forecast_items(day=day));lookup=dict(records)
 # Grade reads are narrow and do not trigger grading/maintenance.
-grades={k:store.get('grade',k) or {} for k,_ in records}
+grades=dict(store.items('grade'))
 rows=[]
 for k,f in records:
-    c=f['card'];r=f.get('result') or {};g=grades[k]
+    c=f['card'];r=f.get('result') or {};g=grades.get(k) or {}
     rows.append({'ID':k,'Platform':c.get('Platform'),'Line type':c.get('Line Type'),'Selectable':r.get('selection_allowed') is not False and env['pick_is_selectable'](c,r),
         'Created (UTC)':f.get('created_at'),'Start (UTC)':c.get('Start (UTC)'),'Outcome':g.get('outcome'),'Grade status':g.get('status'),
         'Event':f.get('event_id'),'Stat columns':env['market_columns'](c),'Player':c.get('Player'),'Period':c.get('Period')})
@@ -34,7 +34,7 @@ for q in quote_rows:by_player[name(q['Player'])].append(q)
 compare=lambda c,quotes:compare_no_vig(c,quotes,env['normalize_player'],env['engine_team_key'],env['market_columns'],env['fantasy_weights'])
 def add(label,win):buckets[label]['wins' if win else 'losses']+=1
 for row in selected:
-    k=row['ID'];f=lookup[k];c=f['card'];r=f['result'];g=grades[k]
+    k=row['ID'];f=lookup[k];c=f['card'];r=f['result'];g=grades.get(k) or {}
     if g.get('status')!='FINAL' or g.get('outcome') not in ('WIN','LOSS'):
         other[g.get('outcome') or 'PENDING']+=1;continue
     win=g['outcome']=='WIN';add('Overall v1 Standard',win)
