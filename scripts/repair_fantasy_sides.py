@@ -31,9 +31,8 @@ if '--rebuild' in sys.argv:
     merged,count=env['pp_merge_tiers'](board.get('v4_rows') or [],items,max(stamps),fantasy_only=True)
     board['v4_rows']=merged;board['_side_metadata_revision']=env['now']();store.put('board','board',board)
     fantasy=[c for c in merged if env['fantasy_weights'](c)]
-    lookup=env['forecast_index'](store.forecast_items(day=env['slate_day'](),upcoming_after=env['now']()))
     counts=Counter()
     for c in fantasy:
-        frozen=env['saved_prediction'](lookup,c)
-        counts[env['pick_display_label'](c,(frozen or {}).get('result') or {})]+=1
-    print('FANTASY_SIDE_REBUILD_JSON '+json.dumps({'imported':count,'display_labels':dict(counts),'provider_requests':0,'frozen_forecasts_changed':0}),flush=True)
+        sides=env['pick_offered_sides'](c)
+        counts['VERIFY SIDES' if sides is None else ' / '.join(sides) if sides else 'Unavailable']+=1
+    print('FANTASY_SIDE_REBUILD_JSON '+json.dumps({'imported':count,'offered_side_metadata':dict(counts),'provider_requests':0,'frozen_forecasts_changed':0}),flush=True)
