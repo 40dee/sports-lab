@@ -31,7 +31,7 @@ if '--rebuild' in sys.argv:
     merged,count=env['pp_merge_tiers'](board.get('v4_rows') or [],items,max(stamps),fantasy_only=True)
     board['v4_rows']=merged;board['_side_metadata_revision']=env['now']();store.put('board','board',board)
     fantasy=[c for c in merged if env['fantasy_weights'](c)]
-    lookup=env['forecast_index'](env['saved_forecast_records'](store))
+    lookup=env['forecast_index'](store.forecast_items(day=env['slate_day'](),upcoming_after=env['now']()))
     counts=Counter()
     for c in fantasy:
         frozen=env['saved_prediction'](lookup,c)
