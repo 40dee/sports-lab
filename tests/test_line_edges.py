@@ -46,4 +46,35 @@ class LineEdgeTests(unittest.TestCase):
   self.assertFalse(env['consensus_matches_filter']({'line_edge':edge},'✓ Sharp aligned (53.5%+)'))
   card.pop('Available Sides')
   self.assertIsNone(env['line_edge_info'](card,{},self.rows()))
+ def test_integer_push_neighbors_do_not_enter_sharp_filter(self):
+  import ast
+  from pathlib import Path
+  from types import SimpleNamespace
+  tree=ast.parse(Path('app.py').read_text())
+  env={'st':SimpleNamespace(session_state={}), 'normalize_player':lambda v:v.lower(), 'ui_name':lambda v:v,
+       'engine_no_vig':self.compare,'market_columns':lambda c:[c['Stat Key']],'fantasy_weights':lambda c:None}
+  for name in ('pick_offered_sides','line_edge_info','consensus_matches_filter'):
+   node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name==name)
+   exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
+  cases=[(4.,3.5,'MORE',-163,False),(4.,4.5,'LESS',-158,False),
+         (4.,5.5,'MORE',-115,True),(23.5,24.5,'MORE',-115,True)]
+  for pp,book_line,favored,price,expected in cases:
+   with self.subTest(pp=pp,book=book_line,favored=favored):
+    self.card['Line']=pp
+    card=dict(self.card,**{'Line Type':'Standard','Available Sides':['MORE','LESS']})
+    quotes=[dict(q,Odds=price if q['Direction']==favored else 123 if price<-150 else -105) for q in self.rows(book_line)]
+    edge=env['line_edge_info'](card,{},quotes)
+    self.assertEqual(edge is not None,expected)
+    self.assertEqual(env['consensus_matches_filter']({'line_edge':edge},'🔥 Sharp +EV (54%+)'),expected)
+    if edge:self.assertEqual(edge['side'],favored)
+ def test_integer_full_point_boundary_near_integer_and_alternate_selection(self):
+  self.card['Line']=4.
+  self.assertIsNotNone(self.run_edge(self.rows(5.)))
+  # An ineligible half-point line must not hide an eligible farther line.
+  edge=self.run_edge(self.rows(4.5)+self.rows(5.5))
+  self.assertEqual(edge['book_line'],5.5)
+  self.card['Line']=4.0000001
+  self.assertIsNone(self.run_edge(self.rows(4.5)))
+  self.card['Line']=float('nan')
+  self.assertIsNone(self.run_edge(self.rows(4.5)))
 if __name__=='__main__':unittest.main()

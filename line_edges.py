@@ -61,9 +61,15 @@ def detect(card, result, rows, compare, offered, columns, fantasy=False):
     if str(card.get('Platform','')).lower()!='prizepicks' or not offered:return None
     try:pp=float(card['Line'])
     except (ValueError,TypeError,KeyError):return None
+    if not math.isfinite(pp):return None
+    integer_line=abs(pp-round(pp))<1e-6
     pairs=candidate_pairs(card,rows,compare)
     if any(line==pp for line,_ in pairs):return None
-    options=[(line,books) for line,books in pairs if line!=pp and len({b['book'] for b in books})>=2]
+    # Half-point neighbors of an integer PP line overlap its push band.
+    # Require a full point of separation before estimating a moved-line edge.
+    options=[(line,books) for line,books in pairs if line!=pp
+             and (not integer_line or abs(line-pp)>=1.0)
+             and len({b['book'] for b in books})>=2]
     if not options:return None
     line,books=min(options,key=lambda v:(-len(v[1]),abs(v[0]-pp),v[0]))
     floors={'PTS':12.,'REB':6.,'AST':5.,'FG3M':3.,'STL':3.,'BLK':3.,'TOV':3.}
