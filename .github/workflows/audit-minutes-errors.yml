@@ -1,0 +1,23 @@
+name: High-gap minutes and rate error audit
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [scripts/audit_minutes_errors.py, scripts/minutes_audit_cohort.json, .github/workflows/audit-minutes-errors.yml]
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python scripts/audit_minutes_errors.py
