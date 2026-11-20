@@ -2644,8 +2644,9 @@ class Workflow:
                     ttl_seconds=300)
                 if str(summary.get("header", {}).get("id")) != event_id:
                     raise ValueError("ESPN event ID does not match frozen event")
-                actual = completed_actual(
-                    summary, result["player_id"], self.e["market_columns"](card))
+                from grading_identity import lookup_actual
+                actual = lookup_actual(summary, card, result, event_id,
+                    self.e["market_columns"](card), completed_actual)
                 if actual is None:
                     # A final boxscore may still omit a player or unsupported market.
                     # Do not silently mark missing data as DNP or a loss.
