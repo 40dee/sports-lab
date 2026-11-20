@@ -41,7 +41,6 @@ jobs:
           else
             python app.py --auto-board --scheduled
           fi
-      - name: Grade completed games
-        if: ${{ !cancelled() }}
-        run: python app.py --maintenance
 # User requested today's split-source NBA import; daily capture lock remains enforced.
+
+# Requested manual capture: 2026-11-20. No grading recheck.
