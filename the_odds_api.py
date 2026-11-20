@@ -9,6 +9,7 @@ BASE = 'https://api.the-odds-api.com/v4/sports/basketball_nba'
 MARKETS = ('player_points', 'player_fantasy_points',
            'player_points_alternate', 'player_fantasy_points_alternate')
 MAX_CREDITS = len(MARKETS)
+READABLE_PROBE_UI = True
 
 
 def stamp(value):
@@ -156,6 +157,7 @@ def run_probe(store, api_key, now=None, get=None):
 
 
 def render_probe(st, store, api_key):
+    from audit_display import display_time, display_name, render_saved_report, render_fact_cards
     with st.expander('The Odds API — free connection test', expanded=True):
         st.write('New key configured' if api_key else 'THE_ODDS_API_KEY missing')
         st.caption('One NBA game · PrizePicks Points and Fantasy, regular and alternate markets · at most four credits. Once per key per UTC day. Browsing does not run this test. Automatic downloads remain off.')
@@ -169,11 +171,12 @@ def render_probe(st, store, api_key):
         result = st.session_state.get('_the_odds_api_probe') or store.get('source', 'the_odds_api_probe_latest')
         if result:
             if result.get('state') == 'sample_received':
-                st.success('New API sample received. Current board and original forecasts are unchanged.')
+                st.success('Saved API test sample available. Current board and original forecasts are unchanged.')
             else:
                 st.info(result.get('note', 'Test reserved; no automatic retry.'))
             if result.get('game'):
-                st.write(result['game'] + ' · Start (UTC): ' + result.get('start_utc', ''))
-            st.json({k: v for k, v in result.items() if k != 'rows'})
+                st.caption(result['game'] + ' · Tipoff: ' + display_time(result.get('start_utc')))
+            render_saved_report(st,{k:v for k,v in result.items() if k not in ('rows','game','start_utc')})
             if result.get('rows'):
-                st.dataframe(result['rows'], hide_index=True, use_container_width=True)
+                render_fact_cards(st,[{key:display_name(value) if key=='Market' else value for key,value in row.items()} for row in result['rows']])
+

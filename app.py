@@ -27,6 +27,20 @@ def _refresh_consensus_helpers():
 
 _refresh_consensus_helpers()
 
+
+def _refresh_settings_display():
+    """Load readable Settings helpers retained by a warm process after deploy."""
+    import importlib
+    import audit_display
+    if not hasattr(audit_display, 'render_fact_cards'):
+        importlib.reload(audit_display)
+    import the_odds_api
+    if not getattr(the_odds_api, 'READABLE_PROBE_UI', False):
+        importlib.reload(the_odds_api)
+
+
+_refresh_settings_display()
+
 import numpy as np
 import pandas as pd
 
@@ -1821,7 +1835,8 @@ def render_combos(wf, st):
             result=combo_money_result(entry,grade)
             with st.container(border=True):
                 st.markdown(f"**{entry['entry_id']} · {combo['size']} players · {entry['entry_type']}**")
-                st.write(result)
+                from audit_display import render_saved_report
+                render_saved_report(st,result)
                 with st.expander('Confirm platform settlement / reboot / revised payout'):
                     st.caption('Use the platform’s settled return for ties, DNPs, reboots or other adjustments. This confirmation never rewrites the original picks or model grades.')
                     with st.form('settlement_'+key):
@@ -4129,30 +4144,31 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
 
 
 def preparation_panel(wf, st, rows):
+    from audit_display import display_name, display_time, format_value, render_fact_cards, render_metric_strip
     st.markdown("#### Prepare today's board")
     with st.expander('Input checks and coverage'):
         inputs = wf.store.get('input_health', 'latest') or {}
         if inputs:
-            st.caption('Input checks (UTC): ' + str(inputs.get('checked_at')))
-            checks = [{'Input': name, 'Available': value.get('available', False),
-                'Rows': value.get('rows'), 'Reason': value.get('reason', ''),
-                'Fetched or checked (UTC)': value.get('fetched_at') or value.get('checked_at')}
+            st.caption('Input checks: ' + display_time(inputs.get('checked_at')))
+            checks = [{'Input': display_name(name), 'Available': 'Yes' if value.get('available', False) else 'No',
+                'Rows': format_value(value.get('rows'),'integer'), 'Reason': value.get('reason') or '—',
+                'Updated': display_time(value.get('fetched_at') or value.get('checked_at'))}
                 for name, value in inputs.get('sources', {}).items()]
-            st.dataframe(pd.DataFrame(checks), hide_index=True, use_container_width=True)
-            for limitation in inputs.get('limitations', []):
-                st.warning(limitation)
+            render_fact_cards(st, checks)
+            if inputs.get('limitations'):
+                with st.expander('Data limitations', expanded=False):
+                    for limitation in inputs['limitations']:st.warning(limitation)
             news = (inputs.get('sources', {}).get('news') or {}).get('articles') or []
             if news:
                 st.caption('Recent ESPN NBA headlines. League news is context, not confirmed player availability.')
-                st.dataframe(pd.DataFrame([{'Headline': a['headline'], 'Published (UTC)': a['published']} for a in news]), hide_index=True, use_container_width=True)
+                render_fact_cards(st, [{'Headline': a['headline'], 'Published': display_time(a.get('published'))} for a in news])
         else:
             st.info('The worker has not recorded input checks with this version yet.')
         coverage = wf.store.get('coverage', slate_day()) or {}
         if coverage:
-            from audit_display import format_value
-            for column, (label, key) in zip(st.columns(5), [('Imported','imported'),('Ready','ready'),
-                    ('Pending','upcoming_pending'),('Unavailable','upcoming_unavailable'),('Missed Start','missed_start')]):
-                column.metric(label, format_value(coverage.get(key), 'integer'))
+            render_metric_strip(st, [(label,format_value(coverage.get(key),'integer')) for label,key in
+                [('Imported','imported'),('Ready','ready'),('Pending','upcoming_pending'),
+                 ('Unavailable','upcoming_unavailable'),('Missed Start','missed_start')]])
             st.caption('Missed starts remain counted. Provider completeness is reported separately below.')
     st.caption('The scheduled worker imports today’s lines and calculates them automatically when configured. This button resumes calculations using saved lines without a paid refresh.')
     auto = wf.store.get('automation', slate_day()) or {}
@@ -5544,6 +5560,7 @@ def render_manual_import(wf, st):
 
 
 def odds_usage_panel(store,st):
+    from audit_display import display_time, display_name, render_fact_cards
     count=store.get('request_budget',slate_day()+':oddspapi')
     cap=min(odds_daily_cap(),int(store.get('request_budget',slate_day()+':oddspapi_cap',odds_daily_cap())))
     account=store.get('odds_status','account') or {}
@@ -5552,7 +5569,7 @@ def odds_usage_panel(store,st):
             monthly=odds_monthly_budget(store,account)
             st.info(f"OddsPAPI: {monthly['remaining']} requests left under your monthly limit · paced to {monthly['daily_cap']} per day · resets {monthly['reset_at'][:10]} (UTC).")
             cap=min(cap,monthly['daily_cap'])
-            st.caption('Usage checked '+monthly['checked_at']+'. Local reservations may conservatively exceed provider usage. Other applications using this key can spend requests between checks.')
+            st.caption('Usage checked '+display_time(monthly['checked_at'])+'. Local reservations may conservatively exceed provider usage. Other applications using this key can spend requests between checks.')
         except ValueError as error:st.info(str(error))
     else:st.info('Monthly allowance has not been checked. Paid downloads wait for a successful account check.')
     if st.button('Check account usage — no quota cost',key='check_odds_account'):
@@ -5566,9 +5583,12 @@ def odds_usage_panel(store,st):
     latest=store.items('odds_refresh')
     if latest:
         with st.expander('Recent targeted line checks'):
-            st.dataframe(pd.DataFrame([{'Game ID':key,'Reason':value.get('reason'),
-                'Status':value.get('state'),'Checked (UTC)':value.get('attempted_at'),
-                'Note':value.get('note')} for key,value in sorted(latest,key=lambda item:item[1].get('attempted_at',''),reverse=True)[:12]]),hide_index=True,use_container_width=True)
+            board=store.get('board','board') or {}
+            names={str(card.get('Fixture ID')):card.get('Game') for card in board.get('v4_rows') or [] if card.get('Game')}
+            render_fact_cards(st,[{'Game':names.get(str(key)) or 'Saved game '+str(key),
+                'Reason':value.get('reason') or '—','Status':display_name(value.get('state') or 'Unavailable'),
+                'Checked':display_time(value.get('attempted_at')),'Note':value.get('note') or '—'}
+                for key,value in sorted(latest,key=lambda item:item[1].get('attempted_at',''),reverse=True)[:12]])
 
 
 
@@ -11265,7 +11285,8 @@ def render_pp_tier_refresh():
             summary, details = pp_fantasy_check(all_rows, pp_cached_combined())
             saved_summary, _ = fantasy_saved_summary(all_rows, workflow_store.items('forecast'), dict(workflow_store.items('grade')))
             summary.update(saved_summary)
-            st.write(summary)
+            from audit_display import render_saved_report
+            render_saved_report(st,summary)
             st.caption('Upcoming counts exclude started games. Saved forecasts include earlier games and remain available in the Fantasy tab. This check does not request new lines or statistics.')
             if details:
                 st.dataframe(pd.DataFrame(details),hide_index=True,use_container_width=True)
@@ -11778,6 +11799,7 @@ def _resume_grading_fragment():
     st.rerun()
 
 _resume_grading_fragment()
+
 
 
 

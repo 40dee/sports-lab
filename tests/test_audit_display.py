@@ -68,3 +68,80 @@ class AuditDisplayTests(unittest.TestCase):
         st.warning.assert_called_once_with('Minutes restriction possible')
         self.assertTrue(any(c.args[0]=='Model version: v1' for c in st.caption.call_args_list))
         self.assertEqual(result,original)
+
+
+class SettingsReadabilityTests(unittest.TestCase):
+    def test_wrapped_cards_and_strip_escape_and_do_not_stack_columns(self):
+        from audit_display import render_fact_cards, render_metric_strip, display_time
+        st=MagicMock()
+        render_fact_cards(st,[{'Headline':'<script>long headline</script>','Rows':None,'Count':472}])
+        html=st.markdown.call_args.args[0]
+        self.assertIn('&lt;script&gt;',html);self.assertNotIn('<script>',html)
+        self.assertIn('overflow-wrap:anywhere',html);self.assertNotIn('472.00',html)
+        self.assertIn('—',html)
+        render_metric_strip(st,[(name,'0') for name in ('Imported','Ready','Pending','Unavailable','Missed Start')])
+        html=st.markdown.call_args.args[0]
+        self.assertIn('repeat(5,minmax(0,1fr))',html)
+        self.assertFalse(any(line.startswith('    <') for line in html.splitlines()))
+        st.columns.assert_not_called()
+        self.assertEqual(display_time('2026-11-20T17:08:01.333Z'),'Nov 20, 2026 · 09:08 AM PT')
+        self.assertEqual(display_time(None),'—')
+
+    def test_saved_probe_is_readable_without_running_provider_or_writing(self):
+        import the_odds_api
+        from unittest.mock import patch
+        result={'state':'sample_received','checked_at':'2026-11-11T04:12:13.474304Z',
+            'credits_remaining':472,'credits_used':28,'game':'Boston at Toronto','start_utc':'2026-11-12T00:10Z',
+            'market_counts':{'player_points':5,'player_points_alternate':19},
+            'scheduled_downloads_enabled':False,'rows':[{'Line':23.5,'Market':'player_points'}]}
+        before=copy.deepcopy(result)
+        store=MagicMock();store.get.return_value=result
+        st=MagicMock();st.button.return_value=False;st.session_state={}
+        with patch.object(the_odds_api,'run_probe',side_effect=AssertionError('No provider request')):
+            the_odds_api.render_probe(st,store,'configured')
+        st.json.assert_not_called();store.put.assert_not_called()
+        rendered=' '.join(str(c.args) for c in st.markdown.call_args_list+st.caption.call_args_list)
+        self.assertNotIn('player_points',rendered);self.assertNotIn('474304',rendered)
+        self.assertIn('Credits remaining',rendered);self.assertIn('Alternate points',rendered)
+        self.assertIn('Nov 11, 2026 · 04:10 PM PT',rendered)
+        self.assertEqual(result,before)
+
+    def test_preparation_input_checks_use_named_wrapped_cards_and_compact_counts(self):
+        tree=ast.parse((ROOT/'app.py').read_text())
+        node=copy.deepcopy(next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='preparation_panel'))
+        # Run the real saved-input section, without the separate manual preparation controls.
+        index=next(i for i,n in enumerate(node.body) if isinstance(n,ast.With))
+        node.body=node.body[:index+1]
+        st=MagicMock();store=MagicMock()
+        inputs={'checked_at':'2026-11-20T17:08:01Z','sources':{'load_position_defense':{'available':True,'rows':150},
+                'news':{'available':True,'articles':[{'headline':'Long headline','published':'2026-11-20T17:00Z'}]}},
+                'limitations':['Confirmed starting lineups are not connected.']}
+        coverage={'imported':10,'ready':8,'upcoming_pending':1,'upcoming_unavailable':1,'missed_start':0}
+        store.get.side_effect=lambda ns,key:inputs if ns=='input_health' else coverage
+        from types import SimpleNamespace
+        env={'st':st,'pd':pd,'slate_day':lambda:'2026-11-20'}
+        exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
+        env['preparation_panel'](SimpleNamespace(store=store),st,[])
+        rendered=' '.join(str(c.args) for c in st.markdown.call_args_list)
+        self.assertIn('Position defense',rendered);self.assertNotIn('load_position_defense',rendered)
+        self.assertIn('NBA news',rendered);self.assertIn('Long headline',rendered)
+        self.assertIn('sl-audit-metric-strip',rendered)
+        st.dataframe.assert_not_called();st.columns.assert_not_called();store.put.assert_not_called()
+
+
+class WarmSettingsDisplayTests(unittest.TestCase):
+    def test_old_display_modules_refresh_without_provider_actions(self):
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        tree=ast.parse((ROOT/'app.py').read_text())
+        node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='_refresh_settings_display')
+        env={};exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
+        display,provider=SimpleNamespace(),SimpleNamespace()
+        def reload(module):
+            if module is display:module.render_fact_cards=True
+            else:module.READABLE_PROBE_UI=True
+            return module
+        with patch.dict(sys.modules,{'audit_display':display,'the_odds_api':provider}),patch('importlib.reload',side_effect=reload) as refresh:
+            env['_refresh_settings_display']();env['_refresh_settings_display']()
+            self.assertEqual([c.args[0] for c in refresh.call_args_list],[display,provider])
