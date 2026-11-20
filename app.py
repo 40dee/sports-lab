@@ -4149,7 +4149,10 @@ def preparation_panel(wf, st, rows):
             st.info('The worker has not recorded input checks with this version yet.')
         coverage = wf.store.get('coverage', slate_day()) or {}
         if coverage:
-            st.write({key: value for key, value in coverage.items() if key != 'checked_at'})
+            from audit_display import format_value
+            for column, (label, key) in zip(st.columns(5), [('Imported','imported'),('Ready','ready'),
+                    ('Pending','upcoming_pending'),('Unavailable','upcoming_unavailable'),('Missed Start','missed_start')]):
+                column.metric(label, format_value(coverage.get(key), 'integer'))
             st.caption('Missed starts remain counted. Provider completeness is reported separately below.')
     st.caption('The scheduled worker imports today’s lines and calculates them automatically when configured. This button resumes calculations using saved lines without a paid refresh.')
     auto = wf.store.get('automation', slate_day()) or {}
@@ -4714,11 +4717,12 @@ def render_results_dashboard(wf, st):
                     st.caption('Patterns describe historical associations, not causes or guaranteed hit rates. Alternate lines share weight.')
                     with st.expander('What the model saw in greens and reds'):
                         patterns = reliability.get('patterns') or []
-                        if patterns:st.dataframe(pd.DataFrame(patterns),hide_index=True,width='stretch')
+                        from audit_display import format_table
+                        if patterns:st.dataframe(format_table(patterns),hide_index=True,width='stretch')
                         folds = reliability.get('folds') or []
                         if folds:
                             st.caption('Earlier dates train; later dates test. Top-six comparison is a ranking diagnostic, not a full combo or payout backtest.')
-                            st.dataframe(pd.DataFrame(folds),hide_index=True,width='stretch')
+                            st.dataframe(format_table(folds),hide_index=True,width='stretch')
                 latest_daily={}
                 for _,evaluation in wf.store.items('model_daily_evaluation'):
                     stat=evaluation.get('stat','Unknown')
@@ -4726,7 +4730,8 @@ def render_results_dashboard(wf, st):
                         latest_daily[stat]=evaluation
                 if latest_daily:
                     st.caption('Daily training runs on settled data. Candidate evaluation and production activation are tracked separately.')
-                    st.dataframe(pd.DataFrame([{'Market':stat,'Latest graded date':v.get('holdout_date'),
+                    from audit_display import format_table
+                    st.dataframe(format_table([{'Market':stat,'Latest graded date':v.get('holdout_date'),
                         'Daily evaluation':v.get('status'),'Candidate accuracy':(v.get('candidate_holdout') or {}).get('accuracy'),
                         'Current model accuracy':(v.get('incumbent_holdout') or {}).get('accuracy'),
                         'Production model':v.get('activation')} for stat,v in sorted(latest_daily.items())]),hide_index=True,width='stretch')
@@ -10827,7 +10832,31 @@ def ui_frozen_sources(result):
         if not result:
             st.info('No saved calculation for this pick.')
             return
-        st.json({key: result[key] for key in ('minutes','components','learning_model','probability_method','probability_note','availability','warnings') if key in result})
+        from audit_display import format_value, format_table, readable
+        st.metric('Projected minutes', format_value(result.get('minutes'), 'decimal'))
+        components = result.get('components') or []
+        if components:
+            st.markdown('**Projection components**')
+            st.dataframe(format_table(components, components=True), hide_index=True, width='stretch')
+        model = result.get('learning_model') or {}
+        version = result.get('model_version') or result.get('engine_version') or result.get('version') or (model.get('version') if isinstance(model,dict) else None)
+        st.caption('Model version: '+readable(version))
+        if model:
+            st.caption('Saved learning model: '+readable(model))
+        for key, label in (('probability_method','Probability method'),('probability_note','Probability notes')):
+            if result.get(key):st.caption(label+': '+readable(result[key]))
+        availability = result.get('availability') or {}
+        st.markdown('**Injury notes**')
+        if isinstance(availability,dict) and availability:
+            st.dataframe(pd.DataFrame([{'Field':str(key).replace('_',' ').capitalize(),'Detail':readable(value)}
+                for key,value in availability.items()]), hide_index=True, width='stretch')
+        else:
+            st.caption(readable(availability) if availability else 'No saved injury notes.')
+        warnings = result.get('warnings') or []
+        if warnings:
+            st.markdown('**Warnings**')
+            for warning in warnings if isinstance(warnings,(list,tuple)) else [warnings]:
+                st.warning(readable(warning))
 
 
 def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='‹  Plays'):

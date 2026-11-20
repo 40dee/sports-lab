@@ -439,17 +439,34 @@ def render_backtest_panel(store, st):
             if not result["picks"]:
                 st.info("No settled records with replayable pregame evidence.")
             else:
-                st.write({k:result[k] for k in ("picks","player_game_markets","v1_hit","v2_hit","v1_mae","v2_mae","v1_brier","v2_brier")})
-                st.dataframe(pd.DataFrame(result["by_platform_tier"]),hide_index=True,width="stretch")
-                st.dataframe(pd.DataFrame(result["by_stat"]),hide_index=True,width="stretch")
+                from audit_display import format_value, format_table
+                metrics = [('Picks', format_value(result.get('picks'), 'integer')),
+                    ('v1 Hit Rate', format_value(result.get('v1_hit'), 'percent')),
+                    ('v2 Hit Rate', format_value(result.get('v2_hit'), 'percent')),
+                    ('v1 vs v2 Brier', format_value(result.get('v1_brier'), 'brier')+' → '+format_value(result.get('v2_brier'), 'brier')),
+                    ('Player-game markets', format_value(result.get('player_game_markets'), 'weight')),
+                    ('v1 MAE', format_value(result.get('v1_mae'), 'decimal')),
+                    ('v2 MAE', format_value(result.get('v2_mae'), 'decimal')),
+                    ('Calibration samples', format_value(result.get('calibration_n'), 'integer'))]
+                for offset in (0, 4):
+                    for column, (label, value) in zip(st.columns(4), metrics[offset:offset+4]):
+                        column.metric(label, value)
+                st.dataframe(format_table(result["by_platform_tier"]),hide_index=True,width="stretch")
+                st.dataframe(format_table(result["by_stat"]),hide_index=True,width="stretch")
                 st.caption("Direction and cutoff rows use each version's own direction and scores; denominators can differ. Gap is separation, not a calibrated confidence or profit estimate.")
-                st.dataframe(pd.DataFrame(result["by_direction"]),hide_index=True,width="stretch")
-                st.dataframe(pd.DataFrame(result["by_confidence_cutoff"]),hide_index=True,width="stretch")
-                st.dataframe(pd.DataFrame(result.get("by_edge_tier",[])),hide_index=True,width="stretch")
-                st.dataframe(pd.DataFrame(result.get("by_sportsbook_agreement",[])),hide_index=True,width="stretch")
+                st.dataframe(format_table(result["by_direction"]),hide_index=True,width="stretch")
+                st.dataframe(format_table(result["by_confidence_cutoff"]),hide_index=True,width="stretch")
+                st.dataframe(format_table(result.get("by_edge_tier",[])),hide_index=True,width="stretch")
+                st.dataframe(format_table(result.get("by_sportsbook_agreement",[])),hide_index=True,width="stretch")
                 st.caption(result.get("sportsbook_note",""))
-                st.dataframe(pd.DataFrame(result["by_day"]),hide_index=True,width="stretch")
+                st.dataframe(format_table(result["by_day"]),hide_index=True,width="stretch")
                 st.caption(result["limitation"])
                 st.caption(f'Prior-season evidence: {result["prior_history_rows"]} rows · Usable Vegas context: {result["vegas_rows"]} rows')
-            st.write({"excluded":result["excluded"]})
+            with st.expander('Excluded records', expanded=False):
+                excluded = result.get('excluded') or {}
+                if excluded:
+                    st.dataframe(pd.DataFrame([{'Reason':str(reason).replace('_',' ').capitalize(), 'Count':int(count)}
+                        for reason,count in excluded.items()]), hide_index=True, width='stretch')
+                else:
+                    st.caption('No excluded records.')
 
