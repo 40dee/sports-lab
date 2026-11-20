@@ -209,7 +209,7 @@ def saved_book_direction(market):
         return None
 
 
-def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat', diagnostics=False):
+def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat', diagnostics=False, include_rows=False):
     env = env or _env_ref
     raw = getattr(store,"_store",store)
     grades = dict(raw.items("grade"))
@@ -385,6 +385,9 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
         vegas_rows=int(frame.vegas_available.sum()),by_stat=[dict(stat=stat,**summary(group)) for stat,group in frame.groupby("stat")],
         by_day=[dict(day=day,**summary(group)) for day,group in frame.groupby("day")],
         limitation="Uses only stored pregame logs and frozen matchup factors. Historical logs may contain only L15, preventing prior-season shrinkage. Fixed heuristics were not selected on an untouched holdout. Not a production promotion or proof of calibrated probabilities.")
+    if include_rows:
+        # Optional compact per-pick diagnostics for saved day/cohort attribution.
+        result['replay_rows']=[{k:row[k] for k in ('id','v1_win','v2_win','v1_proj','v2_proj','v1_prob','v2_prob','v1_dir','v2_dir','actual')} for row in rows]
     if diagnostics:
         from replay_diagnostics import uncertainty_report,pra_ablation_report,health_inventory,sportsbook_inventory
         result["uncertainty_diagnostic"]=uncertainty_report(frame,calibrated_hit_probability)

@@ -5277,9 +5277,9 @@ def odds_fixture_params(fixture_id):
     return {'fixtureId':str(fixture_id),'bookmakers':','.join(BOOKS),'language':'en','verbosity':3}
 
 
-def line_freshness(card, reference=None, refresh_checks=None):
+def line_freshness(card, reference=None, refresh_checks=None, allow_daily_capture=False):
     current=pd.Timestamp.now(tz='UTC') if reference is None else utc_timestamp(reference)
-    if not today_pregame(card.get('Start (UTC)'),current):return True,'Saved pregame record; game started or outside today.'
+    if not today_pregame(card.get('Start (UTC)'),current):return not allow_daily_capture,'Saved pregame record; game started or outside today.'
     field='Tier Fetched At' if card.get('Tier Source')=='prizepicksapi.com' else 'Odds checked (UTC)'
     stamp=utc_timestamp(card.get(field))
     observed=utc_timestamp(card.get('Tier Observed At'))
@@ -5295,6 +5295,10 @@ def line_freshness(card, reference=None, refresh_checks=None):
     if pd.isna(stamp):
         return False,'Quote capture time is missing; verify the exact offered line.'
     age=(current-stamp).total_seconds()
+    captured=stamp.tz_convert('America/Los_Angeles')
+    if (allow_daily_capture and age>=0 and captured.hour>=12
+            and captured.date()==current.tz_convert('America/Los_Angeles').date()):
+        return True,'Saved quote captured '+captured.strftime('%b %d, %I:%M %p PT')+'; daily board retained. Confirm the posted line before playing.'
     if not 0 <= age<=limit:
         captured=stamp.tz_convert('America/Los_Angeles').strftime('%b %d, %I:%M %p PT')
         return False,'Saved quote captured '+captured+'; current offer is unverified. Browsing keeps the daily cache and makes no paid refresh.'
@@ -10291,7 +10295,7 @@ def ui_save_pick(card, frozen):
         for old_key,value in aliases:
             workflow_store.put('watchlist',old_key,dict(value,active=False))
         return False
-    fresh,note=line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
+    fresh,note=line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')),allow_daily_capture=True)
     if not fresh:
         st.info(note);return False
     if not frozen or not pick_is_selectable(card,frozen.get('result') or {}):
@@ -10458,7 +10462,7 @@ def ui_card(card, frozen, saved=False):
             direction_text=pick_display_label(card,result)
             direction_class='pending'
             probability=None
-    fresh, freshness_note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))
+    fresh, freshness_note = line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')),allow_daily_capture=True)
     if result and not fresh and not fantasy_weights(card):
         probability = None
     platform = str(card.get('Platform', '')).upper()
@@ -10478,7 +10482,7 @@ def ui_card(card, frozen, saved=False):
     if result and not pick_is_selectable(card,result):footer.append(pick_side_note(card,result))
     elif not fresh:footer.append(freshness_note+' · Verify line')
     elif not result:footer.append((workflow_store.get('calculation_status',identity(card)) or {}).get('reason') or 'Projection pending')
-    else:footer.append('Saved pregame · Estimates experimental')
+    else:footer.append(freshness_note+' · Estimates experimental')
     tier_label=tier_note or tier or platform
     sharp_info=consensus_edge_info(card,result)
     st.markdown(ui_html(f'''<div class="sl-card sl-compact">
@@ -10771,7 +10775,7 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
     result = (frozen or {}).get('result') or {}
     watched={k:v for k,v in workflow_store.items('watchlist') if v.get('active',True)}
     saved=any(k==(frozen or {}).get('id') or v.get('forecast_id')==(frozen or {}).get('id') for k,v in watched.items()) if frozen else False
-    fresh=line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')))[0]
+    fresh=line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')),allow_daily_capture=True)[0]
     if save.button('★ Saved' if saved else '☆ Save',key='detail_save_'+identity(card),disabled=not saved and (not fresh or not pick_is_selectable(card,result))):
         ui_save_pick(card,frozen);st.rerun()
     name = ui_name(card.get('Player', ''))
@@ -10797,7 +10801,7 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
         st.markdown(ui_html(f'''<div class="sl-hero"><div class="sl-side {side_class}">{ui_text(side)} {line_text}</div>
         <div class="sl-proj"><small>Model projection</small><b>{f'{projection:.2f}' if projection is not None else '—'}</b></div>
         <div class="sl-proj"><small>Estimated hit</small><b>{f'{probability:.0%}' if probability is not None else '—'}</b></div></div>'''), unsafe_allow_html=True)
-        st.caption('Frozen pregame forecast · Experimental probability estimate')
+        st.caption(line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')),allow_daily_capture=True)[1]+' · Frozen pregame forecast · Experimental probability estimate')
         if not pick_is_selectable(card, result):
             st.warning(pick_side_note(card, result))
     else:
@@ -10961,7 +10965,7 @@ def ui_board(page):
         calculated = [c for c in records if identity(c) in forecasts
                    and not (health.get('players', {}).get(player_health_key(c)) or {}).get('blocked', False)]
         verified = [c for c in calculated
-                   if line_freshness(c,refresh_checks=line_checks)[0]
+                   if line_freshness(c,refresh_checks=line_checks,allow_daily_capture=True)[0]
                    and pick_is_selectable(c, forecasts[identity(c)]['result'])
                    and not forecasts[identity(c)]['result'].get('tie', False)]
         records = calculated

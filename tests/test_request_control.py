@@ -116,6 +116,29 @@ class FreshnessTests(unittest.TestCase):
   c=self.card(**{'Start (UTC)':'2026-11-09T21:45:00Z','Odds checked (UTC)':'2026-11-09T20:20:00Z'})
   self.assertFalse(env['line_freshness'](c,self.REF)[0])
   c['Start (UTC)']='2026-11-09T20:00:00Z';self.assertTrue(env['line_freshness'](c,self.REF)[0])
+ def test_afternoon_capture_keeps_ui_enabled_until_tipoff(self):
+  c=self.card(**{'Start (UTC)':'2026-11-20T01:10:00Z','Odds checked (UTC)':'2026-11-19T23:04:00Z'})
+  fresh,note=env['line_freshness'](c,'2026-11-20T00:54:00Z',allow_daily_capture=True)
+  self.assertTrue(fresh);self.assertIn('03:04 PM PT',note);self.assertIn('Confirm the posted line',note)
+  self.assertFalse(env['line_freshness'](c,'2026-11-20T00:54:00Z')[0])
+  self.assertTrue(env['line_freshness'](c,'2026-11-20T01:09:59Z',allow_daily_capture=True)[0])
+  self.assertFalse(env['line_freshness'](c,'2026-11-20T01:10:00Z',allow_daily_capture=True)[0])
+ def test_daily_ui_does_not_accept_missing_future_prior_day_or_morning_capture(self):
+  for captured in (None,'2026-11-20T01:00:00Z','2026-11-19T00:00:00Z','2026-11-19T18:00:00Z'):
+   c=self.card(**{'Start (UTC)':'2026-11-20T01:10:00Z','Odds checked (UTC)':captured})
+   self.assertFalse(env['line_freshness'](c,'2026-11-20T00:54:00Z',allow_daily_capture=True)[0],captured)
+ def test_daily_ui_retains_explicit_failed_check_and_native_observed_time(self):
+  c=self.card(**{'Start (UTC)':'2026-11-20T01:10:00Z','Odds checked (UTC)':'2026-11-19T23:04:00Z'})
+  checks={'f1':{'attempted_at':'2026-11-20T00:00:00Z','state':'retained'}}
+  self.assertFalse(env['line_freshness'](c,'2026-11-20T00:54:00Z',checks,allow_daily_capture=True)[0])
+  c.update({'Tier Source':'prizepicksapi.com','Tier Fetched At':'2026-11-19T23:04:00Z','Tier Observed At':'2026-11-19T17:00:00Z'})
+  self.assertFalse(env['line_freshness'](c,'2026-11-20T00:54:00Z',allow_daily_capture=True)[0])
+ def test_ui_only_callers_opt_in_to_retained_daily_captures(self):
+  for name in ('ui_save_pick','ui_card','ui_detail','ui_board'):
+   node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name==name)
+   calls=[c for c in ast.walk(node) if isinstance(c,ast.Call) and isinstance(c.func,ast.Name) and c.func.id=='line_freshness']
+   self.assertTrue(calls,name)
+   self.assertTrue(all(any(k.arg=='allow_daily_capture' and isinstance(k.value,ast.Constant) and k.value.value is True for k in c.keywords) for c in calls),name)
  def test_news_targets_only_changed_game_and_unknown_not_fabricated_news(self):
   c=self.card();key=env['player_health_key'](c)
   prev={'players':{key:{'injuries_available':True,'statuses':['Questionable'],'blocked':False}}}
@@ -273,4 +296,5 @@ class CompactReadTests(unittest.TestCase):
   self.assertNotIn('result',metadata['today'])
   self.assertEqual(metadata['today']['card']['Start (UTC)'],'2026-11-10T02:00:00Z')
   self.assertEqual(self.store.get('forecast','today')['result']['projection'],1.)
+
 

@@ -22,6 +22,15 @@ class ReplayTests(unittest.TestCase):
    self.assertEqual(sum(r['picks'] for r in groups),2)
   v1={r['agreement']:r['picks'] for r in report['by_sportsbook_agreement'] if r['version']=='v1'}
   self.assertEqual(v1,{'Agrees':1,'Disagrees':1,'Neutral':0,'Unavailable':0})
+ def test_optional_day_diagnostic_rows_match_summary_and_do_not_mutate_forecasts(self):
+  store,env=self.setup_data();original=copy.deepcopy(store.records)
+  ordinary=v2.run_backtest(store,env,max_samples=None)
+  report=v2.run_backtest(store,env,max_samples=None,include_rows=True)
+  self.assertNotIn('replay_rows',ordinary)
+  self.assertEqual(len(report['replay_rows']),report['picks'])
+  self.assertEqual(sorted(r['id'] for r in report['replay_rows']),report['cohort_ids'])
+  self.assertAlmostEqual(sum(r['v2_win'] for r in report['replay_rows'])/report['picks'],report['v2_hit'])
+  self.assertEqual(store.records,original)
  def test_unverified_saved_market_cannot_be_used_for_agreement(self):
   self.assertIsNone(v2.saved_book_direction({'book':'draftkings','more':.6,'less':.4}))
   verified={'book':'draftkings','match_method':'teams-time-player-stat-period-line','more':.5,'less':.5}
