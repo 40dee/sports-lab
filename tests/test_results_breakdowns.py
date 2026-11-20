@@ -68,7 +68,7 @@ class ResultsDisplayTests(unittest.TestCase):
         key = fixtures.env['identity'](frozen['card'])
         frozen['id'] = key
         # Legacy forecasts have no selection_allowed key; verified Standard sides still count.
-        frozen['result'].update(estimated_hit_probability=.6)
+        frozen['result'].update(estimated_hit_probability=.6, market={'book':'pinnacle','more':.44,'less':.56,'match_method':'teams-time-player-stat-period-line'})
         store.put('forecast', key, frozen)
         store.put('grade', key, {'status': 'FINAL', 'outcome': 'LOSS', 'actual': 18})
         later = copy.deepcopy(frozen)
@@ -91,6 +91,10 @@ class ResultsDisplayTests(unittest.TestCase):
         direction = next(d.value for d in app.dataframe if 'Direction' in d.value.columns and 'Settled picks' in d.value.columns)
         self.assertEqual(direction.iloc[0]['Losses'], 1)
         self.assertEqual(direction.iloc[0]['Average estimate'], '60.0%')
+        sharp = next(d.value for d in app.dataframe if 'Category' in d.value.columns)
+        self.assertEqual(sharp.iloc[0]['Category'], '🔥 Sharp +EV (54%+ · sharp side)')
+        self.assertEqual(sharp.iloc[0]['Hit rate'], '100.0%')
+        self.assertEqual(sharp.iloc[0]['Wins'], 1)
         app.selectbox(key='results_scope').select('All research (raw)').run()
         self.assertFalse(app.exception, list(app.exception))
         grid=next(m.value for m in app.markdown if '<div class="sl-results-kpis">' in m.value)
@@ -99,3 +103,65 @@ class ResultsDisplayTests(unittest.TestCase):
         direction = next(d.value for d in app.dataframe if 'Direction' in d.value.columns and 'Settled picks' in d.value.columns)
         self.assertEqual(direction.iloc[0]['Settled picks'], 1)
         self.assertEqual(direction.iloc[0]['Wins'], 1)
+
+
+class SharpMarketTests(unittest.TestCase):
+    def record(self, **changes):
+        return row(**dict({'Actual': 8, 'Line': 10.5, 'Pick': 'MORE', 'Outcome': 'LOSS',
+            'Market': {'match_method': 'teams-time-player-stat-period-line',
+                       'book': 'pinnacle', 'more': .44, 'less': .56}}, **changes))
+
+    def breakdown(self, rows):
+        from result_scopes import sharp_market_breakdowns
+        return sharp_market_breakdowns(rows)
+
+    def test_sharp_side_disagrees_with_model_and_grades_its_own_win(self):
+        rows = [self.record()]
+        before = copy.deepcopy(rows)
+        result = self.breakdown(rows)
+        self.assertEqual([r['Category'].split()[0] for r in result], ['🔥', '🎯', '⚠️'])
+        self.assertEqual([r['Wins'] for r in result], [1, 1, 0])
+        self.assertEqual([r['Losses'] for r in result], [0, 0, 1])
+        self.assertEqual(rows, before)
+
+    def test_unoffered_and_empty_sides_never_enter_sharp_cohorts(self):
+        for sides in (['MORE'], []):
+            result = self.breakdown([self.record(**{'Line type': 'Demon', 'Available sides': sides})])
+            self.assertEqual([r['Category'].split()[0] for r in result], ['⚠️'])
+        self.assertEqual(self.breakdown([self.record(**{'Line type':'Demon', 'Pick':'LESS', 'Outcome':'WIN'})]), [])
+
+    def test_only_final_nonpush_pregame_rows_with_finite_values_count(self):
+        for change in ({'Grade status':'PENDING'}, {'Outcome':'TIE'}, {'Outcome':'DNP'},
+                       {'Created (UTC)':'2026-11-18T00:00Z'},
+                       {'Created (UTC)':'2026-11-17T23:00Z'}, {'Start (UTC)':None},
+                       {'Actual':10.5}, {'Actual':float('nan')}, {'Line':float('inf')}, {'Actual':True}):
+            with self.subTest(change=change):
+                self.assertEqual(self.breakdown([self.record(**change)]), [])
+
+    def test_weighted_books_override_legacy_aggregate_and_pinnacle_marker(self):
+        market = {'match_method':'teams-time-player-stat-period-line', 'more':.5, 'less':.5,
+                  'books':[{'book':'pinnacle','more':.6,'less':.4},
+                           {'book':'bovada','more':.4,'less':.6}]}
+        rows = [self.record(Market=market, Actual=12, Outcome='WIN')]
+        before = copy.deepcopy(rows)
+        result = self.breakdown(rows)
+        self.assertEqual([r['Category'].split()[0] for r in result], ['🔥','✓','🎯'])
+        self.assertTrue(all(r['Settled']==1 and r['Hit rate']==1 for r in result))
+        self.assertEqual(rows, before)
+
+    def test_exact_match_validation_and_invalid_books_fail_closed(self):
+        for market in (None, {}, {'more':.6,'less':.6},
+                       {'match_method':'other','more':.6,'less':.4},
+                       {'match_method':'teams-time-player-stat-period-line','more':.6,'less':.4,'books':[]},
+                       {'match_method':'teams-time-player-stat-period-line','more':.6,'less':.4,'books':[{}]}):
+            self.assertEqual(self.breakdown([self.record(Market=market)]), [])
+
+    def test_thresholds_and_standard_fallback(self):
+        for p, symbols in ((.535,['✓','🎯']),(.54,['🔥','✓','🎯']),(.49,[]),(.489,['⚠️'])):
+            market={'book':'pinnacle','more':p,'less':1-p,'match_method':'teams-time-player-stat-period-line'}
+            # Only MORE is offered so a high LESS probability cannot enter sharp cohorts.
+            result=self.breakdown([self.record(Market=market, **{'Available sides':['MORE']})])
+            self.assertEqual([r['Category'].split()[0] for r in result],symbols)
+        for platform, tier in (('prizepicks','Regular'),('draftkings','Standard')):
+            result=self.breakdown([self.record(Platform=platform, **{'Line type':tier})])
+            self.assertEqual(any(r['Category'].startswith('🔥') for r in result),platform=='prizepicks')

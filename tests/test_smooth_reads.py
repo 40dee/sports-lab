@@ -43,7 +43,7 @@ class SmoothReadTests(unittest.TestCase):
   compact=self.store.research_forecast_items()
   self.assertLess(len(json.dumps(compact)),len(json.dumps(self.frozen))/50)
   self.assertEqual(compact[0][1]['result'],{'direction':'MORE','projection':14.5,
-   'selection_allowed':None,'tie':None,'estimated_hit_probability':.61})
+   'selection_allowed':None,'tie':None,'estimated_hit_probability':.61,'market':None})
   self.assertEqual(self.store.get('forecast','first'),self.frozen)
   engine={'market_columns':lambda card:[card['Stat']]}
   actual=env['research_rows'](SimpleNamespace(store=self.store,e=engine))
@@ -51,6 +51,20 @@ class SmoothReadTests(unittest.TestCase):
   expected=env['research_rows'](SimpleNamespace(store=full,e=engine))
   self.assertEqual(actual,expected)
   self.assertEqual(actual[0]['Estimated hit probability'],.61)
+ def test_research_quotes_and_sides_survive_without_heavy_evidence(self):
+  market={'match_method':'teams-time-player-stat-period-line','book':'pinnacle','more':.45,'less':.55}
+  self.frozen['result'].update(market=market,roster={'huge':'x'*10000},games={'huge':'x'*10000})
+  self.frozen['card']['Available Sides']=['MORE']
+  self.store.put('forecast','first',self.frozen)
+  compact=self.store.research_forecast_items()[0][1]
+  self.assertEqual(compact['result']['market'],market)
+  self.assertNotIn('snapshot',compact)
+  self.assertNotIn('roster',compact['result'])
+  self.assertNotIn('games',compact['result'])
+  rows=env['research_rows'](SimpleNamespace(store=self.store,e={'market_columns':lambda c:[c['Stat']]}))
+  self.assertEqual(rows[0]['Market'],market)
+  self.assertEqual(rows[0]['Available sides'],['MORE'])
+  self.assertEqual(self.store.get('forecast','first'),self.frozen)
  def test_research_pagination_does_not_drop_records(self):
   with self.store.connection() as con:
    f=copy.deepcopy(self.frozen);f['snapshot']={};f['result'].pop('history_evidence');f['card'].pop('unused_provider_evidence')

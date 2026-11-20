@@ -294,7 +294,7 @@ class Store:
                     else "json_object('id',json_extract(payload,'$.id'),'card',json_extract(payload,'$.card'),'created_at',json_extract(payload,'$.created_at'),'event_id',json_extract(payload,'$.event_id'))")
                 portrait='NULL'
             if research_only:
-                # Results need identity and two prediction values, not complete
+                # Results need compact predictions and market quotes, not complete
                 # model evidence, history windows, portraits or source snapshots.
                 card_fields=('Fixture ID','Platform','Player','Stat Key','Period','Line','Line Type',
                              'Game','Start (UTC)','Stat','Available Sides')
@@ -308,7 +308,7 @@ class Store:
                     return ('jsonb_build_object' if postgres else 'json_object')+'('+','.join(pairs)+')'
                 fields=projection(('id','created_at','event_id'))
                 card=projection(card_fields,'card')
-                result=projection(('direction','projection','selection_allowed','tie','estimated_hit_probability'),'result')
+                result=projection(('direction','projection','selection_allowed','tie','estimated_hit_probability','market'),'result')
                 if postgres:
                     expression="("+fields+" || jsonb_build_object('card',"+card+",'result',"+result+"))::text"
                 else:
@@ -3281,6 +3281,8 @@ class Workflow:
                 "Pick": result["direction"],
                 "Projection": result["projection"],
                 "Estimated hit probability": result.get("estimated_hit_probability"),
+                "Market": result.get("market"),
+                "Available sides": card.get("Available Sides"),
                 "Actual": (
                     grade.get("actual")
                     if grade
@@ -4604,6 +4606,17 @@ def render_results_dashboard(wf, st):
                 st.dataframe(display, hide_index=True, use_container_width=True)
             else:
                 st.info('No settled pregame MORE/LESS picks match these filters.')
+
+    from result_scopes import sharp_market_breakdowns
+    sharp_rows = sharp_market_breakdowns(visible.to_dict('records'))
+    with st.expander('Sharp market & +EV record', expanded=bool(sharp_rows)):
+        st.caption('Uses frozen pregame sportsbook quotes with sharp weighting. Sharp +EV and Pinnacle-backed rows are graded on the sharp-favored offered side; aligned/opposition rows use the frozen model side.')
+        if sharp_rows:
+            display = pd.DataFrame(sharp_rows)
+            display['Hit rate'] = display['Hit rate'].map(lambda value: f'{value:.1%}')
+            st.dataframe(display, hide_index=True, use_container_width=True)
+        else:
+            st.info('No settled pregame picks with qualifying exact-line sportsbook quotes match these filters.')
 
     render_combo_hit_rates(wf.store,st,date)
 
