@@ -10,37 +10,58 @@ def local(time,day='2026-11-18'):
 class ScheduledCaptureTests(unittest.TestCase):
  def due(self,time,starts,ledger=None,day='2026-11-18'):
   return ENV['scheduled_board_refresh_due'](local(time,day),[local(start,day) for start in starts],ledger or {})
- def test_normal_evening_slate_waits_until_130(self):
+ def test_normal_evening_slate_waits_until_245(self):
   starts=['16:00','16:00','16:30','17:00','18:00','19:00']
-  for time in ('08:00','10:00','13:29:59'):self.assertFalse(self.due(time,starts))
-  for time in ('13:30','13:40','15:59'):self.assertTrue(self.due(time,starts))
+  for time in ('08:00','10:00','14:44:59'):self.assertFalse(self.due(time,starts))
+  for time in ('14:45','14:50','15:59'):self.assertTrue(self.due(time,starts))
  def test_one_noon_game_does_not_spend_evening_capture(self):
   starts=['12:00']+['16:00']*6
-  for time in ('08:00','10:00','11:59','13:29:59'):self.assertFalse(self.due(time,starts))
-  self.assertTrue(self.due('13:30',starts))
- def test_sunday_early_heavy_slate_captures_two_hours_before_first_game(self):
+  for time in ('08:00','10:00','11:59','14:44:59'):self.assertFalse(self.due(time,starts))
+  self.assertTrue(self.due('14:45',starts))
+ def test_sunday_early_heavy_slate_captures_75_minutes_before_first_game(self):
   starts=['10:00','10:30','11:00','12:00','12:30','16:00','18:00']
-  self.assertFalse(self.due('07:59:59',starts,day='2026-11-22'))
-  self.assertTrue(self.due('08:00',starts,day='2026-11-22'))
+  self.assertFalse(self.due('08:44:59',starts,day='2026-11-22'))
+  self.assertTrue(self.due('08:45',starts,day='2026-11-22'))
  def test_main_ties_and_three_main_games_take_priority(self):
   for starts in (['12:00','13:00','16:00','17:00'],['10:00']*5+['16:00']*3):
-   self.assertFalse(self.due('08:00',starts));self.assertTrue(self.due('13:30',starts))
+   self.assertFalse(self.due('08:00',starts));self.assertTrue(self.due('14:45',starts))
  def test_all_early_and_two_pm_boundary(self):
-  self.assertFalse(self.due('07:59',['10:00','12:00']))
-  self.assertTrue(self.due('08:00',['10:00','12:00']))
+  self.assertFalse(self.due('08:44:59',['10:00','12:00']))
+  self.assertTrue(self.due('08:45',['10:00','12:00']))
   self.assertFalse(self.due('10:00',['13:30']))
-  self.assertTrue(self.due('11:30',['13:30']))
-  self.assertFalse(self.due('11:29',['14:00']))
-  self.assertTrue(self.due('11:30',['14:00']))
+  self.assertTrue(self.due('12:15',['13:30']))
+  self.assertFalse(self.due('12:44',['14:00']))
+  self.assertTrue(self.due('12:45',['14:00']))
  def test_pacific_daylight_saving_and_utc_inputs(self):
   for day in ('2026-07-12','2026-11-22'):
-   self.assertFalse(self.due('13:29',['16:00'],day=day))
-   self.assertTrue(self.due('13:30',['16:00'],day=day))
+   self.assertFalse(self.due('14:44:59',['16:00'],day=day))
+   self.assertTrue(self.due('14:45',['16:00'],day=day))
  def test_refresh_guard_invalid_and_finished_games_and_no_mutations(self):
   fn=ENV['scheduled_board_refresh_due'];starts=[local('16:00')];ledger={'refreshes':1};before=copy.deepcopy(ledger)
-  self.assertFalse(fn(local('13:30'),starts,ledger));self.assertEqual(ledger,before)
+  self.assertFalse(fn(local('14:45'),starts,ledger));self.assertEqual(ledger,before)
   self.assertEqual(starts,[local('16:00')])
-  for values in ([],['bad'],[local('08:00')],[local('13:30')]):
-   self.assertFalse(fn(local('13:30'),values,{}))
-  self.assertTrue(fn(local('13:30'),['bad',local('16:00')],{}))
+  for values in ([],['bad'],[local('08:00')],[local('14:45')]):
+   self.assertFalse(fn(local('14:45'),values,{}))
+  self.assertTrue(fn(local('14:45'),['bad',local('16:00')],{}))
+ def test_scheduled_scoreboard_includes_late_utc_tipoffs_but_only_today_pacific(self):
+  from types import SimpleNamespace
+  from unittest.mock import Mock
+  auto=next(n for n in TREE.body if isinstance(n,ast.If) and "'--auto-board' in sys.argv" == ast.unparse(n.test))
+  scheduled=next(n for n in ast.walk(auto) if isinstance(n,ast.If) and ast.unparse(n.test)=='scheduled')
+  query=next(n for n in scheduled.body if isinstance(n,ast.Try))
+  today_node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='today_pregame')
+  for day in ('2026-07-12','2026-11-22'):
+   late=local('22:00',day).tz_convert('UTC')
+   tomorrow=local('00:30',day)+pd.DateOffset(days=1)
+   fetch=Mock(return_value={'events':[{'date':late.isoformat()}, {'date':tomorrow.isoformat()},
+                                      {'date':local('08:00',day).isoformat()}, {'date':'bad'}]})
+   env=dict(ENV,current=local('14:45',day),today=day,
+            workflow=SimpleNamespace(e={'saved_fetch':fetch,'ESPN_BASE':'offline/'}))
+   exec(compile(ast.Module(body=[today_node]+query.body,type_ignores=[]),'app.py','exec'),env)
+   self.assertEqual(fetch.call_count,1)
+   begin=pd.Timestamp(day)
+   expected=begin.strftime('%Y%m%d')+'-'+(begin+pd.DateOffset(days=1)).strftime('%Y%m%d')
+   self.assertEqual(fetch.call_args.args[1],{'dates':expected,'limit':1000})
+   self.assertEqual(fetch.call_args.kwargs,{'ttl_seconds':300})
+   self.assertEqual(env['starts'],[late])
 if __name__=='__main__':unittest.main()

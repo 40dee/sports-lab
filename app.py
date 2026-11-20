@@ -9805,12 +9805,12 @@ def scheduled_board_refresh_due(current, starts, ledger):
     main_starts = [start for start in upcoming if start.tz_convert(SLATE_TIMEZONE).hour >= 14]
     if main_starts and (len(main_starts) >= len(early_starts) or len(main_starts) >= 3):
         target = min(main_starts)
-        lead_minutes = 150
+        lead_minutes = 75
     else:
-        # An early-heavy/all-early slate must retain its full two-hour lead,
+        # An early-heavy/all-early slate uses the same 75-minute lead,
         # even before 10 AM. Later starts go through the main-slate branch.
         target = min(upcoming)
-        lead_minutes = 120
+        lead_minutes = 75
     return current >= target - pd.Timedelta(minutes=lead_minutes)
 
 
@@ -10173,8 +10173,10 @@ if '--auto-board' in sys.argv:
             current=pd.Timestamp.now(tz='UTC')
             today=slate_day(current)
             try:
+                begin=pd.Timestamp(today,tz=SLATE_TIMEZONE)
+                dates=begin.strftime('%Y%m%d')+'-'+(begin+pd.DateOffset(days=1)).strftime('%Y%m%d')
                 schedule=workflow.e['saved_fetch'](workflow.e['ESPN_BASE']+'scoreboard',
-                    {'dates':today.replace('-',''),'limit':1000},ttl_seconds=300)
+                    {'dates':dates,'limit':1000},ttl_seconds=300)
                 starts=sorted(utc_timestamp(g.get('date')) for g in schedule.get('events',[])
                     if pd.notna(utc_timestamp(g.get('date')))
                     and today_pregame(g.get('date'),current))
