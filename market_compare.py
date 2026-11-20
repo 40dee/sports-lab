@@ -3,6 +3,27 @@ from datetime import datetime
 from sportsbook_capture import BOOKS
 import math
 
+BOOK_WEIGHTS = {
+    "pinnacle": 3.0,
+    "fanduel": 1.5,
+    "draftkings": 1.5,
+    "betmgm": 1.0,
+    "bovada": 1.0,
+}
+
+
+def sharp_weighted_market(market):
+    """Derive a display copy from saved per-book pairs; never mutate a forecast."""
+    books=market.get('books') or []
+    if len(books)<2:return market
+    try:
+        if not all(isinstance(b,dict) and all(math.isfinite(float(b[k])) and 0<=float(b[k])<=1 for k in ('more','less'))
+                   and abs(float(b['more'])+float(b['less'])-1)<1e-6 for b in books):return market
+        weights=[BOOK_WEIGHTS.get(b['book'],1.0) for b in books]
+        more=sum(float(b['more'])*w for b,w in zip(books,weights))/sum(weights)
+    except (KeyError,TypeError,ValueError):return market
+    return dict(market,book='consensus',more=more,less=1-more,book_count=len(books),consensus_method='sharp-weighted-no-vig')
+
 def compare_no_vig(card, rows, normalize_player, team_key, columns, fantasy_weights):
     def player(value):
         value=str(value or "")
@@ -63,7 +84,9 @@ def compare_no_vig(card, rows, normalize_player, team_key, columns, fantasy_weig
     if not books:return None
     if len(books)==1:
         return dict(books[0],books=[books[0]],book_count=1,consensus_method="equal-weight-no-vig")
-    more=sum(book["more"] for book in books)/len(books)
+    weights=[BOOK_WEIGHTS.get(book["book"],1.0) for book in books]
+    total_weight=sum(weights)
+    more=sum(book["more"]*w for book,w in zip(books,weights))/total_weight
     return {"book":"consensus","more":more,"less":1-more,"books":books,"book_count":len(books),
-            "match_method":"teams-time-player-stat-period-line","consensus_method":"equal-weight-no-vig"}
+            "match_method":"teams-time-player-stat-period-line","consensus_method":"sharp-weighted-no-vig"}
 

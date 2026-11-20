@@ -14,6 +14,19 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 
+def _refresh_consensus_helpers():
+    """Refresh pre-weighting helpers retained by a warm app process after deploy."""
+    import importlib
+    import market_compare
+    if not hasattr(market_compare,'BOOK_WEIGHTS'):
+        importlib.reload(market_compare)
+    import line_edges
+    if not hasattr(line_edges,'BOOK_WEIGHTS'):
+        importlib.reload(line_edges)
+
+
+_refresh_consensus_helpers()
+
 import numpy as np
 import pandas as pd
 
@@ -10359,6 +10372,8 @@ def consensus_edge_info(card, result, board_rows=None):
         market=(engine_no_vig(card) if board_rows is None else engine_no_vig(card,board_rows)) or {}
         source='matching saved board'
     if not valid(market):return {'line_edge':line_edge_info(card,result,board_rows),'model_probability':None,'best_side':None,'best_probability':None,'book_count':0,'aligned':False,'sharp_ev':False}
+    from market_compare import sharp_weighted_market
+    market=sharp_weighted_market(market)
     direction=str(result.get('direction') or '').upper()
     offered=(pick_offered_sides(card) or ()) if str(card.get('Platform','')).lower()=='prizepicks' else ()
     probability=market.get(direction.lower()) if direction in ('MORE','LESS') else None
@@ -10417,8 +10432,9 @@ def ui_sharp_side_badge(info, direction):
 
 
 def ui_card_badges(result, direction):
+    from market_compare import sharp_weighted_market
     badges=[]
-    market=result.get('market') or {}
+    market=sharp_weighted_market(result.get('market') or {})
     probability=ui_number(market.get(str(direction).lower())) if direction in ('MORE','LESS') else None
     if probability is not None and 0<=probability<=1:
         label='Consensus' if (market.get('book_count') or len(market.get('books') or []))>1 else 'Sportsbook'
@@ -10915,12 +10931,12 @@ def ui_board(page):
         return
     st.subheader('Saved plays' if page == 'Saved' else 'Your NBA plays')
     view = (st.segmented_control('Board view', ['Top plays', 'All props'], default=st.session_state.get('mobile_view', 'Top plays'), key='mobile_view_buttons', width='stretch') or 'Top plays') if page != 'Saved' else 'All props'
-    market_filter='All';sharp_sort='Game time'
+    market_filter='All';sharp_sort='Highest sharp %' if page=='Plays' else 'Model score'
     if page=='Plays':
         market_filter=st.segmented_control('Market',['All','✓ Sharp aligned (53.5%+)','🔥 Sharp +EV (54%+)'],default='All',key='plays_market_filter',width='stretch') or 'All'
-        if st.session_state.get('plays_sharp_sort') not in (None,'Game time','Highest sharp %'):
+        if st.session_state.get('plays_sharp_sort') not in (None,'Highest sharp %','Model score'):
             st.session_state.pop('plays_sharp_sort',None)
-        sharp_sort=st.segmented_control('Sort by',['Game time','Highest sharp %'],default='Game time',key='plays_sharp_sort',width='stretch') or 'Game time'
+        sharp_sort=st.segmented_control('Sort by',['Highest sharp %','Model score'],default='Highest sharp %',key='plays_sharp_sort',width='stretch') or 'Highest sharp %'
     stat = st.segmented_control('Stat', ['All','Points','Rebounds','Assists','PRA','Fantasy Score'], default=st.session_state.get('mobile_stat_pills','All'), key='mobile_stat_pills',label_visibility='collapsed',width='stretch') or 'All'
     kind='Fantasy' if stat=='Fantasy Score' else 'All'
     with st.expander('Filters & Search'):
@@ -10995,7 +11011,7 @@ def ui_board(page):
             st.warning('No entry-ready picks passed the current checks. Showing saved pregame projections for review below. Their exact lines or offered directions need verification; these are not current slip recommendations.')
         elif len(calculated)>len(verified):
             st.caption(f'{len(calculated)-len(verified)} saved forecasts need line verification or are passes; they remain visible below with review labels.')
-        st.caption('Gap size is not a validated confidence score; default order follows game time.')
+        st.caption('Model score is experimental gap size, not validated confidence. Sharp sorting uses saved sportsbook quotes.')
     else:
         records.sort(key=lambda c: (str(c['Player']), ui_stat(c), float(c['Line'])))
     # Display-only grouping: alternate thresholds are still retained as

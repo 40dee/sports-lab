@@ -34,6 +34,21 @@ class CaptureTests(unittest.TestCase):
         self.assertAlmostEqual(result['more'],sum(b['more'] for b in result['books'])/2)
         f.download(store,'key',NOW,get,markets=f.BOARD_MARKETS)
         self.assertEqual(get.call_count,2)
+    def test_pinnacle_has_three_times_bovada_consensus_weight(self):
+        game=self.game()
+        for book,name,prices in zip(game['bookmakers'][1:],('pinnacle','bovada'),((-150,150),(150,-150))):
+            book['key']=name
+            for outcome,price in zip(book['markets'][0]['outcomes'],prices):outcome['price']=price
+        card=f.decode(game,NOW.isoformat(),NOW)[0];quotes=card['Sportsbook Quotes']
+        original=copy.deepcopy((card,quotes))
+        result=self.compare(card,quotes)
+        by_book={b['book']:b['more'] for b in result['books']}
+        self.assertEqual(result['book_count'],2)
+        self.assertAlmostEqual(result['more'],(3*by_book['pinnacle']+by_book['bovada'])/4)
+        self.assertAlmostEqual(result['more'],.55)
+        self.assertNotAlmostEqual(result['more'],sum(by_book.values())/2)
+        self.assertEqual(result['consensus_method'],'sharp-weighted-no-vig')
+        self.assertEqual((card,quotes),original)
     def test_pairs_never_mix_books_lines_or_snapshots(self):
         card=f.decode(self.game(),NOW.isoformat(),NOW)[0]
         quotes=card['Sportsbook Quotes']

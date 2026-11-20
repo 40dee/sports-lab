@@ -3,6 +3,7 @@ import json, math
 from datetime import datetime
 from statistics import NormalDist, pstdev
 from sportsbook_capture import BOOKS, capture_quotes
+from market_compare import BOOK_WEIGHTS
 
 
 def stamp(value):
@@ -82,7 +83,9 @@ def detect(card, result, rows, compare, offered, columns, fantasy=False):
     floor=22. if fantasy else math.sqrt(sum(floors.get(c,12.)**2 for c in columns)) if columns else 12.
     values=[float(v) for v in result.get('recent_values') or [] if isinstance(v,(int,float)) and math.isfinite(v)]
     spread=max(floor,pstdev(values) if len(values)>=5 else 0)
-    normal=NormalDist();p=sum(b['more'] for b in books)/len(books)
+    normal=NormalDist()
+    weights=[BOOK_WEIGHTS.get(b['book'],1.0) for b in books]
+    p=sum(b['more']*w for b,w in zip(books,weights))/sum(weights)
     if not 0<p<1:return None
     more=normal.cdf(normal.inv_cdf(p)+(line-pp)/spread)
     probabilities={'MORE':min(.65,more),'LESS':min(.65,1-more)}

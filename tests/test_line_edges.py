@@ -11,6 +11,20 @@ class LineEdgeTests(unittest.TestCase):
   return compare_no_vig(c,rows,clean,clean,lambda c:[c['Stat Key']],lambda c:None)
  def run_edge(self,rows,offered=('MORE','LESS'),columns=('PTS',)):
   return detect(self.card,{},rows,self.compare,offered,columns)
+ def test_moved_line_probability_uses_pinnacle_three_to_one_weight(self):
+  import math
+  from statistics import NormalDist
+  from unittest.mock import patch
+  rows=[]
+  for book,prices in (('pinnacle',(-150,150)),('bovada',(150,-150))):
+   rows.extend(dict(row,Platform=book,Odds=price) for row,price in zip(self.rows()[:2],prices))
+  original=copy.deepcopy(rows);edge=self.run_edge(rows)
+  self.assertEqual(edge['book_count'],2);self.assertEqual(edge['side'],'MORE')
+  normal=NormalDist()
+  self.assertAlmostEqual(edge['probability'],normal.cdf(normal.inv_cdf(.55)+1/12))
+  with patch.dict('line_edges.BOOK_WEIGHTS',{'pinnacle':1.,'bovada':1.}):
+   self.assertIsNone(self.run_edge(rows))
+  self.assertEqual(rows,original)
  def test_pp_and_book_captures_must_be_within_thirty_minutes(self):
   for captured,expected in (('2026-11-18T17:35Z',True),('2026-11-18T17:34:59Z',False),('2026-11-18T18:35Z',True),('2026-11-18T18:35:01Z',False),(None,False)):
    with self.subTest(captured=captured):

@@ -29,6 +29,12 @@ class MobileRedesignTests(unittest.TestCase):
    self.assertEqual(svg.count('<rect'),3)
    self.assertIn('#23e689',svg);self.assertIn('#e04f5f',svg);self.assertIn('#91acbc',svg)
   self.assertEqual(render(list(range(20)),10,'MORE').count('<rect'),10)
+ def test_consensus_badges_derive_sharp_weights_without_rewriting_saved_result(self):
+  import copy
+  result={'market':{'more':.5,'less':.5,'book_count':2,'books':[{'book':'pinnacle','more':.6,'less':.4},{'book':'bovada','more':.4,'less':.6}]}}
+  original=copy.deepcopy(result)
+  self.assertIn('✓ Consensus 55%',self.env()['ui_card_badges'](result,'MORE'))
+  self.assertEqual(result,original)
  def test_saved_badge_thresholds_and_escaping(self):
   render=self.env()['ui_card_badges']
   for value,symbol in ((.535,'✓'),(.489,'⚠️'),(.51,'')):

@@ -21,6 +21,35 @@ class SharpConsensusTests(unittest.TestCase):
   badge=self.env['ui_sharp_side_badge'](info,'LESS')
   self.assertIn('↑ MORE 55.4% (3 books)',badge)
   self.assertEqual(result,original);self.assertEqual(card,self.card)
+ def test_saved_equal_weight_market_is_reweighted_for_display_without_mutation(self):
+  result={'direction':'MORE','projection':9,'market':{'book':'consensus','more':.5,'less':.5,'book_count':2,'consensus_method':'equal-weight-no-vig',
+          'books':[{'book':'pinnacle','more':.6,'less':.4},{'book':'bovada','more':.4,'less':.6}]}}
+  original=copy.deepcopy(result)
+  info=self.env['consensus_edge_info'](self.card,result)
+  self.assertAlmostEqual(info['model_probability'],.55)
+  self.assertEqual(info['market']['consensus_method'],'sharp-weighted-no-vig')
+  self.assertTrue(info['sharp_ev']);self.assertEqual(result,original)
+ def test_warm_pre_weighting_helpers_are_refreshed_once_in_dependency_order(self):
+  import sys
+  from types import SimpleNamespace
+  from unittest.mock import patch
+  node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='_refresh_consensus_helpers')
+  env={};exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
+  market,edges=SimpleNamespace(),SimpleNamespace()
+  def reload(module):module.BOOK_WEIGHTS={'pinnacle':3.};return module
+  with patch.dict(sys.modules,{'market_compare':market,'line_edges':edges}),patch('importlib.reload',side_effect=reload) as refresh:
+   env['_refresh_consensus_helpers']();env['_refresh_consensus_helpers']()
+   self.assertEqual([c.args[0] for c in refresh.call_args_list],[market,edges])
+ def test_plays_default_sort_computes_sharp_infos_on_an_all_market_load(self):
+  board=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='ui_board')
+  assignment=next(n for n in board.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='sharp_sort' for t in n.targets))
+  env={'page':'Plays'};exec(compile(ast.Module(body=[assignment],type_ignores=[]),'app.py','exec'),env)
+  self.assertEqual(env['sharp_sort'],'Highest sharp %')
+  env['market_filter']='All'
+  condition=next(n.test for n in ast.walk(board) if isinstance(n,ast.If) and isinstance(n.test,ast.BoolOp) and 'sharp_sort' in ast.unparse(n.test))
+  self.assertTrue(eval(compile(ast.Expression(condition),'app.py','eval'),env))
+  env={'page':'Saved'};exec(compile(ast.Module(body=[assignment],type_ignores=[]),'app.py','exec'),env)
+  self.assertEqual(env['sharp_sort'],'Model score')
  def test_one_sided_demon_never_surfaces_less(self):
   card=dict(self.card,**{'Line Type':'Demon','Available Sides':['MORE']})
   info=self.info(.44,'LESS',card)
