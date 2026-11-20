@@ -11008,12 +11008,12 @@ def ui_board(page):
         return
     st.subheader('Saved plays' if page == 'Saved' else 'Your NBA plays')
     view = (st.segmented_control('Board view', ['Top plays', 'All props'], default=st.session_state.get('mobile_view', 'Top plays'), key='mobile_view_buttons', width='stretch') or 'Top plays') if page != 'Saved' else 'All props'
-    market_filter='All';sharp_sort='Highest sharp %' if page=='Plays' else 'Model score'
+    market_filter='All';sharp_sort='Model score'
     if page=='Plays':
         market_filter=st.segmented_control('Market',['All','✓ Sharp aligned (53.5%+)','🔥 Sharp +EV (54%+)'],default='All',key='plays_market_filter',width='stretch') or 'All'
         if st.session_state.get('plays_sharp_sort') not in (None,'Highest sharp %','Model score'):
             st.session_state.pop('plays_sharp_sort',None)
-        sharp_sort=st.segmented_control('Sort by',['Highest sharp %','Model score'],default='Highest sharp %',key='plays_sharp_sort',width='stretch') or 'Highest sharp %'
+        sharp_sort=st.segmented_control('Sort by',['Model score','Highest sharp %'],default='Model score',key='plays_sharp_sort',width='stretch') or 'Model score'
     stat = st.segmented_control('Stat', ['All','Points','Rebounds','Assists','PRA','Fantasy Score'], default=st.session_state.get('mobile_stat_pills','All'), key='mobile_stat_pills',label_visibility='collapsed',width='stretch') or 'All'
     kind='Fantasy' if stat=='Fantasy Score' else 'All'
     with st.expander('Filters & Search'):
