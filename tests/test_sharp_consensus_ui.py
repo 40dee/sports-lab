@@ -5,7 +5,7 @@ TREE=ast.parse((Path(__file__).resolve().parents[1]/'app.py').read_text())
 class SharpConsensusTests(unittest.TestCase):
  def setUp(self):
   self.env={'line_edge_info':lambda *args:None,'math':math,'engine_no_vig':Mock(return_value=None),'identity':lambda c:c['id']}
-  names=('ui_number','pick_offered_sides','consensus_edge_info','consensus_matches_filter','consensus_sort_records','ui_sharp_side_badge')
+  names=('_has_pinnacle','ui_line_edge_badge','ui_number','pick_offered_sides','consensus_edge_info','consensus_matches_filter','consensus_sort_records','ui_sharp_side_badge')
   for name in names:
    node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name==name)
    exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),self.env)
@@ -21,6 +21,20 @@ class SharpConsensusTests(unittest.TestCase):
   badge=self.env['ui_sharp_side_badge'](info,'LESS')
   self.assertIn('↑ MORE 55.4% (3 books)',badge)
   self.assertEqual(result,original);self.assertEqual(card,self.card)
+ def test_pinnacle_markers_on_sharp_side_and_moved_line_badges(self):
+  for book in ('pinnacle','draftkings','fanduel','betmgm','bovada'):
+   info={'sharp_ev':True,'best_side':'MORE','best_probability':.554,'book_count':3,
+         'market':{'books':[{'book':book}]}}
+   edge={'books':[{'book':book}],'book_line':24.5,'pp_line':23.5,
+         'probability':.58,'side':'MORE','book_count':3,'price':-115}
+   before=copy.deepcopy((info,edge))
+   sharp=self.env['ui_sharp_side_badge'](info,'LESS')
+   moved=self.env['ui_line_edge_badge'](edge)
+   self.assertEqual('3 books · Pin' in sharp,book=='pinnacle')
+   self.assertEqual('3 books · Pin' in moved,book=='pinnacle')
+   self.assertEqual((info,edge),before)
+  info['market']={'book':'PINNACLE'}
+  self.assertIn('(3 books · Pin)',self.env['ui_sharp_side_badge'](info,'LESS'))
  def test_saved_equal_weight_market_is_reweighted_for_display_without_mutation(self):
   result={'direction':'MORE','projection':9,'market':{'book':'consensus','more':.5,'less':.5,'book_count':2,'consensus_method':'equal-weight-no-vig',
           'books':[{'book':'pinnacle','more':.6,'less':.4},{'book':'bovada','more':.4,'less':.6}]}}

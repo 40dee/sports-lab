@@ -9,7 +9,7 @@ TREE=ast.parse(SOURCE.read_text())
 class MobileRedesignTests(unittest.TestCase):
  def env(self):
   env={'math':math,'pd':pd,'ui_text':lambda x:escape(str(x))}
-  for name in ('ui_number','ui_sparkline','ui_card_badges','compact_forecast'):
+  for name in ('_has_pinnacle','ui_number','ui_sparkline','ui_card_badges','compact_forecast'):
    node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name==name)
    exec(compile(ast.Module(body=[node],type_ignores=[]),str(SOURCE),'exec'),env)
   return env
@@ -35,6 +35,17 @@ class MobileRedesignTests(unittest.TestCase):
   original=copy.deepcopy(result)
   self.assertIn('✓ Consensus 55%',self.env()['ui_card_badges'](result,'MORE'))
   self.assertEqual(result,original)
+ def test_pinnacle_marker_for_consensus_and_single_book_only(self):
+  import copy
+  render=self.env()['ui_card_badges']
+  for market in ({'book':'pinnacle','more':.55},
+                 {'more':.55,'book_count':2,'books':[{'book':'PINNACLE'},{'book':'bovada'}]}):
+   result={'market':market};before=copy.deepcopy(result)
+   self.assertIn('55% · Pin',render(result,'MORE'))
+   self.assertEqual(result,before)
+  for book in ('draftkings','fanduel','betmgm','bovada'):
+   for market in ({'book':book,'more':.55},{'books':[{'book':book}],'more':.55}):
+    self.assertNotIn('· Pin',render({'market':market},'MORE'))
  def test_saved_badge_thresholds_and_escaping(self):
   render=self.env()['ui_card_badges']
   for value,symbol in ((.535,'✓'),(.489,'⚠️'),(.51,'')):

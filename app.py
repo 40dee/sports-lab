@@ -10417,10 +10417,20 @@ def line_edge_info(card, result, board_rows=None):
     return edge
 
 
+def _has_pinnacle(books=None, book=None):
+    if str(book or '').lower() == 'pinnacle':
+        return True
+    return any(
+        isinstance(b, dict) and str(b.get('book', '')).lower() == 'pinnacle'
+        for b in (books or [])
+    )
+
+
 def ui_line_edge_badge(edge):
     if not edge:return ''
+    pin=' · Pin' if _has_pinnacle(edge.get('books')) else ''
     juice=f" ({edge['price']:+.0f})" if edge['price'] is not None else ''
-    return '<span class="sl-badge" title="Heuristic estimate from saved two-way quotes; juice is a same-sign book average; conservative spread floor and 65% cap; not calibrated probability or payout EV.">🔥 Books at '+f"{edge['book_line']:g}"+juice+f" vs PP {edge['pp_line']:g} (est. {edge['probability']:.0%} {edge['side']} · {edge['book_count']} books)</span>"
+    return '<span class="sl-badge" title="Heuristic estimate from saved two-way quotes; juice is a same-sign book average; conservative spread floor and 65% cap; not calibrated probability or payout EV.">🔥 Books at '+f"{edge['book_line']:g}"+juice+f" vs PP {edge['pp_line']:g} (est. {edge['probability']:.0%} {edge['side']} · {edge['book_count']} books{pin})</span>"
 
 
 def consensus_matches_filter(info, mode):
@@ -10441,7 +10451,9 @@ def consensus_sort_records(records, infos, scores, sort_by):
 def ui_sharp_side_badge(info, direction):
     if not info.get('sharp_ev') or info.get('best_side')==direction:return ''
     side=info['best_side'];arrow='↑' if side=='MORE' else '↓'
-    return '<span class="sl-badge" title="Saved consensus threshold screen; model direction unchanged. Entry payout EV is not calculated.">🔥 Sharp +EV side: '+arrow+' '+side+f" {info['best_probability']:.1%} ({info['book_count']} books)</span>"
+    market=info.get('market') or {}
+    pin=' · Pin' if _has_pinnacle(market.get('books'),market.get('book')) else ''
+    return '<span class="sl-badge" title="Saved consensus threshold screen; model direction unchanged. Entry payout EV is not calculated.">🔥 Sharp +EV side: '+arrow+' '+side+f" {info['best_probability']:.1%} ({info['book_count']} books{pin})</span>"
 
 
 def ui_card_badges(result, direction):
@@ -10450,9 +10462,10 @@ def ui_card_badges(result, direction):
     market=sharp_weighted_market(result.get('market') or {})
     probability=ui_number(market.get(str(direction).lower())) if direction in ('MORE','LESS') else None
     if probability is not None and 0<=probability<=1:
+        pin=' · Pin' if _has_pinnacle(market.get('books'),market.get('book')) else ''
         label='Consensus' if (market.get('book_count') or len(market.get('books') or []))>1 else 'Sportsbook'
         badges.append('<span class="sl-badge" title="Saved no-vig quote for this model direction; not a current offer">'+
-                      ('✓ ' if probability>=.535 else '⚠️ ' if probability<.49 else '')+label+f' {probability:.0%}</span>')
+                      ('✓ ' if probability>=.535 else '⚠️ ' if probability<.49 else '')+label+f' {probability:.0%}{pin}</span>')
     context=result.get('teammate_context') or {}
     teammates=context.get('out_teammates') or []
     if context.get('available') and teammates:
