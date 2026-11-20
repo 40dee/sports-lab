@@ -51,6 +51,18 @@ def populated(count=18):
  return store
 
 class ComboTests(unittest.TestCase):
+ def test_gap_cutoff_removed_and_default_ranking_does_not_reward_large_gap(self):
+  store=populated(2)
+  for gap,(key,frozen) in zip((.05,1.2),store.items('forecast')):
+   frozen['result']['standardized_gap']=gap
+   store.put('forecast',key,frozen)
+  before=copy.deepcopy(store.records)
+  pool,reasons=env['combo_pool'](store,REF)
+  self.assertEqual(len(pool),2)
+  self.assertEqual({p['score'] for p in pool},{.5})
+  self.assertEqual({p['projected_gap_score'] for p in pool},{.05,1.2})
+  self.assertTrue(all(p['ranking_model']['version']=='eligibility-diversity-v1' for p in pool))
+  self.assertEqual(before,store.records)
  def test_generator_all_sizes_distinct_players_two_teams_and_bounded_exposure(self):
   store=populated(); report=env['update_combos'](store,True,REF)
   self.assertGreater(report['generated'],0)
@@ -174,7 +186,7 @@ class StandardTierTests(unittest.TestCase):
   store.put('board','board',board)
   mixed,_=env['combo_pool'](store,REF)
   standard,_=env['combo_pool'](store,REF,tier_mode='standard')
-  self.assertTrue(all(x['card']['Line Type']=='Goblin' for x in mixed))
+  self.assertTrue(all(x['score']==.5 for x in mixed))
   self.assertEqual(len(standard),8)
   self.assertTrue(all(x['card']['Line Type']=='Standard' for x in standard))
   env['update_combos'](store,True,REF)
@@ -261,3 +273,4 @@ class SlateSizeGameLimitTests(unittest.TestCase):
    self.assertEqual(len({leg['team_id'] for leg in legs}),6)
    self.assertEqual(len({leg['event_id'] for leg in legs}),3)
    self.assertTrue(all(sum(x['event_id']==leg['event_id'] for x in legs)<=2 for leg in legs))
+

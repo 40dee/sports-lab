@@ -63,3 +63,12 @@ class SharpConsensusTests(unittest.TestCase):
   self.assertEqual([c['id'] for c in sort(records,infos,{'a':.7,'b':.3},'Model score')],['a','b','c','d'])
   self.assertEqual(records,original)
 if __name__=='__main__':unittest.main()
+
+class GameTimeOrderTests(unittest.TestCase):
+ def test_game_time_sort_preserves_chronology_instead_of_rewarding_gap(self):
+  import ast
+  from pathlib import Path
+  node=next(n for n in ast.parse(Path('app.py').read_text()).body if isinstance(n,ast.FunctionDef) and n.name=='consensus_sort_records')
+  env={};exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
+  records=[{'id':'early'},{'id':'late'}]
+  self.assertEqual(env['consensus_sort_records'](records,{}, {'early':.05,'late':1.2},'Game time'),records)

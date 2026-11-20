@@ -34,5 +34,5 @@ class BlendTests(unittest.TestCase):
         original=fixtures.env['combo_snapshot'](pool[:2],'balanced-v1',fixtures.REF)
         self.assertNotEqual(learned['id'],original['id'])
         self.assertNotEqual(v1,fixtures.env['combo_inputs_version'](store,fixtures.REF))
-        self.assertEqual(original['ranking_model']['version'],'original-gap-v1')
+        self.assertEqual(original['ranking_model']['version'],'eligibility-diversity-v1')
 

@@ -30,6 +30,7 @@ class LearningScopeTests(unittest.TestCase):
   self.assertEqual(records,original)
  def test_workflow_alpha_and_daily_evaluation_only_see_selectable_regular_lines(self):
   records,grades=self.inputs();store=fixtures.Memory()
+  store.put('model_training','alpha_tuning_enabled',True)
   for k,f in records:store.put('forecast',k,f)
   for k,g in grades.items():store.put('grade',k,g)
   cls=next(n for n in TREE.body if isinstance(n,ast.ClassDef) and n.name=='Workflow')
@@ -42,6 +43,18 @@ class LearningScopeTests(unittest.TestCase):
   self.assertEqual(len(evaluate.call_args.args[0]),2)
   self.assertEqual(store.get('pick_reliability_evaluation','latest')['examples'],2)
   self.assertEqual(store.items('model'),[])
+ def test_workflow_alpha_tuning_is_paused_by_default(self):
+  records,grades=self.inputs();store=fixtures.Memory()
+  for k,f in records:store.put('forecast',k,f)
+  for k,g in grades.items():store.put('grade',k,g)
+  cls=next(n for n in TREE.body if isinstance(n,ast.ClassDef) and n.name=='Workflow')
+  node=next(n for n in cls.body if isinstance(n,ast.FunctionDef) and n.name=='learn')
+  env={'pd':pd,'now':lambda:'2026-11-20T12:00Z','unique_forecasts':lambda x:x,'saved_forecast_records':lambda s:s.items('forecast')}
+  exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
+  with patch('daily_learning.evaluate_daily',side_effect=AssertionError('Alpha fitting must remain paused')):
+   reports=env['learn'](SimpleNamespace(store=store))
+  self.assertEqual(reports[0]['daily_evaluation']['status'],'alpha_tuning_paused')
+  self.assertEqual(store.items('model'),[])
  def test_every_combo_mode_default_and_inputs_version_are_original(self):
   calls=[n for n in ast.walk(TREE) if isinstance(n,ast.Call) and isinstance(n.func,ast.Attribute) and n.func.attr=='get' and len(n.args)>=3 and isinstance(n.args[0],ast.Constant) and n.args[0].value=='combo_ranking']
   self.assertEqual(len(calls),3)
@@ -51,5 +64,5 @@ class LearningScopeTests(unittest.TestCase):
   pool,_=fixtures.env['combo_pool'](store,fixtures.REF)
   self.assertTrue(pool)
   snapshot=fixtures.env['combo_snapshot'](pool[:2],'balanced-v1',fixtures.REF)
-  self.assertEqual(snapshot['ranking_model']['version'],'original-gap-v1')
+  self.assertEqual(snapshot['ranking_model']['version'],'eligibility-diversity-v1')
 if __name__=='__main__':unittest.main()

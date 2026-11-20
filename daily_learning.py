@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 
-def evaluate_daily(frame, incumbent_alpha=1.0):
+def evaluate_daily(frame, incumbent_alpha=1.0, allow_tuning=True):
     frame=frame.copy()
     for column in ('baseline','adjusted','actual','line'):
         frame[column]=pd.to_numeric(frame[column],errors='coerce')
@@ -17,6 +17,9 @@ def evaluate_daily(frame, incumbent_alpha=1.0):
     days=sorted(frame['day'].unique())
     report={'status':'waiting_for_two_graded_dates','activation':'unchanged',
             'graded_dates':len(days),'examples':len(frame),'incumbent_alpha':incumbent_alpha}
+    if not allow_tuning:
+        report.update(status='alpha_tuning_paused',method='Collect frozen examples only; tuning paused pending predictive-feature validation.')
+        return report
     if len(days)<2:return report
     test_day=days[-1];train=frame[frame.day<test_day].copy();test=frame[frame.day==test_day].copy()
     def metrics(data,alpha):

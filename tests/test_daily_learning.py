@@ -48,3 +48,11 @@ class DailyLearningTests(unittest.TestCase):
         frame.loc[0,['start','created']]=['2026-07-20T23:00Z','2026-07-20T21:00Z']
         frame.loc[1,['start','created']]=['2026-07-21T06:59Z','2026-07-20T21:00Z']
         self.assertEqual(evaluate_daily(frame)['graded_dates'],1)
+
+    def test_paused_alpha_tuning_collects_counts_without_fitting(self):
+        report=evaluate_daily(self.frame(),incumbent_alpha=.75,allow_tuning=False)
+        self.assertEqual(report['status'],'alpha_tuning_paused')
+        self.assertEqual(report['examples'],2)
+        self.assertEqual(report['incumbent_alpha'],.75)
+        self.assertNotIn('candidate_alpha',report)
+        self.assertEqual(report['activation'],'unchanged')

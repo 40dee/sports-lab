@@ -911,6 +911,8 @@ def combo_pool(store, reference=None, tier_mode="mixed", quote_mode="verified"):
     ranking_mode=store.get('combo_ranking','mode','original')
     reliability_model=store.get('pick_reliability_model','latest') or {}
     ranking_context=ranking_context_for(reliability_model,slate_day(current),ranking_mode)
+    ranking_context=(dict(ranking_context,version='reliability-blend-v2-neutral-base',base_version='eligibility-diversity-v1')
+                     if ranking_context else {'version':'eligibility-diversity-v1','experimental':True,'basis':'eligibility and diversification; gap is diagnostic only'})
     pool, excluded, seen = [], {}, set()
     def reject(reason): excluded[reason] = excluded.get(reason, 0) + 1
     for card in board.get('v4_rows') or []:
@@ -954,12 +956,12 @@ def combo_pool(store, reference=None, tier_mode="mixed", quote_mode="verified"):
             projection = float(result['projection'])
             games = int(result.get('ranking_games') or 0)
             line = float(card['Line'])
-            if not all(math.isfinite(v) for v in (score,projection,line)) or score < .25 or games < 5:
+            if not all(math.isfinite(v) for v in (score,projection,line)) or score < 0 or games < 5:
                 raise ValueError('weak or insufficient history')
         except (KeyError,ValueError,TypeError,OverflowError):
-            reject('Insufficient history or projected separation'); continue
+            reject('Insufficient history or invalid projection'); continue
         raw_score=score
-        score,rank_adjustment=adjust_rank(raw_score,card,result,reliability_model,ranking_context)
+        score,rank_adjustment=adjust_rank(.5,card,result,reliability_model,ranking_context if ranking_context.get('version')=='reliability-blend-v2-neutral-base' else None)
         seen.add(signature)
         pool.append({'forecast_id': frozen['id'], 'card': dict(card),
             'player_id': str(h['player_id']), 'team_id': str(h['team_id']),
@@ -1128,7 +1130,7 @@ def combo_snapshot(legs, policy, reference=None):
     return {'id': key, 'created_at': stamp.isoformat(), 'day': slate_day(stamp),
         'size': len(legs), 'policy':policy, 'platform':'prizepicks', 'kind':'paper',
         'legs':json_safe(legs), 'ranking_score':combo_rank(legs,policy),
-        'rules_version':'distinct-teams-exposure-v5', 'ranking_model':ranking_context or {'version':'original-gap-v1'}, 'payout_terms':None,
+        'rules_version':'distinct-teams-exposure-v5', 'ranking_model':ranking_context or {'version':'eligibility-diversity-v1'}, 'payout_terms':None,
         'note':'Directional paper result. No entry submitted. No multiplied hit probabilities.'}
 
 
@@ -1157,7 +1159,7 @@ def combo_inputs_version(store, reference=None):
     health=store.get('health',slate_day(current)) or {}
     prep=store.get('preparation','last') or {}
     return ['distinct-teams-exposure-v5',store.get('combo_ranking','mode','original'),(store.get('pick_reliability_evaluation','latest') or {}).get('input_digest'),board.get('v4_scan_at'),health.get('checked_at'),prep.get('updated_at') or prep.get('run_at'),
-            prep.get('ready'),int(current.timestamp()//300),board.get('_side_metadata_revision')]
+            prep.get('ready'),int(current.timestamp()//300),board.get('_side_metadata_revision'),'eligibility-diversity-v1']
 
 
 def refresh_combo_health(wf, board=None, reference=None):
@@ -1589,11 +1591,13 @@ def render_combos(wf, st):
             snapshot=wf.store.get('combo_suggestions',slate_day()+(':'+tier_mode if tier_mode!='mixed' else '')+(':research' if quote_mode=='research' else '')) or {}
             st.caption('Alternatives reduce player reuse across combo sizes when qualifying entries rank within 0.10 points. Limited pools can still require overlap; diversification does not establish a higher hit rate.')
             st.caption('Standard only uses regular lines. Mixed tiers can include Goblins and Demons. Exact offered directions are required in both views.')
-            st.caption('Suggestions rank projected separation, not entry payouts or expected return. Special tiers can lower payouts; check the actual PrizePicks entry. Browsing makes no odds requests.')
+            st.caption('Suggestions prioritize eligibility and diversification. Gap size is diagnostic, not validated confidence or expected return. Special tiers can lower payouts; check the actual PrizePicks entry. Browsing makes no odds requests.')
             with st.container():
                 st.markdown('**Ranking settings**')
                 rank_mode=wf.store.get('combo_ranking','mode','original')
-                choice=st.selectbox('Combo ranking',['Learned adjustment (experimental)','Original gap ranking'],
+                if st.session_state.get('combo_ranking_choice') not in (None,'Learned adjustment (experimental)','Eligibility & diversity'):
+                    st.session_state.pop('combo_ranking_choice',None)
+                choice=st.selectbox('Combo ranking',['Learned adjustment (experimental)','Eligibility & diversity'],
                     index=0 if rank_mode=='learned_blend' else 1,key='combo_ranking_choice')
                 desired='learned_blend' if choice.startswith('Learned') else 'original'
                 if desired!=rank_mode:
@@ -1648,7 +1652,7 @@ def render_combos(wf, st):
                     st.warning('No verified combo candidates passed all pregame checks. See the exclusion breakdown; rebuilding alone does not refresh provider lines or injury checks.')
             with st.container():
                 st.markdown('**Selection checks and exclusion reasons**')
-                st.write('At least five history games; projected separation ≥0.25 recent-game standard deviations; checks within one hour; one player per team; one per game when enough eligible games are available, otherwise up to two per game. These thresholds are not calibrated probabilities. No matching injury entry does not confirm starting.')
+                st.write('At least five history games; no minimum gap cutoff; checks within one hour; one player per team; one per game when enough eligible games are available, otherwise up to two per game. These thresholds are not calibrated probabilities. No matching injury entry does not confirm starting.')
                 if snapshot.get('excluded'):
                     st.dataframe(pd.DataFrame([{'Reason':k,'Lines excluded':v} for k,v in sorted(snapshot['excluded'].items(),key=lambda item:-item[1])]),hide_index=True,width='stretch')
                 else:
@@ -2449,6 +2453,8 @@ class Workflow:
         result["market"] = self.e["engine_no_vig"](card)
         from teammate_context import from_availability
         result["teammate_context"] = from_availability(availability,player["id"])
+        from predictive_context import build as build_predictive_context
+        result['predictive_context']=build_predictive_context(history,card,pd.Timestamp.now(tz='UTC'),result['teammate_context'],availability)
 
         if card.get("Platform") == "kalshi":
             try:
@@ -3355,9 +3361,15 @@ class Workflow:
 
             days = sorted(frame["day"].unique())
             from daily_learning import evaluate_daily
-            daily=evaluate_daily(frame,float((self.store.get('model',group) or {}).get('alpha',1.0)))
+            tuning_enabled=self.store.get('model_training','alpha_tuning_enabled',False) is True
+            daily=(evaluate_daily(frame,float((self.store.get('model',group) or {}).get('alpha',1.0))) if tuning_enabled else
+                   {'status':'alpha_tuning_paused','activation':'unchanged','examples':len(frame),'graded_dates':len(days),
+                    'method':'Collect frozen examples only; tuning paused pending predictive-feature validation.'})
             daily.update(stat=group,evaluated_at=now())
             self.store.put('model_daily_evaluation',group+':'+str(days[-1]),daily)
+            if not tuning_enabled:
+                reports.append({'stat':group,'status':'Alpha tuning paused pending predictive-feature validation','samples':len(frame),'daily_evaluation':daily})
+                continue
 
             if (
                 len(frame) < 120
@@ -4494,8 +4506,8 @@ def render_combo_hit_rates(store, st, date='All dates'):
     combos=dict(store.items('combo'))
     if source=='Model cohorts':
         policy=st.selectbox('Ranking policy',['balanced-v1','diverse-v1'],key='results_combo_policy')
-        ranking=st.selectbox('Ranking version',['Original gap ranking','Learned adjustment'],key='results_combo_ranking')
-        version='original-gap-v1' if ranking=='Original gap ranking' else 'reliability-blend-v1'
+        ranking=st.selectbox('Ranking version',['Eligibility & diversity','Original gap ranking','Learned adjustment','Learned adjustment (neutral base)'],index=0 if any((c.get('ranking_model') or {}).get('version')=='eligibility-diversity-v1' for c in combos.values()) else 1,key='results_combo_ranking')
+        version={'Eligibility & diversity':'eligibility-diversity-v1','Original gap ranking':'original-gap-v1','Learned adjustment':'reliability-blend-v1','Learned adjustment (neutral base)':'reliability-blend-v2-neutral-base'}[ranking]
         rows=combo_tier_result_rows(combos,dict(store.items('combo_grade')),tier,policy,version)
         st.caption('First available three saved options per day and player count for this line type, policy and ranking version. Later rebuilds excluded; older missing tiers are not reconstructed.')
     else:
@@ -10388,6 +10400,7 @@ def consensus_matches_filter(info, mode):
 
 
 def consensus_sort_records(records, infos, scores, sort_by):
+    if sort_by=='Game time':return list(records)
     field='best_probability' if sort_by=='Highest sharp %' else None
     def rank(card):
         key=identity(card)
@@ -10744,6 +10757,11 @@ def ui_drivers(card, result):
     tiles=[('Minutes outlook',f'{minutes:.1f} min' if minutes is not None else 'Unavailable'),
            ('Pace adjustment',f'{pace:.2f}×' if pace is not None else 'Unavailable'),('Position matchup',position_label),
            ('Blowout indicator',risk_label),('Starting status',starting)]
+    features=result.get('predictive_context') or {}
+    if features:
+        days=features.get('days_since_last_appearance');shift=features.get('minutes_shift')
+        tiles += [('Last appearance',f'{days} day(s) ago' if days is not None else 'Unavailable'),
+                  ('L5 vs prior L5 minutes',f'{shift:+.1f} min' if shift is not None else 'Unavailable')]
     st.markdown('#### What drives this pick')
     st.markdown('<div class="sl-drivers">'+''.join('<div class="sl-context-tile"><small>'+ui_text(k)+'</small><strong>'+ui_text(v)+'</strong></div>' for k,v in tiles)+'</div>',unsafe_allow_html=True)
 
@@ -10897,10 +10915,12 @@ def ui_board(page):
         return
     st.subheader('Saved plays' if page == 'Saved' else 'Your NBA plays')
     view = (st.segmented_control('Board view', ['Top plays', 'All props'], default=st.session_state.get('mobile_view', 'Top plays'), key='mobile_view_buttons', width='stretch') or 'Top plays') if page != 'Saved' else 'All props'
-    market_filter='All';sharp_sort='Model score'
+    market_filter='All';sharp_sort='Game time'
     if page=='Plays':
         market_filter=st.segmented_control('Market',['All','✓ Sharp aligned (53.5%+)','🔥 Sharp +EV (54%+)'],default='All',key='plays_market_filter',width='stretch') or 'All'
-        sharp_sort=st.segmented_control('Sort by',['Model score','Highest sharp %'],default='Model score',key='plays_sharp_sort',width='stretch') or 'Model score'
+        if st.session_state.get('plays_sharp_sort') not in (None,'Game time','Highest sharp %'):
+            st.session_state.pop('plays_sharp_sort',None)
+        sharp_sort=st.segmented_control('Sort by',['Game time','Highest sharp %'],default='Game time',key='plays_sharp_sort',width='stretch') or 'Game time'
     stat = st.segmented_control('Stat', ['All','Points','Rebounds','Assists','PRA','Fantasy Score'], default=st.session_state.get('mobile_stat_pills','All'), key='mobile_stat_pills',label_visibility='collapsed',width='stretch') or 'All'
     kind='Fantasy' if stat=='Fantasy Score' else 'All'
     with st.expander('Filters & Search'):
@@ -10975,7 +10995,7 @@ def ui_board(page):
             st.warning('No entry-ready picks passed the current checks. Showing saved pregame projections for review below. Their exact lines or offered directions need verification; these are not current slip recommendations.')
         elif len(calculated)>len(verified):
             st.caption(f'{len(calculated)-len(verified)} saved forecasts need line verification or are passes; they remain visible below with review labels.')
-        records.sort(key=lambda c: ui_number(forecasts[identity(c)]['result'].get('standardized_gap'), -1), reverse=True)
+        st.caption('Gap size is not a validated confidence score; default order follows game time.')
     else:
         records.sort(key=lambda c: (str(c['Player']), ui_stat(c), float(c['Line'])))
     # Display-only grouping: alternate thresholds are still retained as
@@ -11008,17 +11028,12 @@ def ui_board(page):
                     result = frozen.get('result', {})
                     if not pick_is_selectable(candidate, result):
                         return (1, -1.0, -1.0)
-                    score = ui_number(result.get('standardized_gap'), -1)
-                    gap = abs(ui_number(result.get('gap'), 0))
-                    return (2, score, gap)
+                    captured=utc_timestamp(candidate.get('Tier Fetched At') if candidate.get('Tier Source')=='prizepicksapi.com' else candidate.get('Odds checked (UTC)'))
+                    return (2, captured.value if pd.notna(captured) else 0, 0)
                 grouped.append(max(alternatives, key=display_priority))
                 hidden += len(alternatives) - 1
             records = grouped
-            if view == 'Top plays':
-                records.sort(key=lambda c: ui_number(
-                    forecasts[identity(c)]['result'].get('standardized_gap'), -1
-                ) if identity(c) in forecasts else -1, reverse=True)
-            else:
+            if view != 'Top plays':
                 records.sort(key=lambda c: (str(c['Player']), ui_stat(c), float(c['Line'])))
             if hidden:
                 st.caption(
