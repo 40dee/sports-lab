@@ -11659,34 +11659,6 @@ def render_app_pages():
 
         if app_page == "Settings":
             with diagnostic_settings:
-                with st.expander(
-                    "What is connected and what remains"
-                ):
-                    st.write(
-                        "Connected: NBA odds scanner, market decoding, compact "
-                        "player lines, historical research, rolling windows, H2H, "
-                        "static charts, team efficiency, position defense, "
-                        "roster/depth-chart matching, injury checks, projections, "
-                        "game-market context, matching prop pricing, frozen forecasts, "
-                        "automatic research grading, guarded learning reviews, "
-                        "model paper ROI and percentage tracking by PrizePicks tier."
-                    )
-
-                    st.write(
-                        "Unmatched players and unsupported markets remain unavailable. "
-                        "Depth charts and active roster status are not confirmed "
-                        "starting lineups. Initial percentage estimates are "
-                        "experimental and are audited against real outcomes."
-                    )
-
-                    st.write(
-                        "Outside this NBA release: other sports, salary-cap lineup "
-                        "builders, additional fantasy scoring systems and verified "
-                        "starting-lineup feeds. Permanent storage and scheduled "
-                        "maintenance require DATABASE_URL."
-                    )
-
-
                 if HISTORY_DB.exists():
                     if st.button("Prepare historical cache backup", key="prepare_history_cache_backup"):
                         # Read only when requested, not on every visit to Settings.
