@@ -55,9 +55,9 @@ def uncertainty_report(frame, probability_fn):
             # Use the same variance-adjusted transform on earlier examples to fit the sigmoid.
             calibration=local if len(local)>=75 else train
             if len(calibration)>=75:
-                # Calibration is fitted on stored raw probabilities; uncertainty correction can
-                # only reduce their separation. Both training and evaluation are chronological.
-                beta=fit_sigmoid(calibration.v2_prob,calibration.v2_win)
+                # Earlier rows already carry their own chronological variance transform.
+                # Fit and apply the sigmoid on that same probability scale.
+                beta=fit_sigmoid(calibration.variance_probability,calibration.v2_win)
                 for index in group.index:
                     frame.at[index,'corrected_probability']=apply_sigmoid(frame.at[index,'variance_probability'],beta)
                 trained+=len(group)

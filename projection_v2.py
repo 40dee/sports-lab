@@ -8,7 +8,7 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
-ENGINE_VERSION = "minutes-eb-vegas-v2-replay-1"
+ENGINE_VERSION = "minutes-eb-vegas-v2-replay-2"
 _env_ref = {}
 
 def install(env, workflow_cls=None, workflow_obj=None):
@@ -36,7 +36,7 @@ def estimate_robust_minutes(sample, game_context=None, team_name=None):
             pass
     return max(1., min(44., minutes*factor)), factor
 
-def shrunk_per_minute_rate(history, current_sample, stat, season, cutoff):
+def shrunk_per_minute_rate(history, current_sample, stat, season, cutoff, frozen_result=None):
     frame = current_sample.copy()
     frame[stat] = pd.to_numeric(frame[stat], errors="coerce")
     frame = frame[frame[stat].ge(0) & frame[stat].notna()]
@@ -50,14 +50,26 @@ def shrunk_per_minute_rate(history, current_sample, stat, season, cutoff):
     outside = frame.iloc[len(recent):]
     anchor_minutes = float(outside.MIN.sum())
     anchor_total = float(outside[stat].sum())
-    prior = history[(history.GAME_DATE < cutoff) & history.SEASON.ne(season)].copy()
+    from season_anchors import summary_stat
+    saved=frozen_result or {}
+    if not anchor_minutes:
+        totals=summary_stat(saved.get('current_season_totals'),season,stat,cutoff,recent)
+        if totals:
+            anchor_minutes=max(0.,totals['minutes']-float(recent.MIN.sum()))
+            anchor_total=max(0.,totals['total']-float(recent[stat].sum()))
+    year=int(str(season).split('-')[0]);prior_season=f"{year-1}-{str(year)[-2:]}"
+    prior = history[(history.GAME_DATE < cutoff) & history.SEASON.eq(prior_season)].copy()
     prior[stat] = pd.to_numeric(prior[stat], errors="coerce")
     prior = prior[prior[stat].ge(0) & prior[stat].notna()]
     prior_mins = float(prior.MIN.sum())
+    prior_total = float(prior[stat].sum())
+    if not prior_mins:
+        totals=summary_stat(saved.get('prior_season_totals'),prior_season,stat,cutoff)
+        if totals:prior_mins,prior_total=totals['minutes'],totals['total']
     strength = {"PTS":220., "REB":260., "AST":260., "TOV":280.,
                 "FG3M":420., "STL":420., "BLK":420.}.get(stat,280.)
     if prior_mins >= 60:
-        anchor_total += strength * float(prior[stat].sum()/prior_mins)
+        anchor_total += strength * float(prior_total/prior_mins)
         anchor_minutes += strength
     if anchor_minutes:
         k = min(350., anchor_minutes)
@@ -267,6 +279,9 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
             if not cols or not set(cols).issubset(hist.columns):
                 raise ValueError("unsupported_market")
             weights=env["fantasy_weights"](card) or {}
+            from season_anchors import summary_stat
+            year=int(str(season).split('-')[0]);prior_season=f"{year-1}-{str(year)[-2:]}"
+            prior_summary_available=any(summary_stat(result.get('prior_season_totals'),prior_season,stat,created) for stat in cols)
             ctx=result.get("game_context") or {}
             # Only frozen context is used. Never fetch a current spread for an old game.
             if ctx.get("event_id") and str(ctx["event_id"])!=str(frozen.get("event_id")):
@@ -289,14 +304,14 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
             no_vegas_projection=0.
             for stat in cols:
                 if stat not in comps:raise ValueError("missing_frozen_component")
-                rate,_=shrunk_per_minute_rate(hist,sample,stat,season,created)
+                rate,_=shrunk_per_minute_rate(hist,sample,stat,season,created,result)
                 pace=float(comps[stat].get("Pace factor",1))
                 position=float(comps[stat].get("Position factor",1))
                 vegas,has_vegas=vegas_environment_factor(result.get("team"),stat,ctx,adv_df,env["engine_team_key"])
                 effective_pace=1+.4*(pace-1) if has_vegas else pace
                 factor=max(.88,min(1.12,effective_pace*vegas))
                 projection+=minutes*rate*factor*position*weights.get(stat,1.)
-                no_vegas_projection+=minutes*rate*max(.88,min(1.12,effective_pace))*position*weights.get(stat,1.)
+                no_vegas_projection+=minutes*rate*max(.88,min(1.12,pace))*position*weights.get(stat,1.)
             if not math.isfinite(projection):raise ValueError("invalid_candidate")
             if abs(projection-line)<1e-9:raise ValueError("candidate_no_direction")
             v2_dir="MORE" if projection>line else "LESS"
@@ -322,7 +337,7 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
                 platform=str(card.get("Platform","")).lower(),tier=str(card.get("Line Type","")).lower(),
                 actual=actual,v1_proj=v1,v2_proj=projection,v1_win=int(grade["outcome"]=="WIN"),
                 v2_win=int(actual>line if v2_dir=="MORE" else actual<line),
-                v1_prob=old_probability,v2_prob=probability,book_direction=saved_book_direction(result.get("market")),prior_available=bool(hist.SEASON.ne(season).any()),
+                v1_prob=old_probability,v2_prob=probability,book_direction=saved_book_direction(result.get("market")),prior_available=bool(hist.SEASON.ne(season).any()) or prior_summary_available,
                 vegas_available=has_vegas))
         except (KeyError,TypeError,ValueError,ZeroDivisionError,OverflowError) as error:
             excluded[str(error)[:100]]+=1
@@ -391,6 +406,12 @@ def run_backtest(store, env=None, max_samples=600, scope='standard_one_per_stat'
     if diagnostics:
         from replay_diagnostics import uncertainty_report,pra_ablation_report,health_inventory,sportsbook_inventory
         result["uncertainty_diagnostic"]=uncertainty_report(frame,calibrated_hit_probability)
+        candidate=frame.copy()
+        candidate['v2_proj']=candidate.v1_proj
+        candidate['v2_dir']=candidate.v1_dir
+        candidate['v2_win']=candidate.v1_win
+        candidate['v2_prob']=[calibrated_hit_probability(row.history_values,row.v1_proj,row.line,row.v1_dir,row.columns,row.is_fantasy)[0] for _,row in candidate.iterrows()]
+        result['v1_probability_candidate']=uncertainty_report(candidate,calibrated_hit_probability)
         result["pra_ablation"]=pra_ablation_report(frame)
         result["health_inventory"]=health_inventory(raw)
         result["sportsbook_inventory"]=sportsbook_inventory(raw)

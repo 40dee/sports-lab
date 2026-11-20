@@ -34,3 +34,17 @@ class DailyLearningTests(unittest.TestCase):
         self.assertEqual(result['examples'],3)
         self.assertEqual(result['train_examples'],2)
         self.assertEqual(result['train_player_games'],2)
+
+
+    def test_pacific_evening_is_one_slate_across_utc_midnight(self):
+        frame=self.frame()
+        frame.loc[0,['start','created']]=['2026-11-19T23:00Z','2026-11-19T21:00Z']
+        frame.loc[1,['start','created']]=['2026-11-20T03:00Z','2026-11-19T21:00Z']
+        self.assertEqual(evaluate_daily(frame)['graded_dates'],1)
+        frame.loc[1,['start','created']]=['2026-11-21T03:00Z','2026-11-20T21:00Z']
+        self.assertEqual(evaluate_daily(frame)['holdout_date'],'2026-11-20')
+    def test_pacific_day_respects_summer_dst(self):
+        frame=self.frame()
+        frame.loc[0,['start','created']]=['2026-07-20T23:00Z','2026-07-20T21:00Z']
+        frame.loc[1,['start','created']]=['2026-07-21T06:59Z','2026-07-20T21:00Z']
+        self.assertEqual(evaluate_daily(frame)['graded_dates'],1)

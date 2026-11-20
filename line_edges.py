@@ -34,6 +34,11 @@ def saved_quotes(store, day, hour=None, include_cards=False):
 
 def candidate_pairs(card, rows, compare):
     """Reuse exact identity, period, scoring, snapshot and two-way validation."""
+    pp_time=stamp(card.get('Tier Fetched At') if card.get('Tier Source')=='prizepicksapi.com' else card.get('Odds checked (UTC)'))
+    if card.get('Tier Source')=='prizepicksapi.com':
+        observed=stamp(card.get('Tier Observed At'))
+        if observed and pp_time:pp_time=min(observed,pp_time)
+    if not pp_time:return []
     lines=set()
     for row in rows:
         try:
@@ -48,6 +53,7 @@ def candidate_pairs(card, rows, compare):
         for book in pair.get('books') or []:
             observed,captured=stamp(book.get('observed_at')),stamp(book.get('captured_at'))
             start=stamp(card.get('Start (UTC)'))
+            if not captured or abs((captured-pp_time).total_seconds())>1800:continue
             if observed and captured and start and 0<=(captured-observed).total_seconds()<=1800 and captured<start:
                 books.append(book)
         if books:

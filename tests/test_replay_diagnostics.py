@@ -48,3 +48,26 @@ class DiagnosticsTests(unittest.TestCase):
         rows=pra_ablation_report(frame)
         self.assertTrue(all(r['picks']==240 for r in rows))
         self.assertEqual(next(r for r in rows if r['variant']=='No Vegas')['ties'],1)
+
+    def test_sigmoid_training_uses_variance_adjusted_probabilities(self):
+        from unittest.mock import patch
+        from replay_diagnostics import fit_sigmoid
+        frame=self.frame();frame['actual']=1000
+        with patch('replay_diagnostics.fit_sigmoid',wraps=fit_sigmoid) as fit:
+            uncertainty_report(frame,calibrated_hit_probability)
+        self.assertTrue(fit.called)
+        probabilities=fit.call_args.args[0]
+        self.assertTrue(any(abs(p-.8)>1e-3 for p in probabilities))
+    def test_no_vegas_ablation_restores_full_saved_pace(self):
+        from unittest.mock import patch
+        from test_projection_v2 import ReplayTests
+        from projection_v2 import run_backtest
+        store,env=ReplayTests().setup_data()
+        for key,frozen in store.items('forecast'):
+            frozen['result']['components'][0]['Pace factor']=1.1
+            store.put('forecast',key,frozen)
+        with patch('projection_v2.vegas_environment_factor',return_value=(1.05,True)), patch('replay_diagnostics.pra_ablation_report',return_value=[]) as report:
+            run_backtest(store,env,max_samples=None,diagnostics=True)
+        frame=report.call_args.args[0]
+        for _,row in frame.iterrows():
+            self.assertAlmostEqual(row.no_vegas_proj/row.v2_proj,1.1/(1.04*1.05))

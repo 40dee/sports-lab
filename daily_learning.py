@@ -13,7 +13,7 @@ def evaluate_daily(frame, incumbent_alpha=1.0):
     start=pd.to_datetime(frame['start'],utc=True,errors='coerce',format='ISO8601')
     created=pd.to_datetime(frame['created'],utc=True,errors='coerce',format='ISO8601')
     frame=frame[valid & start.notna() & created.notna() & (created<start)].copy()
-    frame['day']=pd.to_datetime(frame['start'],utc=True,format='ISO8601').dt.strftime('%Y-%m-%d')
+    frame['day']=pd.to_datetime(frame['start'],utc=True,format='ISO8601').dt.tz_convert('America/Los_Angeles').dt.strftime('%Y-%m-%d')
     days=sorted(frame['day'].unique())
     report={'status':'waiting_for_two_graded_dates','activation':'unchanged',
             'graded_dates':len(days),'examples':len(frame),'incumbent_alpha':incumbent_alpha}

@@ -3351,7 +3351,7 @@ class Workflow:
                 frame["start"],
                 utc=True,
                 format="ISO8601",
-            ).dt.strftime("%Y-%m-%d")
+            ).dt.tz_convert("America/Los_Angeles").dt.strftime("%Y-%m-%d")
 
             days = sorted(frame["day"].unique())
             from daily_learning import evaluate_daily
@@ -8603,6 +8603,8 @@ def calculate_player_projection(
         history, card, season, team_name, position,
         advanced, position_data,
     )
+    from season_anchors import pregame_season_totals
+    result.update(pregame_season_totals(history,season,min(pd.Timestamp.now(tz='UTC'),pd.to_datetime(card['Start (UTC)'],utc=True))))
     weights = fantasy_weights(card)
 
     if weights:

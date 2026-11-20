@@ -20,13 +20,15 @@ for key,frozen in env['unique_forecasts'](env['saved_forecast_records'](store)):
     result=frozen.get('result') or {};card=frozen.get('card') or {};grade=grades.get(key) or {}
     versions[(result.get('learning_model') or {}).get('version','missing')]+=1
     if grade.get('status')!='FINAL' or grade.get('outcome') not in ('WIN','LOSS'):continue
+    from pick_reliability import selectable_learning_record
+    if not selectable_learning_record(card,result):continue
     try:
         row=dict(start=card['Start (UTC)'],created=frozen['created_at'],event=str(frozen['event_id']),player=str(result['player_id']),
           baseline=float(result['baseline']),adjusted=float(result['matchup_projection']),actual=float(grade['actual']),line=float(card['Line']))
         if not all(math.isfinite(row[k]) for k in ('baseline','adjusted','actual','line')):continue
         start=pd.to_datetime(row['start'],utc=True);created=pd.to_datetime(row['created'],utc=True)
         if created>=start:continue
-        row['day']=start.strftime('%Y-%m-%d');group=result['stat_group']
+        row['day']=start.tz_convert('America/Los_Angeles').strftime('%Y-%m-%d');group=result['stat_group']
     except (KeyError,ValueError,TypeError):continue
     identity=(row['event'],row['player'],group,row['line'])
     if identity in seen:continue
@@ -70,6 +72,7 @@ for key,snapshot in store.items('combo_suggestions'):
             tested+=1;legs=combo['legs'];sizes[size]+=1
             if len({str(x['player_id']) for x in legs})!=len(legs):failures.append('repeated player')
             if len({str(x['team_id']) for x in legs})!=len(legs):failures.append('repeated team')
-            if combo.get('rules_version')!='distinct-teams-adaptive-games-v3':failures.append('old rule version')
+            if combo.get('rules_version')!='distinct-teams-exposure-v5':failures.append('old rule version')
 print('COMBO_RULE_VERIFICATION',env['encode']({'options_checked':tested,'sizes':dict(sizes),'failures':dict(Counter(failures))}),flush=True)
 if mismatches or failures:raise SystemExit('Verification found discrepancies; review required.')
+

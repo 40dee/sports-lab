@@ -3,7 +3,7 @@ from line_edges import detect
 from market_compare import compare_no_vig
 class LineEdgeTests(unittest.TestCase):
  def setUp(self):
-  self.card={'Platform':'prizepicks','Player':'Player','Game':'A vs B','Start (UTC)':'2026-11-18T23:00Z','Period':'result','Stat Key':'PTS','Line':23.5}
+  self.card={'Platform':'prizepicks','Player':'Player','Game':'A vs B','Start (UTC)':'2026-11-18T23:00Z','Period':'result','Stat Key':'PTS','Line':23.5,'Odds checked (UTC)':'2026-11-18T18:05Z'}
  def rows(self,line=24.5):
   return [dict(self.card,Platform=book,Line=line,Direction=side,Odds=-115 if side=='MORE' else -105,**{'Odds checked (UTC)':'2026-11-18T18:00Z','Provider fetched at':'2026-11-18T18:05Z','Market ID':'points'}) for book in ('draftkings','fanduel','betmgm') for side in ('MORE','LESS')]
  def compare(self,c,rows):
@@ -11,6 +11,13 @@ class LineEdgeTests(unittest.TestCase):
   return compare_no_vig(c,rows,clean,clean,lambda c:[c['Stat Key']],lambda c:None)
  def run_edge(self,rows,offered=('MORE','LESS'),columns=('PTS',)):
   return detect(self.card,{},rows,self.compare,offered,columns)
+ def test_pp_and_book_captures_must_be_within_thirty_minutes(self):
+  for captured,expected in (('2026-11-18T17:35Z',True),('2026-11-18T17:34:59Z',False),('2026-11-18T18:35Z',True),('2026-11-18T18:35:01Z',False),(None,False)):
+   with self.subTest(captured=captured):
+    self.card['Odds checked (UTC)']=captured
+    self.assertEqual(self.run_edge(self.rows()) is not None,expected)
+  self.card.update({'Tier Source':'prizepicksapi.com','Tier Fetched At':'2026-11-18T18:05Z','Tier Observed At':'2026-11-18T16:00Z'})
+  self.assertIsNone(self.run_edge(self.rows()))
  def test_more_and_less_edges_with_two_books(self):
   edge=self.run_edge(self.rows());self.assertEqual(edge['side'],'MORE');self.assertEqual(edge['book_count'],3);self.assertGreaterEqual(edge['probability'],.54)
   edge=self.run_edge(self.rows(21.5));self.assertEqual(edge['side'],'LESS');self.assertGreaterEqual(edge['probability'],.54)
