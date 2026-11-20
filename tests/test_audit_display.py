@@ -140,7 +140,7 @@ class WarmSettingsDisplayTests(unittest.TestCase):
         display,provider=SimpleNamespace(),SimpleNamespace()
         def reload(module):
             if module is display:module.render_fact_cards=True
-            else:module.READABLE_PROBE_UI=True
+            else:module.READABLE_PROBE_UI='sample-dropdown-v2'
             return module
         with patch.dict(sys.modules,{'audit_display':display,'the_odds_api':provider}),patch('importlib.reload',side_effect=reload) as refresh:
             env['_refresh_settings_display']();env['_refresh_settings_display']()

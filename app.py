@@ -35,7 +35,7 @@ def _refresh_settings_display():
     if not hasattr(audit_display, 'render_fact_cards'):
         importlib.reload(audit_display)
     import the_odds_api
-    if not getattr(the_odds_api, 'READABLE_PROBE_UI', False):
+    if getattr(the_odds_api, 'READABLE_PROBE_UI', None) != 'sample-dropdown-v2':
         importlib.reload(the_odds_api)
 
 

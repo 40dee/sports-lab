@@ -9,7 +9,7 @@ BASE = 'https://api.the-odds-api.com/v4/sports/basketball_nba'
 MARKETS = ('player_points', 'player_fantasy_points',
            'player_points_alternate', 'player_fantasy_points_alternate')
 MAX_CREDITS = len(MARKETS)
-READABLE_PROBE_UI = True
+READABLE_PROBE_UI = 'sample-dropdown-v2'
 
 
 def stamp(value):
@@ -178,5 +178,6 @@ def render_probe(st, store, api_key):
                 st.caption(result['game'] + ' · Tipoff: ' + display_time(result.get('start_utc')))
             render_saved_report(st,{k:v for k,v in result.items() if k not in ('rows','game','start_utc')})
             if result.get('rows'):
-                render_fact_cards(st,[{key:display_name(value) if key=='Market' else value for key,value in row.items()} for row in result['rows']])
+                with st.expander('Saved sample lines ('+str(len(result['rows']))+')', expanded=False):
+                    render_fact_cards(st,[{key:display_name(value) if key=='Market' else value for key,value in row.items()} for row in result['rows']])
 
