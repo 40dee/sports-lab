@@ -10361,7 +10361,14 @@ def line_edge_info(card, result, board_rows=None):
     rows+=st.session_state.get('_ui_saved_quote_rows',[]) if board_rows is None else []
     player_key=normalize_player(ui_name(card.get('Player','')))
     rows=[r for r in rows if normalize_player(ui_name(r.get('Player','')))==player_key]
-    return detect(card,result,rows,lambda c,r:engine_no_vig(c,r),pick_offered_sides(card) or (),market_columns(card),bool(fantasy_weights(card)))
+    edge=detect(card,result,rows,lambda c,r:engine_no_vig(c,r),pick_offered_sides(card) or (),market_columns(card),bool(fantasy_weights(card)))
+    # Keep the display guard here too: a warm Streamlit process may retain
+    # an older imported detector while rerunning this entrypoint after deploy.
+    if edge:
+        pp=float(card['Line'])
+        if abs(pp-round(pp))<1e-6 and abs(float(edge['book_line'])-pp)<1.0:
+            return None
+    return edge
 
 
 def ui_line_edge_badge(edge):

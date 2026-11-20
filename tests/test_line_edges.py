@@ -77,4 +77,21 @@ class LineEdgeTests(unittest.TestCase):
   self.assertIsNone(self.run_edge(self.rows(4.5)))
   self.card['Line']=float('nan')
   self.assertIsNone(self.run_edge(self.rows(4.5)))
+ def test_display_rejects_push_neighbor_from_warm_import(self):
+  import ast
+  from pathlib import Path
+  from types import SimpleNamespace
+  from unittest.mock import patch
+  tree=ast.parse(Path('app.py').read_text())
+  env={'st':SimpleNamespace(session_state={}), 'normalize_player':lambda v:v.lower(), 'ui_name':lambda v:v,
+       'engine_no_vig':self.compare,'market_columns':lambda c:[c['Stat Key']],'fantasy_weights':lambda c:None}
+  for name in ('pick_offered_sides','line_edge_info','consensus_matches_filter'):
+   node=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name==name)
+   exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
+  card=dict(self.card,Line=4.,**{'Line Type':'Standard'})
+  for book_line in (3.5,4.5):
+   with self.subTest(book_line=book_line), patch('line_edges.detect',return_value={'book_line':book_line,'probability':.55}):
+    edge=env['line_edge_info'](card,{},self.rows(book_line))
+    self.assertIsNone(edge)
+    self.assertFalse(env['consensus_matches_filter']({'line_edge':edge},'🔥 Sharp +EV (54%+)'))
 if __name__=='__main__':unittest.main()
