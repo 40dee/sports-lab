@@ -1,0 +1,28 @@
+name: Free ESPN schedule diagnostic
+on:
+  push:
+    branches: [fix-scheduled-espn-scoreboard]
+    paths: [.github/workflows/free-espn-diagnostic.yml]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query exact ESPN scoreboard dates (no paid credentials)
+        run: |
+          python3 - <<'PY'
+          import json,urllib.request,urllib.parse
+          params={'dates':'20261121-20261122','limit':1000}
+          url='https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?'+urllib.parse.urlencode(params)
+          try:
+              with urllib.request.urlopen(url,timeout=25) as response:
+                  data=json.load(response)
+                  print('ESPN_HTTP',response.status)
+                  events=data.get('events',[])
+                  print('ESPN_EVENTS',len(events))
+                  for event in events[:30]:print('ESPN_EVENT',event.get('date'),event.get('name'))
+          except Exception as error:
+              print('ESPN_ERROR',type(error).__name__,str(error)[:150])
+              raise
+          PY
