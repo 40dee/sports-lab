@@ -1917,6 +1917,14 @@ def combo_pattern_rows(store,cohort_rows):
             for label,values in sorted(buckets.items())]
 
 
+def permanent_final_absence(reason, attempts, start, current):
+    """Stop retrying unresolved exact-ID final absences after six old attempts."""
+    return (str(reason).startswith('Final game: exact player ID absent from boxscore')
+            and int(attempts) >= 6
+            and pd.notna(pd.to_datetime(start, utc=True, errors='coerce'))
+            and current - pd.to_datetime(start, utc=True) > pd.Timedelta(hours=48))
+
+
 class Workflow:
     def __init__(self, engine, store):
         self.e = engine
@@ -2580,14 +2588,6 @@ class Workflow:
                 )
 
         return outcomes
-
-def permanent_final_absence(reason, attempts, start, current):
-    """Stop retrying unresolved exact-ID final absences after six old attempts."""
-    return (str(reason).startswith('Final game: exact player ID absent from boxscore')
-            and int(attempts) >= 6
-            and pd.notna(pd.to_datetime(start, utc=True, errors='coerce'))
-            and current - pd.to_datetime(start, utc=True) > pd.Timedelta(hours=48))
-
 
     def grade(self, limit=100, time_budget=120, force_retry=False, skip_ids=None):
         """Grade pregame forecasts fairly; keep failures inspectable and retryable."""
