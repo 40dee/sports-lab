@@ -14,4 +14,22 @@ class HtmlRenderingTests(unittest.TestCase):
      if isinstance(call,ast.Call) and isinstance(call.func,ast.Attribute) and call.func.attr=='markdown' and any(k.arg=='unsafe_allow_html' and isinstance(k.value,ast.Constant) and k.value.value is True for k in call.keywords):
       self.assertIsInstance(call.args[0],ast.Call,node.name)
       self.assertEqual(call.args[0].func.id,'ui_html',node.name)
+ def test_results_four_view_mobile_navigation(self):
+  node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='render_results_dashboard')
+  controls=[call for call in ast.walk(node) if isinstance(call,ast.Call)
+            and isinstance(call.func,ast.Attribute) and call.func.attr=='segmented_control']
+  results=[call for call in controls if call.args and isinstance(call.args[0],ast.Constant)
+           and call.args[0].value=='Results view']
+  self.assertEqual(len(results),1)
+  self.assertEqual([item.value for item in results[0].args[1].elts],
+                   ['Overview','Sharp +EV','Pick Log','Audits'])
+  self.assertTrue(any(k.arg=='key' and k.value.value=='results_view_tabs'
+                      for k in results[0].keywords))
+ def test_results_pick_log_uses_safe_html_and_pagination(self):
+  node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='render_results_dashboard')
+  source=ast.unparse(node)
+  self.assertIn('result_table_html(page_rows)',source)
+  self.assertIn('math.ceil(len(visible) / 25)',source)
+  self.assertIn('ui_text(label)',source)
+  self.assertIn('ui_text(value)',source)
 if __name__=='__main__':unittest.main()
