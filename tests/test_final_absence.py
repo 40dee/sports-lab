@@ -46,3 +46,54 @@ class FinalAbsenceTests(unittest.TestCase):
         value = self.summary('<a href="https://www.espn.com/nba/player/_/id/7/player-one">Player One</a> did not play.')
         value['injuries'] = []
         self.assertEqual(env['confirmed_recap_dnp'](value, '7')['status'], 'DNP')
+
+# Extract the pure grading helpers without executing Streamlit's UI at import.
+import pandas as pd
+import math
+
+helpers = [n for n in tree.body if isinstance(n, ast.FunctionDef)
+           and n.name in ('completed_actual', 'permanent_final_absence')]
+grade_env = {'pd': pd, 'math': math, 'encode': repr,
+             'confirmed_recap_dnp': lambda summary, player_id: None}
+exec(compile(ast.Module(body=helpers, type_ignores=[]), str(source), 'exec'), grade_env)
+
+
+class ExactOutAndRetryTests(unittest.TestCase):
+    def final_summary(self, completed=True, injury_id='7', status='Out', boxscore_id=None):
+        players = []
+        if boxscore_id is not None:
+            players = [{'statistics': [{'labels': ['MIN', 'PTS'], 'athletes': [
+                {'athlete': {'id': boxscore_id}, 'stats': ['20', '10']}]}]}]
+        return {'header': {'competitions': [{'status': {'type': {'completed': completed}}}]},
+                'boxscore': {'players': players},
+                'injuries': [{'injuries': [{'athlete': {'id': injury_id}, 'status': status}]}]}
+
+    def test_final_exact_out_absent_is_dnp(self):
+        actual = grade_env['completed_actual'](self.final_summary(), '7', ['PTS'])
+        self.assertEqual(actual, {'status': 'DNP', 'actual': None,
+            'verification': 'Final game: player listed Out and absent from completed ESPN boxscore.'})
+
+    def test_other_player_out_does_not_count(self):
+        self.assertIsNone(grade_env['completed_actual'](
+            self.final_summary(injury_id='8'), '7', ['PTS']))
+
+    def test_not_final_or_not_out_does_not_count(self):
+        self.assertIsNone(grade_env['completed_actual'](
+            self.final_summary(completed=False), '7', ['PTS']))
+        self.assertIsNone(grade_env['completed_actual'](
+            self.final_summary(status='Questionable'), '7', ['PTS']))
+
+    def test_boxscore_row_takes_priority(self):
+        actual = grade_env['completed_actual'](
+            self.final_summary(boxscore_id='7'), '7', ['PTS'])
+        self.assertEqual(actual['status'], 'FINAL')
+        self.assertEqual(actual['actual'], 10)
+
+    def test_retry_cutoff_requires_age_attempts_and_exact_error(self):
+        current = pd.Timestamp('2026-11-20T12:00:00Z')
+        reason = 'Final game: exact player ID absent from boxscore; appearance or identity needs verification'
+        check = grade_env['permanent_final_absence']
+        self.assertTrue(check(reason, 6, '2026-11-17T10:00:00Z', current))
+        self.assertFalse(check(reason, 5, '2026-11-17T10:00:00Z', current))
+        self.assertFalse(check(reason, 6, '2026-11-19T10:00:00Z', current))
+        self.assertFalse(check('Other error', 6, '2026-11-17T10:00:00Z', current))
