@@ -4586,6 +4586,10 @@ def render_combo_hit_rates(store, st, date='All dates'):
 
 def render_results_dashboard(wf, st):
     st.markdown('### Results')
+    results_view = st.segmented_control(
+        'Results view', ['Overview', 'Sharp +EV', 'Pick Log', 'Audits'],
+        default='Overview', key='results_view_tabs',
+        label_visibility='collapsed', width='stretch') or 'Overview'
     research = wf.research_rows()
     if not research:
         st.info('No saved forecasts loaded. Restore a full workspace backup in Settings.')
@@ -4598,8 +4602,8 @@ def render_results_dashboard(wf, st):
     frame['Pending reason'] = [item[0] for item in details]
     frame['Retry after (UTC)'] = [item[1] for item in details]
     dates = ['All dates'] + sorted(frame['Game date'].dropna().unique().tolist(), reverse=True)
-    scope=st.selectbox('Results scope',['Standard playable (1 per stat)','All research (raw)'],key='results_scope')
     with st.expander('Results filters',expanded=False):
+        scope=st.selectbox('Results scope',['Standard playable (1 per stat)','All research (raw)'],key='results_scope')
         left, center, right = st.columns(3)
         date = left.selectbox('Game date (Pacific)', dates, key='results_date')
         platform = center.selectbox('Platform', ['All platforms'] + sorted(frame['Platform'].unique().tolist()), key='results_platform')
@@ -4617,105 +4621,71 @@ def render_results_dashboard(wf, st):
     wins, losses, pending = (int(visible['Outcome'].eq(value).sum()) for value in ('WIN', 'LOSS', 'PENDING'))
     metrics=[('Settled picks',wins+losses),('Wins',wins),('Losses',losses),
              ('Hit rate',f'{wins/(wins+losses):.1%}' if wins+losses else '—')]
-    st.markdown(ui_html('<div class="sl-results-kpis">'+''.join(
-        '<div class="sl-results-kpi"><span>'+ui_text(label)+'</span><strong>'+ui_text(value)+'</strong></div>'
-        for label,value in metrics)+'</div>'),unsafe_allow_html=True)
-    daily = results_daily_summary(visible)
-    if wins + losses:
-        st.vega_lite_chart({'data': {'values': daily}, 'height': 210,
-            'mark': {'type':'line', 'point':{'filled':True, 'size':75}, 'color':'#6ce1b1'},
-            'encoding': {'x': {'field':'Date', 'type':'ordinal', 'sort':'ascending', 'title':None,
-                              'axis':{'labelAngle':0, 'labelOverlap':True}},
-                'y': {'field':'Hit rate', 'type':'quantitative', 'scale':{'domain':[0,1]},
-                      'axis':{'format':'.0%'}, 'title':'Daily hit rate'},
-                'tooltip':[{'field':'Date'}, {'field':'Hit rate', 'format':'.1%'},
-                           {'field':'Settled picks'}, {'field':'Wins'}, {'field':'Losses'}]}}, use_container_width=True)
-    else:
-        st.info('No wins or losses match these filters yet. The graph appears after picks settle.')
-    st.caption('Hit rate = wins ÷ (wins + losses). Hover for daily sample sizes. Ties, DNP and excluded picks do not count. This is not ROI.')
-
-    from result_scopes import results_breakdowns
-    with st.expander('MORE / LESS and confidence breakdowns', expanded=False):
-        breakdowns = results_breakdowns(visible.to_dict('records'))
-        st.caption('Uses the scope, date, platform and result filters above. Only FINAL pregame wins and losses count. Confidence uses the original saved probability; missing estimates stay unavailable. These estimates are experimental.')
-        for label, key in (('By direction', 'direction'), ('By saved confidence', 'confidence')):
-            st.markdown('#### ' + label)
-            rows = breakdowns[key]
-            if rows:
-                display = pd.DataFrame(rows)
-                for field in ('Hit rate', 'Average estimate'):
-                    if field in display:
-                        display[field] = display[field].map(lambda value: f'{value:.1%}' if pd.notna(value) else '—')
-                st.dataframe(display, hide_index=True, use_container_width=True)
-            else:
-                st.info('No settled pregame MORE/LESS picks match these filters.')
-
-    from result_scopes import sharp_market_breakdowns
-    sharp_rows = sharp_market_breakdowns(visible.to_dict('records'))
-    with st.expander('Sharp market & +EV record', expanded=bool(sharp_rows)):
-        st.caption('Uses frozen pregame sportsbook quotes with sharp weighting. Sharp +EV and Pinnacle-backed rows are graded on the sharp-favored offered side; aligned/opposition rows use the frozen model side.')
-        if sharp_rows:
-            display = pd.DataFrame(sharp_rows)
-            display['Hit rate'] = display['Hit rate'].map(lambda value: f'{value:.1%}')
-            st.dataframe(display, hide_index=True, use_container_width=True)
+    if results_view == 'Overview':
+        st.markdown(ui_html('<div class="sl-results-kpis">'+''.join(
+            '<div class="sl-results-kpi"><span>'+ui_text(label)+'</span><strong>'+ui_text(value)+'</strong></div>'
+            for label,value in metrics)+'</div>'),unsafe_allow_html=True)
+        daily = results_daily_summary(visible)
+        if wins + losses:
+            st.vega_lite_chart({'data': {'values': daily}, 'height': 210,
+                'mark': {'type':'line', 'point':{'filled':True, 'size':75}, 'color':'#6ce1b1'},
+                'encoding': {'x': {'field':'Date', 'type':'ordinal', 'sort':'ascending', 'title':None,
+                                  'axis':{'labelAngle':0, 'labelOverlap':True}},
+                    'y': {'field':'Hit rate', 'type':'quantitative', 'scale':{'domain':[0,1]},
+                          'axis':{'format':'.0%'}, 'title':'Daily hit rate'},
+                    'tooltip':[{'field':'Date'}, {'field':'Hit rate', 'format':'.1%'},
+                               {'field':'Settled picks'}, {'field':'Wins'}, {'field':'Losses'}]}}, use_container_width=True)
         else:
-            st.info('No settled pregame picks with qualifying exact-line sportsbook quotes match these filters.')
+            st.info('No wins or losses match these filters yet. The graph appears after picks settle.')
+        st.caption('Hit rate = wins ÷ (wins + losses). Hover for daily sample sizes. Ties, DNP and excluded picks do not count. This is not ROI.')
 
-    render_combo_hit_rates(wf.store,st,date)
+        from result_scopes import results_breakdowns
+        with st.expander('MORE / LESS and confidence breakdowns', expanded=False):
+            breakdowns = results_breakdowns(visible.to_dict('records'))
+            st.caption('Uses the scope, date, platform and result filters above. Only FINAL pregame wins and losses count. Confidence uses the original saved probability; missing estimates stay unavailable. These estimates are experimental.')
+            for label, key in (('By direction', 'direction'), ('By saved confidence', 'confidence')):
+                st.markdown('#### ' + label)
+                rows = breakdowns[key]
+                if rows:
+                    display = pd.DataFrame(rows)
+                    for field in ('Hit rate', 'Average estimate'):
+                        if field in display:
+                            display[field] = display[field].map(lambda value: f'{value:.1%}' if pd.notna(value) else '—')
+                    st.dataframe(display, hide_index=True, use_container_width=True)
+                else:
+                    st.info('No settled pregame MORE/LESS picks match these filters.')
 
-    with st.expander('Player breakdown · line vs projection vs actual'):
-        if st.checkbox('Open player comparison', key='show_results_player_graph') and len(visible):
-            names = sorted(visible['Player'].dropna().unique().tolist())
-            player = st.selectbox('Player', names, format_func=ui_name, key='results_graph_player')
-            selected = visible[visible['Player'] == player].copy()
-            selected['Prop family'] = selected['Stat'].map(compact_result_stat).map(
-                lambda label: ' + '.join(sorted(part.strip() for part in label.split('+'))))
-            stat = st.selectbox('Prop', sorted(selected['Prop family'].unique().tolist()), key='results_graph_stat')
-            bars = results_comparison_rows(selected[selected['Prop family'] == stat])
-            if bars:
-                st.vega_lite_chart({'data':{'values':bars}, 'height':240, 'mark':{'type':'bar', 'cornerRadiusEnd':2},
-                    'encoding':{'y':{'field':'Pick','type':'nominal','sort':None,'title':None,'axis':{'labelLimit':230}},
-                        'yOffset':{'field':'Series','sort':['Line','Projection','Actual']},
-                        'x':{'field':'Value','type':'quantitative','title':stat},
-                        'color':{'field':'Series','type':'nominal','scale':{'domain':['Line','Projection','Actual'],
-                            'range':['#a9b5c4','#38c5ed','#f5bd59']},'legend':{'orient':'top','title':None}},
-                        'tooltip':[{'field':'Pick'},{'field':'Series'},{'field':'Value','format':'.2f'},
-                                   {'field':'Direction'},{'field':'Outcome'}]}}, use_container_width=True)
-                st.caption('Latest six matching picks. Each row keeps its original platform and line. Missing actuals are omitted.')
+        render_combo_hit_rates(wf.store,st,date)
 
-    all_groups = results_attention_groups(visible)
-    waiting = {'Not started', 'Awaiting final'}
-    groups = [group for group in all_groups if group['Reason'] not in waiting]
-    waiting_count = sum(group['Count'] for group in all_groups if group['Reason'] in waiting)
-    if waiting_count:
-        st.caption(f'{waiting_count} picks await a game start or final result.')
-    if groups:
-        with st.expander(f'Grading review · {len(groups)} player/game groups', expanded=False):
-            attention_count = sum(group['Count'] for group in groups)
-            st.caption(f'{attention_count} unresolved picks. Final-game verification problems are separate from unfinished games; these picks do not count as wins or losses.')
-            if st.button('Recheck unresolved results', key='results_recheck_unresolved',
-                         disabled=bool(st.session_state.get('_audit_active'))):
-                st.session_state['_audit_checked_ids'] = []
-                st.session_state['_audit_force_retry'] = True
-                st.session_state['_audit_active'] = True
-                st.rerun()
-            pages = max(1, math.ceil(len(groups)/5))
-            page = 1
-            if pages > 1:
-                key = 'results_attention_page'
-                if st.session_state.get(key, 1) > pages: st.session_state.pop(key, None)
-                page = int(st.number_input('Review page', min_value=1, max_value=pages, value=1, step=1, key=key))
-            for group in groups[(page-1)*5:page*5]:
-                label = f"{ui_name(group['Player'])} · {group['Date']} · {group['Count']} picks · {group['Reason']}"
-                with st.expander(label, expanded=False):
-                    rows = [{'Prop':compact_result_stat(row.get('Stat')), 'Line':row.get('Line'),
-                             'Pick':row.get('Pick'), 'Platform':row.get('Platform')} for row in group['rows']]
-                    st.dataframe(pd.DataFrame(rows), hide_index=True, height=min(250, 38 + 35*len(rows)), use_container_width=True)
-                    st.caption(group['rows'][0].get('Pending reason', 'Awaiting verification'))
-    if st.session_state.get('_audit_active'):
-        st.caption('Rechecking saved results…')
+    elif results_view == 'Sharp +EV':
+        from result_scopes import sharp_market_breakdowns
+        sharp_rows = sharp_market_breakdowns(visible.to_dict('records'))
+        st.caption('Frozen pregame sportsbook quotes. Sharp and Pinnacle buckets use the offered sharp side; aligned/opposition buckets use the frozen model side.')
+        sharp_lookup = {row['Category']: row for row in sharp_rows}
+        sharp_labels = ('🔥 Sharp +EV (54%+ · sharp side)',
+                        '✓ Sharp aligned (53.5%+ · model side)',
+                        '🎯 Pinnacle-backed (53.5%+ · sharp side)',
+                        '⚠️ Sharp opposition (<49% · model side)')
+        sharp_cards = []
+        for label in sharp_labels:
+            row = sharp_lookup.get(label, {})
+            settled = int(row.get('Settled', 0))
+            wins_bucket = int(row.get('Wins', 0))
+            losses_bucket = int(row.get('Losses', 0))
+            rate = wins_bucket / settled if settled else None
+            color = '#23e689' if rate is not None and rate >= .542 else '#e04f5f' if rate is not None and rate < .5 else '#f3f8ff'
+            value = f'{rate:.1%}' if rate is not None else '—'
+            sharp_cards.append('<div class="sl-results-kpi"><span>' + ui_text(label)
+                + '</span><strong style="color:' + color + '">' + ui_text(value)
+                + '</strong><span>' + ui_text(f'{wins_bucket}W–{losses_bucket}L · {settled} settled')
+                + '</span></div>')
+        st.markdown(ui_html('<div class="sl-results-kpis">' + ''.join(sharp_cards) + '</div>'),
+                    unsafe_allow_html=True)
+        st.download_button('Download Sharp +EV CSV',
+                           pd.DataFrame(sharp_rows, columns=['Category','Settled','Wins','Losses','Hit rate']).to_csv(index=False),
+                           'nba_sharp_market.csv', 'text/csv', key='results_sharp_csv')
 
-    with st.expander('View all results', expanded=False):
+    elif results_view == 'Pick Log':
         if len(visible):
             pages = max(1, math.ceil(len(visible)/25))
             filters = (date, platform, outcome, scope)
@@ -4723,58 +4693,107 @@ def render_results_dashboard(wf, st):
                 st.session_state.pop('results_page', None)
                 st.session_state['_results_filters'] = filters
             page = int(st.number_input('Results page', min_value=1, max_value=pages, value=1, step=1, key='results_page'))
-            columns = ['Player','Stat','Line','Pick','Projection','Actual','Outcome','Platform']
-            table = visible.iloc[(page-1)*25:page*25][columns].copy()
-            table['Player'] = table['Player'].map(ui_name)
-            table['Stat'] = table['Stat'].map(compact_result_stat)
-            st.dataframe(table, hide_index=True, height=300, use_container_width=True)
+            page_rows = visible.iloc[(page-1)*25:page*25].to_dict('records')
+            st.markdown(ui_html(result_table_html(page_rows)), unsafe_allow_html=True)
             st.caption(f'{len(visible)} matching picks · 25 per page')
         else:
             st.info('No results match these filters.')
         st.download_button('Download full audit CSV', frame.to_csv(index=False), 'nba_audit.csv', 'text/csv')
+        with st.expander('Player breakdown · line vs projection vs actual'):
+            if st.checkbox('Open player comparison', key='show_results_player_graph') and len(visible):
+                names = sorted(visible['Player'].dropna().unique().tolist())
+                player = st.selectbox('Player', names, format_func=ui_name, key='results_graph_player')
+                selected = visible[visible['Player'] == player].copy()
+                selected['Prop family'] = selected['Stat'].map(compact_result_stat).map(
+                    lambda label: ' + '.join(sorted(part.strip() for part in label.split('+'))))
+                stat = st.selectbox('Prop', sorted(selected['Prop family'].unique().tolist()), key='results_graph_stat')
+                bars = results_comparison_rows(selected[selected['Prop family'] == stat])
+                if bars:
+                    st.vega_lite_chart({'data':{'values':bars}, 'height':240, 'mark':{'type':'bar', 'cornerRadiusEnd':2},
+                        'encoding':{'y':{'field':'Pick','type':'nominal','sort':None,'title':None,'axis':{'labelLimit':230}},
+                            'yOffset':{'field':'Series','sort':['Line','Projection','Actual']},
+                            'x':{'field':'Value','type':'quantitative','title':stat},
+                            'color':{'field':'Series','type':'nominal','scale':{'domain':['Line','Projection','Actual'],
+                                'range':['#a9b5c4','#38c5ed','#f5bd59']},'legend':{'orient':'top','title':None}},
+                            'tooltip':[{'field':'Pick'},{'field':'Series'},{'field':'Value','format':'.2f'},
+                                       {'field':'Direction'},{'field':'Outcome'}]}}, use_container_width=True)
+                    st.caption('Latest six matching picks. Each row keeps its original platform and line. Missing actuals are omitted.')
 
-    with st.expander('Audit controls and learning', expanded=False):
-        if st.checkbox('Open audit controls', key='load_results_controls'):
-            render_audit_status(wf, st)
-            active = bool(st.session_state.get('_audit_active'))
-            if st.button('Grade all completed games', type='primary', disabled=active, key='grade_all_once'):
-                st.session_state['_audit_checked_ids'] = []
-                st.session_state['_audit_force_retry'] = True
-                st.session_state['_audit_active'] = True
-                st.rerun()
-            st.caption('Rechecks unresolved picks from saved forecasts. No paid odds scan. Technical error details are in Settings → Diagnostics.')
-            if active: st.info('Checking unresolved picks…')
-            if st.checkbox('Load audit details and learning', key='load_results_learning'):
-                combined = wf.research_rows(across_platforms=True)
-                decided = [row for row in combined if row['Outcome'] in ('WIN','LOSS')]
-                hits = sum(row['Outcome'] == 'WIN' for row in decided)
-                st.caption(f'Combined model record: {hits}W–{len(decided)-hits}L. Identical cross-platform markets counted once.')
-                st.caption(f"{len(wf.store.items('model'))} learned stat models active. Updates require a chronological holdout.")
-                reliability = wf.store.get('pick_reliability_evaluation', 'latest') or {}
-                if reliability:
-                    st.caption('Green/red learning: '+str(reliability.get('graded_dates',0))+' graded dates · '
-                        +str(round(reliability.get('effective_examples',0)))+' player-game/market equivalents. Combo ranking can use the capped experimental adjustment; frozen MORE/LESS projections are unchanged.')
-                    st.caption('Patterns describe historical associations, not causes or guaranteed hit rates. Alternate lines share weight.')
-                    with st.expander('What the model saw in greens and reds'):
-                        patterns = reliability.get('patterns') or []
+    elif results_view == 'Audits':
+        all_groups = results_attention_groups(visible)
+        waiting = {'Not started', 'Awaiting final'}
+        groups = [group for group in all_groups if group['Reason'] not in waiting]
+        waiting_count = sum(group['Count'] for group in all_groups if group['Reason'] in waiting)
+        if waiting_count:
+            st.caption(f'{waiting_count} picks await a game start or final result.')
+        if groups:
+            with st.expander(f'Grading review · {len(groups)} player/game groups', expanded=False):
+                attention_count = sum(group['Count'] for group in groups)
+                st.caption(f'{attention_count} unresolved picks. Final-game verification problems are separate from unfinished games; these picks do not count as wins or losses.')
+                if st.button('Recheck unresolved results', key='results_recheck_unresolved',
+                             disabled=bool(st.session_state.get('_audit_active'))):
+                    st.session_state['_audit_checked_ids'] = []
+                    st.session_state['_audit_force_retry'] = True
+                    st.session_state['_audit_active'] = True
+                    st.rerun()
+                pages = max(1, math.ceil(len(groups)/5))
+                page = 1
+                if pages > 1:
+                    key = 'results_attention_page'
+                    if st.session_state.get(key, 1) > pages: st.session_state.pop(key, None)
+                    page = int(st.number_input('Review page', min_value=1, max_value=pages, value=1, step=1, key=key))
+                for group in groups[(page-1)*5:page*5]:
+                    label = f"{ui_name(group['Player'])} · {group['Date']} · {group['Count']} picks · {group['Reason']}"
+                    with st.expander(label, expanded=False):
+                        rows = [{'Prop':compact_result_stat(row.get('Stat')), 'Line':row.get('Line'),
+                                 'Pick':row.get('Pick'), 'Platform':row.get('Platform')} for row in group['rows']]
+                        st.dataframe(pd.DataFrame(rows), hide_index=True, height=min(250, 38 + 35*len(rows)), use_container_width=True)
+                        st.caption(group['rows'][0].get('Pending reason', 'Awaiting verification'))
+        if st.session_state.get('_audit_active'):
+            st.caption('Rechecking saved results…')
+
+        with st.expander('Audit controls and learning', expanded=False):
+            if st.checkbox('Open audit controls', key='load_results_controls'):
+                render_audit_status(wf, st)
+                active = bool(st.session_state.get('_audit_active'))
+                if st.button('Grade all completed games', type='primary', disabled=active, key='grade_all_once'):
+                    st.session_state['_audit_checked_ids'] = []
+                    st.session_state['_audit_force_retry'] = True
+                    st.session_state['_audit_active'] = True
+                    st.rerun()
+                st.caption('Rechecks unresolved picks from saved forecasts. No paid odds scan. Technical error details are in Settings → Diagnostics.')
+                if active: st.info('Checking unresolved picks…')
+                if st.checkbox('Load audit details and learning', key='load_results_learning'):
+                    combined = wf.research_rows(across_platforms=True)
+                    decided = [row for row in combined if row['Outcome'] in ('WIN','LOSS')]
+                    hits = sum(row['Outcome'] == 'WIN' for row in decided)
+                    st.caption(f'Combined model record: {hits}W–{len(decided)-hits}L. Identical cross-platform markets counted once.')
+                    st.caption(f"{len(wf.store.items('model'))} learned stat models active. Updates require a chronological holdout.")
+                    reliability = wf.store.get('pick_reliability_evaluation', 'latest') or {}
+                    if reliability:
+                        st.caption('Green/red learning: '+str(reliability.get('graded_dates',0))+' graded dates · '
+                            +str(round(reliability.get('effective_examples',0)))+' player-game/market equivalents. Combo ranking can use the capped experimental adjustment; frozen MORE/LESS projections are unchanged.')
+                        st.caption('Patterns describe historical associations, not causes or guaranteed hit rates. Alternate lines share weight.')
+                        with st.expander('What the model saw in greens and reds'):
+                            patterns = reliability.get('patterns') or []
+                            from audit_display import format_table
+                            if patterns:st.dataframe(format_table(patterns),hide_index=True,width='stretch')
+                            folds = reliability.get('folds') or []
+                            if folds:
+                                st.caption('Earlier dates train; later dates test. Top-six comparison is a ranking diagnostic, not a full combo or payout backtest.')
+                                st.dataframe(format_table(folds),hide_index=True,width='stretch')
+                    latest_daily={}
+                    for _,evaluation in wf.store.items('model_daily_evaluation'):
+                        stat=evaluation.get('stat','Unknown')
+                        if str(evaluation.get('evaluated_at',''))>str(latest_daily.get(stat,{}).get('evaluated_at','')):
+                            latest_daily[stat]=evaluation
+                    if latest_daily:
+                        st.caption('Daily training runs on settled data. Candidate evaluation and production activation are tracked separately.')
                         from audit_display import format_table
-                        if patterns:st.dataframe(format_table(patterns),hide_index=True,width='stretch')
-                        folds = reliability.get('folds') or []
-                        if folds:
-                            st.caption('Earlier dates train; later dates test. Top-six comparison is a ranking diagnostic, not a full combo or payout backtest.')
-                            st.dataframe(format_table(folds),hide_index=True,width='stretch')
-                latest_daily={}
-                for _,evaluation in wf.store.items('model_daily_evaluation'):
-                    stat=evaluation.get('stat','Unknown')
-                    if str(evaluation.get('evaluated_at',''))>str(latest_daily.get(stat,{}).get('evaluated_at','')):
-                        latest_daily[stat]=evaluation
-                if latest_daily:
-                    st.caption('Daily training runs on settled data. Candidate evaluation and production activation are tracked separately.')
-                    from audit_display import format_table
-                    st.dataframe(format_table([{'Market':stat,'Latest graded date':v.get('holdout_date'),
-                        'Daily evaluation':v.get('status'),'Candidate accuracy':(v.get('candidate_holdout') or {}).get('accuracy'),
-                        'Current model accuracy':(v.get('incumbent_holdout') or {}).get('accuracy'),
-                        'Production model':v.get('activation')} for stat,v in sorted(latest_daily.items())]),hide_index=True,width='stretch')
+                        st.dataframe(format_table([{'Market':stat,'Latest graded date':v.get('holdout_date'),
+                            'Daily evaluation':v.get('status'),'Candidate accuracy':(v.get('candidate_holdout') or {}).get('accuracy'),
+                            'Current model accuracy':(v.get('incumbent_holdout') or {}).get('accuracy'),
+                            'Production model':v.get('activation')} for stat,v in sorted(latest_daily.items())]),hide_index=True,width='stretch')
 
 
 
