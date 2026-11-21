@@ -10286,6 +10286,13 @@ if '--auto-board' in sys.argv:
             ledger=workflow_store.get('automation',today) or {}
             # Delayed ticks remain due; the ledger and daily capture guard prevent duplicates.
             explicit_refresh=scheduled_board_refresh_due(current,starts,ledger)
+        if scheduled:
+            earliest_start_pt=min(starts).tz_convert(SLATE_TIMEZONE).isoformat()
+            capture_state=(workflow_store.get('daily_board_capture',today) or {}).get('state')
+            print('SCHEDULE_DECISION',
+                  'earliest_start_pt',earliest_start_pt,
+                  'capture_due',bool(explicit_refresh),
+                  'capture_state',capture_state,flush=True)
         report = daily_cached_board_run(workflow,capture_due=explicit_refresh or not scheduled)
         print(encode(report))
         coverage = report.get('coverage') or {}
