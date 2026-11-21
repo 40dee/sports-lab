@@ -250,11 +250,14 @@ class Store:
                 cached = self._read_cache.get(("items", namespace, None))
                 if cached and key not in dict(cached[1]):
                     self._read_cache.pop(("items", namespace, None), None)
-            while len(self._read_cache) > 128:
+            while len(self._read_cache) > 32:
                 self._read_cache.pop(next((k for k in self._read_cache if k[0] == "get"), next(iter(self._read_cache))))
 
     def _cached_read(self, kind, namespace, key, loader):
-        if self._read_cache is None:
+        large_namespaces = {'forecast', 'grade', 'combo', 'combo_grade', 'source', 'audit_error', 'grade_run'}
+        if (self._read_cache is None or
+                (kind == 'items' and namespace in large_namespaces) or
+                kind in ('compact_forecast', 'research_forecast')):
             return loader()
         import copy
         cache_key = (kind, namespace, key)
@@ -271,7 +274,7 @@ class Store:
     def get(self, namespace, key, default=None):
         if self._read_cache is not None:
             snapshot = self._read_cache.get(("items", namespace, None))
-            if snapshot is not None and time.monotonic() - snapshot[0] < 120:
+            if namespace not in {'forecast', 'grade', 'combo', 'combo_grade', 'source', 'audit_error', 'grade_run'} and snapshot is not None and time.monotonic() - snapshot[0] < 120:
                 import copy
                 return copy.deepcopy(dict(snapshot[1]).get(key, default))
         def load():
@@ -4557,7 +4560,9 @@ def combo_tier_result_rows(combos, grades, tier, policy, ranking_version):
 
 
 def render_combo_hit_rates(store, st, date='All dates'):
-    st.markdown('#### Combo hit rates · 2–6 players')
+    with st.expander('Combo hit rates · 2–6 players', expanded=False):
+        if not st.checkbox('Show combo hit rates', key='results_show_combo_hit_rates'):
+            return
     source=st.segmented_control('Combo results',['Model cohorts','Played combos'],
         default='Model cohorts',key='results_combo_source') or 'Model cohorts'
     tier=st.selectbox('Combo line type',['Standard','Goblin','Demon','Mixed'],key='results_combo_tier')
@@ -4595,12 +4600,16 @@ def render_results_dashboard(wf, st):
         st.info('No saved forecasts loaded. Restore a full workspace backup in Settings.')
         return
     frame = pd.DataFrame(research)
-    errors = dict(wf.store.items('audit_error'))
-    checks = dict(wf.store.items('grade_run'))
-    current = pd.Timestamp.now(tz='UTC')
-    details = [audit_pending_detail(row, errors, checks, current) for row in research]
-    frame['Pending reason'] = [item[0] for item in details]
-    frame['Retry after (UTC)'] = [item[1] for item in details]
+    if results_view == 'Audits':
+        errors = dict(wf.store.items('audit_error'))
+        checks = dict(wf.store.items('grade_run'))
+        current = pd.Timestamp.now(tz='UTC')
+        details = [audit_pending_detail(row, errors, checks, current) for row in research]
+        frame['Pending reason'] = [item[0] for item in details]
+        frame['Retry after (UTC)'] = [item[1] for item in details]
+    else:
+        frame['Pending reason'] = ''
+        frame['Retry after (UTC)'] = ''
     dates = ['All dates'] + sorted(frame['Game date'].dropna().unique().tolist(), reverse=True)
     with st.expander('Results filters',expanded=False):
         scope=st.selectbox('Results scope',['Standard playable (1 per stat)','All research (raw)'],key='results_scope')
@@ -7980,7 +7989,11 @@ def render_card_history(card):
                 "Loading this player's current and previous season..."
             ):
                 history = fetch_player_history(player_id, name, season)
-            st.session_state.setdefault("deep_history", {})[key] = history
+            history_cache = st.session_state.setdefault("deep_history", {})
+            history_cache.pop(key, None)
+            history_cache[key] = history
+            while len(history_cache) > 3:
+                history_cache.pop(next(iter(history_cache)))
         except Exception as error:
             st.error(
                 "Historical data unavailable: "
@@ -11521,7 +11534,15 @@ def render_app_pages():
     st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
         st.session_state.pop("selected_prop_card", None)
+        for cache_key in ('_ui_saved_quote_rows', '_ui_quote_revision',
+                          'calculated_board', '_prepared_full_backup',
+                          '_prepared_history_cache_backup'):
+            st.session_state.pop(cache_key, None)
         st.session_state["last_ui_page"] = app_page
+    history_cache = st.session_state.get('deep_history')
+    if isinstance(history_cache, dict) and len(history_cache) > 3:
+        for history_key in list(history_cache)[:-3]:
+            history_cache.pop(history_key, None)
     # A single placeholder clears the previous page before slow reads begin.
     # This runs at app scope; timed fragments never own or empty the page body.
     page_body=st.empty()
