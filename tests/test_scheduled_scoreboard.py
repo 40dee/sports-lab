@@ -14,15 +14,15 @@ exec(compile(ast.Module(body=nodes,type_ignores=[]),'app.py','exec'),env)
 class ScheduledScoreboardTests(TestCase):
     def test_pacific_date_range_and_future_filter(self):
         current=pd.Timestamp('2026-11-21T18:00:00Z')
-        fetch=Mock(return_value={'events':[
-            {'date':'2026-11-21T17:00:00Z'},
-            {'date':'2026-11-21T20:00:00Z'},
-            {'date':'2026-11-22T02:00:00Z'},
-            {'date':'2026-11-22T20:00:00Z'}]})
+        fetch=Mock(side_effect=[
+            {'events':[{'date':'2026-11-21T17:00:00Z'},{'date':'2026-11-21T20:00:00Z'}]},
+            {'events':[{'date':'2026-11-22T02:00:00Z'},{'date':'2026-11-22T20:00:00Z'}]}])
         starts=env['scheduled_scoreboard_starts'](fetch,'https://example.test/',current)
         self.assertEqual(len(starts),2)
-        fetch.assert_called_once_with('https://example.test/scoreboard',
-            {'dates':'20261121-20261122','limit':1000},ttl_seconds=300)
+        self.assertEqual(fetch.call_count,2)
+        self.assertEqual([call.kwargs['ttl_seconds'] for call in fetch.call_args_list],[300,300])
+        self.assertEqual([call.args[1]['dates'] for call in fetch.call_args_list],
+                         ['20261121','20261122'])
 
     def test_scoreboard_errors_are_not_silenced(self):
         fetch=Mock(side_effect=RuntimeError('ESPN unavailable'))
