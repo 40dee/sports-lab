@@ -54,13 +54,15 @@ class SharpConsensusTests(unittest.TestCase):
   with patch.dict(sys.modules,{'market_compare':market,'line_edges':edges}),patch('importlib.reload',side_effect=reload) as refresh:
    env['_refresh_consensus_helpers']();env['_refresh_consensus_helpers']()
    self.assertEqual([c.args[0] for c in refresh.call_args_list],[market,edges])
- def test_plays_default_sort_computes_sharp_infos_on_an_all_market_load(self):
+ def test_plays_default_model_sort_skips_full_sharp_scan_unless_filtered(self):
   board=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='ui_board')
   assignment=next(n for n in board.body if isinstance(n,ast.Assign) and any(isinstance(t,ast.Name) and t.id=='sharp_sort' for t in n.targets))
   env={'page':'Plays'};exec(compile(ast.Module(body=[assignment],type_ignores=[]),'app.py','exec'),env)
-  self.assertEqual(env['sharp_sort'],'Highest sharp %')
+  self.assertEqual(env['sharp_sort'],'Model score')
   env['market_filter']='All'
   condition=next(n.test for n in ast.walk(board) if isinstance(n,ast.If) and isinstance(n.test,ast.BoolOp) and 'sharp_sort' in ast.unparse(n.test))
+  self.assertFalse(eval(compile(ast.Expression(condition),'app.py','eval'),env))
+  env['market_filter']='🔥 Sharp +EV (54%+)'
   self.assertTrue(eval(compile(ast.Expression(condition),'app.py','eval'),env))
   env={'page':'Saved'};exec(compile(ast.Module(body=[assignment],type_ignores=[]),'app.py','exec'),env)
   self.assertEqual(env['sharp_sort'],'Model score')
