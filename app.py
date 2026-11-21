@@ -11741,9 +11741,8 @@ def _resume_preparation_fragment():
     if report['state'] == 'complete':
         st.session_state['_prepare_active'] = False
         st.rerun()
-    # Refresh cards after successful work, without requiring another user click.
-    if report['attempted']:
-        st.rerun()
+    # The fragment polls itself every 4s while active. Avoid a full-script
+    # rerun after each preparation batch; completion still refreshes once.
 
 _resume_preparation_fragment()
 
