@@ -804,6 +804,17 @@ def completed_actual(summary, player_id, columns):
                         for section in group.get('statistics', [])
                         for athlete in section.get('athletes', []))
     if not matching_rows:
+        # A completed ESPN game with an exact-ID Out listing and no boxscore
+        # appearance is a verified DNP, not a missing-stat grading error.
+        listed_out = any(
+            str(injury.get('athlete', {}).get('id', '')) == str(player_id)
+            and str(injury.get('status', '')).strip().lower() == 'out'
+            for group in summary.get('injuries', [])
+            for injury in group.get('injuries', [])
+        )
+        if listed_out:
+            return {'status': 'DNP', 'actual': None,
+                    'verification': 'Final game: player listed Out and absent from completed ESPN boxscore.'}
         verified = confirmed_recap_dnp(summary, player_id)
         if verified:
             return verified
@@ -2570,6 +2581,14 @@ class Workflow:
 
         return outcomes
 
+def permanent_final_absence(reason, attempts, start, current):
+    """Stop retrying unresolved exact-ID final absences after six old attempts."""
+    return (str(reason).startswith('Final game: exact player ID absent from boxscore')
+            and int(attempts) >= 6
+            and pd.notna(pd.to_datetime(start, utc=True, errors='coerce'))
+            and current - pd.to_datetime(start, utc=True) > pd.Timedelta(hours=48))
+
+
     def grade(self, limit=100, time_budget=120, force_retry=False, skip_ids=None):
         """Grade pregame forecasts fairly; keep failures inspectable and retryable."""
         counts = {"graded": 0, "pending": 0, "errors": 0, "DNP": 0,
@@ -2600,6 +2619,9 @@ class Workflow:
                 # A malformed forecast is a genuine error, not an upcoming game.
                 pass
             previous = self.store.get("audit_error", key)
+            if previous and previous.get('deferred_permanently'):
+                counts['deferred'] += 1
+                continue
             if previous and not force_retry:
                 next_retry = pd.to_datetime(previous.get("retry_after"), utc=True, errors="coerce")
                 upgraded_absence_check = (previous.get('verification_version') != 2 and
@@ -2685,13 +2707,15 @@ class Workflow:
                 reason = str(error) if isinstance(error, (ValueError, KeyError, TypeError)) else type(error).__name__
                 if not isinstance(error, (ValueError, KeyError, TypeError)):
                     reason = "Unexpected " + type(error).__name__
+                permanent = permanent_final_absence(reason, attempts, frozen.get('card', {}).get('Start (UTC)'), pd.Timestamp.now(tz='UTC'))
                 self.store.put("audit_error", key, {
                     "verification_version": 2,
                     "resolved": False, "type": type(error).__name__,
                     "reason": reason[:180], "attempts": attempts,
                     "last_attempt": now(),
-                    "retry_after": (pd.Timestamp.now(tz="UTC") +
+                    "retry_after": None if permanent else (pd.Timestamp.now(tz="UTC") +
                                     pd.Timedelta(minutes=min(360, 15 * 2 ** min(attempts - 1, 5)))).isoformat(),
+                    "deferred_permanently": permanent,
                     "event_id": str(frozen.get("event_id", ""))[:32],
                     "player": str(frozen.get("card", {}).get("Player", ""))[:90],
                     "market": str(frozen.get("card", {}).get("Stat", ""))[:90],
