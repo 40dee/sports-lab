@@ -9876,14 +9876,17 @@ def scheduled_scoreboard_starts(fetch, base_url, current):
     current=utc_timestamp(current)
     today=slate_day(current)
     begin=pd.Timestamp(today,tz=SLATE_TIMEZONE)
-    dates=begin.strftime('%Y%m%d')+'-'+(begin+pd.DateOffset(days=1)).strftime('%Y%m%d')
-    schedule=fetch(base_url+'scoreboard',{'dates':dates,'limit':1000},ttl_seconds=300)
-    events=schedule.get('events',[])
-    if not isinstance(events,list):
-        raise ValueError('ESPN scoreboard events must be a list')
+    dates=(begin.strftime('%Y%m%d'),(begin+pd.DateOffset(days=1)).strftime('%Y%m%d'))
+    events=[]
+    for day in dates:
+        schedule=fetch(base_url+'scoreboard',{'dates':day,'limit':1000},ttl_seconds=300)
+        day_events=schedule.get('events',[])
+        if not isinstance(day_events,list):
+            raise ValueError('ESPN scoreboard events must be a list')
+        events.extend(day_events)
     starts=sorted(utc_timestamp(g.get('date')) for g in events
         if isinstance(g,dict) and today_pregame(g.get('date'),current))
-    print('SCHEDULE_SCOREBOARD','events',len(events),'upcoming_today',len(starts),'dates',dates,flush=True)
+    print('SCHEDULE_SCOREBOARD','events',len(events),'upcoming_today',len(starts),'dates',','.join(dates),flush=True)
     return starts
 
 
