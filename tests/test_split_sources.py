@@ -15,7 +15,8 @@ class SplitSourcesTests(unittest.TestCase):
         exec(compile(ast.Module(body=[assignment],type_ignores=[]),'app.py','exec'),env)
         self.assertTrue(env['regular_markets'])
         self.assertFalse(set(env['regular_markets']) & set(odds_fallback.FANTASY_MARKETS))
-        self.assertEqual(len(env['regular_markets']),10)
+        self.assertEqual(len(env['regular_markets']),5)
+        self.assertFalse(any(m.endswith('_alternate') for m in env['regular_markets']))
 
     def test_native_capture_requests_only_nba_fantasy_score(self):
         node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='import_daily_prizepicks_board')
