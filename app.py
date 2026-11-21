@@ -9871,6 +9871,25 @@ def board_coverage(wf, board, reference=None):
     return report
 
 
+def scheduled_scoreboard_starts(fetch, base_url, current):
+    """Read free ESPN scoreboard for the Pacific slate date and next day."""
+    current=utc_timestamp(current)
+    today=slate_day(current)
+    begin=pd.Timestamp(today,tz=SLATE_TIMEZONE)
+    dates=(begin.strftime('%Y%m%d'),(begin+pd.DateOffset(days=1)).strftime('%Y%m%d'))
+    events=[]
+    for day in dates:
+        schedule=fetch(base_url+'scoreboard',{'dates':day,'limit':1000},ttl_seconds=300)
+        day_events=schedule.get('events',[])
+        if not isinstance(day_events,list):
+            raise ValueError('ESPN scoreboard events must be a list')
+        events.extend(day_events)
+    starts=sorted(utc_timestamp(g.get('date')) for g in events
+        if isinstance(g,dict) and today_pregame(g.get('date'),current))
+    print('SCHEDULE_SCOREBOARD','events',len(events),'upcoming_today',len(starts),'dates',','.join(dates),flush=True)
+    return starts
+
+
 def scheduled_board_refresh_due(current, starts, ledger):
     """Spend the single daily capture near the dominant Pacific-time slate."""
     if ledger.get('refreshes') or not starts:
@@ -10257,15 +10276,10 @@ if '--auto-board' in sys.argv:
             current=pd.Timestamp.now(tz='UTC')
             today=slate_day(current)
             try:
-                begin=pd.Timestamp(today,tz=SLATE_TIMEZONE)
-                dates=begin.strftime('%Y%m%d')+'-'+(begin+pd.DateOffset(days=1)).strftime('%Y%m%d')
-                schedule=workflow.e['saved_fetch'](workflow.e['ESPN_BASE']+'scoreboard',
-                    {'dates':dates,'limit':1000},ttl_seconds=300)
-                starts=sorted(utc_timestamp(g.get('date')) for g in schedule.get('events',[])
-                    if pd.notna(utc_timestamp(g.get('date')))
-                    and today_pregame(g.get('date'),current))
-            except Exception:
-                starts=[]
+                starts=scheduled_scoreboard_starts(workflow.e['saved_fetch'],workflow.e['ESPN_BASE'],current)
+            except Exception as error:
+                print('SCHEDULE_CHECK_ERROR',type(error).__name__,flush=True)
+                raise
             if not starts:
                 print('No upcoming NBA games verified; paid board refresh skipped.')
                 raise SystemExit(0)

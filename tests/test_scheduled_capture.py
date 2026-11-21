@@ -44,24 +44,22 @@ class ScheduledCaptureTests(unittest.TestCase):
    self.assertFalse(fn(local('14:45'),values,{}))
   self.assertTrue(fn(local('14:45'),['bad',local('16:00')],{}))
  def test_scheduled_scoreboard_includes_late_utc_tipoffs_but_only_today_pacific(self):
-  from types import SimpleNamespace
-  from unittest.mock import Mock
-  auto=next(n for n in TREE.body if isinstance(n,ast.If) and "'--auto-board' in sys.argv" == ast.unparse(n.test))
-  scheduled=next(n for n in ast.walk(auto) if isinstance(n,ast.If) and ast.unparse(n.test)=='scheduled')
-  query=next(n for n in scheduled.body if isinstance(n,ast.Try))
+  helper=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='scheduled_scoreboard_starts')
   today_node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='today_pregame')
+  slate_node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name=='slate_day')
   for day in ('2026-07-12','2026-11-22'):
    late=local('22:00',day).tz_convert('UTC')
    tomorrow=local('00:30',day)+pd.DateOffset(days=1)
-   fetch=Mock(return_value={'events':[{'date':late.isoformat()}, {'date':tomorrow.isoformat()},
-                                      {'date':local('08:00',day).isoformat()}, {'date':'bad'}]})
-   env=dict(ENV,current=local('14:45',day),today=day,
-            workflow=SimpleNamespace(e={'saved_fetch':fetch,'ESPN_BASE':'offline/'}))
-   exec(compile(ast.Module(body=[today_node]+query.body,type_ignores=[]),'app.py','exec'),env)
-   self.assertEqual(fetch.call_count,1)
-   begin=pd.Timestamp(day)
-   expected=begin.strftime('%Y%m%d')+'-'+(begin+pd.DateOffset(days=1)).strftime('%Y%m%d')
-   self.assertEqual(fetch.call_args.args[1],{'dates':expected,'limit':1000})
-   self.assertEqual(fetch.call_args.kwargs,{'ttl_seconds':300})
-   self.assertEqual(env['starts'],[late])
+   from unittest.mock import Mock
+   fetch=Mock(side_effect=[
+    {'events':[{'date':local('08:00',day).isoformat()},{'date':'bad'}]},
+    {'events':[{'date':late.isoformat()},{'date':tomorrow.isoformat()}]}])
+   env=dict(ENV)
+   exec(compile(ast.Module(body=[slate_node,today_node,helper],type_ignores=[]),'app.py','exec'),env)
+   starts=env['scheduled_scoreboard_starts'](fetch,'offline/',local('14:45',day))
+   self.assertEqual(fetch.call_count,2)
+   begin=pd.Timestamp(day,tz='America/Los_Angeles')
+   expected=[begin.strftime('%Y%m%d'),(begin+pd.DateOffset(days=1)).strftime('%Y%m%d')]
+   self.assertEqual([c.args[1]['dates'] for c in fetch.call_args_list],expected)
+   self.assertEqual(starts,[late])
 if __name__=='__main__':unittest.main()
