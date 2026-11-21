@@ -10075,7 +10075,10 @@ def newer_quote_rows(previous, incoming, family):
 
 def run_quota_fallback(wf, budget_seconds=1200):
     from odds_fallback import download, BOARD_MARKETS, FANTASY_MARKETS, COVERAGE_VERSION, prune_unavailable_lines
-    regular_markets=tuple(m for m in BOARD_MARKETS if m not in FANTASY_MARKETS)
+    regular_markets=tuple(
+        m for m in BOARD_MARKETS
+        if m not in FANTASY_MARKETS and not m.endswith('_alternate')
+    )
     board_run_stage(wf.store,'importing')
     day=slate_day();board=wf.store.get('board','board') or {}
     saved_status=wf.store.get('source','the_odds_api_fallback_latest') or {}
