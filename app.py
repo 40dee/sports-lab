@@ -11211,17 +11211,7 @@ def ui_board(page):
             with column:
                 key = identity(card)
                 frozen = saved_prediction(forecasts,card)
-                saved_value=saved_lookup.get((frozen or {}).get('id')) or saved_lookup.get(key)
-                ui_card(card, frozen, bool(saved_value))
-                if page == 'Saved' and saved_value:
-                    st.caption('Saved at (UTC): ' + saved_value['saved_at'])
-                    candidates = [row for row in rows if ui_matches_family(card, row)]
-                    lines = sorted({float(row['Line']) for row in candidates if ui_number(row.get('Line')) is not None})
-                    if lines:
-                        st.caption('Latest imported thresholds: ' + ', '.join(f'{n:g}' for n in lines) + '. Alternate lines are not proof of line movement. A uniquely matched quote history is needed for a movement claim.')
-                    else:
-                        st.caption('No matching quote in the current imported board. Original saved line preserved.')
-
+                ui_card(card, frozen)
 
 
 # ---------------- APP HEADER ----------------
