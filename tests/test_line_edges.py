@@ -23,7 +23,10 @@ class LineEdgeTests(unittest.TestCase):
   normal=NormalDist()
   self.assertAlmostEqual(edge['probability'],normal.cdf(normal.inv_cdf(.55)+1/8.5))
   with patch.dict('line_edges.BOOK_WEIGHTS',{'pinnacle':1.,'bovada':1.}):
-   self.assertIsNone(self.run_edge(rows))
+   equal_weight_edge=self.run_edge(rows)
+   self.assertIsNotNone(equal_weight_edge)
+   self.assertAlmostEqual(equal_weight_edge['probability'],normal.cdf(1/8.5))
+   self.assertLess(equal_weight_edge['probability'],edge['probability'])
   self.assertEqual(rows,original)
  def test_even_money_vig_one_point_pts_move_clears_54_percent(self):
   from statistics import NormalDist
