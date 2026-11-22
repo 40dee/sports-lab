@@ -4709,7 +4709,7 @@ def render_results_dashboard(wf, st):
             st.info('No results match these filters.')
         st.download_button('Download full audit CSV', frame.to_csv(index=False), 'nba_audit.csv', 'text/csv')
         with st.expander('Player breakdown · line vs projection vs actual'):
-            if st.checkbox('Open player comparison', key='show_results_player_graph') and len(visible):
+            if len(visible):
                 names = sorted(visible['Player'].dropna().unique().tolist())
                 player = st.selectbox('Player', names, format_func=ui_name, key='results_graph_player')
                 selected = visible[visible['Player'] == player].copy()
@@ -4772,7 +4772,7 @@ def render_results_dashboard(wf, st):
                     st.rerun()
                 st.caption('Rechecks unresolved picks from saved forecasts. No paid odds scan. Technical error details are in Settings → Diagnostics.')
                 if active: st.info('Checking unresolved picks…')
-                if st.checkbox('Load audit details and learning', key='load_results_learning'):
+                if False:  # Legacy shadow-learning display retired; keep backend intact.
                     combined = wf.research_rows(across_platforms=True)
                     decided = [row for row in combined if row['Outcome'] in ('WIN','LOSS')]
                     hits = sum(row['Outcome'] == 'WIN' for row in decided)
@@ -4811,8 +4811,7 @@ def render_results_dashboard(wf, st):
 def render_workflow(wf, st, rows, mode="settings"):
     if mode == 'results':
         render_results_dashboard(wf, st)
-        if not st.checkbox('Show detailed accuracy, ROI and unresolved records', key='load_detailed_results'):
-            return
+        return
     st.subheader("NBA workflow")
 
     st.caption(
@@ -11226,7 +11225,8 @@ st.markdown("""<style>
 .sl-drivers .sl-context-tile:first-child{grid-column:1/-1;}
 .sl-hit-strip{display:flex;justify-content:space-around;padding:9px;background:#0d1822;border:1px solid #1d3242;border-radius:10px;font-size:.78rem;}
 .sl-results-kpis{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:8px 0 14px;}
-.sl-results-kpi{background:#0d1822;border:1px solid #1d3242;border-radius:12px;padding:11px 13px;}
+.sl-results-kpi{background:linear-gradient(145deg,#10202e,#0b1620);border:1px solid #1e3547;border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.22);padding:11px 13px;}
+.stApp [data-testid="stExpander"]{background:linear-gradient(145deg,#10202e,#0b1620);border:1px solid #1e3547;border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.22);}
 .sl-results-kpi span{display:block;font-size:.74rem;color:#9db1c0;}
 .sl-results-kpi strong{display:block;font-size:1.5rem;line-height:1.3;color:#f3f8ff;}
 :root { color-scheme:dark; }
@@ -11295,7 +11295,7 @@ st.markdown("""<style>
 .combo-choice.less,.fc-less {color:#e04f5f!important;}
 
 .sl-status {display:block;color:#9db1c0;font-size:.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0 0 8px;padding:5px 9px;background:#0d1822;border:1px solid #1d3242;border-radius:20px;}
-.sl-card {border:1px solid #1d3242;background:#0d1822;}
+.sl-card {background:linear-gradient(145deg,#10202e,#0b1620);border:1px solid #1e3547;border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.22);}
 .sl-compact .sl-person {align-items:center;}
 .sl-compact .sl-photo {width:52px;height:60px;}
 .sl-compact .sl-side {min-width:0;max-width:105px;flex-shrink:0;}
@@ -11548,157 +11548,21 @@ def render_app_pages():
         loading.caption("Opening " + app_page + "…")
         render_saved_workspace(controls=False)
         if app_page=="Settings":
-            board_settings=st.expander("Today's Board & Manual Lines",expanded=False)
-            feed_settings=st.expander("API Quotas & Data Feeds",expanded=False)
-            diagnostic_settings=st.expander("Backups, v2 Backtest & Diagnostics",expanded=False)
+            board_settings=st.expander("Board & Quotas",expanded=False)
+            diagnostic_settings=st.expander("Backups & Diagnostics",expanded=False)
             with board_settings:
                 render_live_board_status(workflow.store,st,detailed=True)
                 preparation_panel(workflow,st,[row for row in st.session_state.get('v4_rows',[]) if today_pregame(row.get('Start (UTC)'))])
-            with diagnostic_settings:
-                render_saved_workspace(controls=True)
-        if app_page == "Settings":
-            with feed_settings:
-                st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
-                st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
                 from the_odds_api import render_probe as render_the_odds_api_probe
                 render_the_odds_api_probe(st, workflow_store, setting("THE_ODDS_API_KEY", ""))
-                st.caption("Provider order: OddsPAPI first; The Odds API when the monthly or daily OddsPAPI guard blocks imports. The fallback has a separate paced free-credit guard. Scheduled use requires THE_ODDS_API_KEY in GitHub Actions Secrets too.")
-                fallback_status=workflow_store.get("source","the_odds_api_fallback_latest")
-                if fallback_status:
-                    st.write("Latest fallback: "+str(fallback_status.get("state"))+" · "+str(fallback_status.get("lines",0))+" lines · "+str(fallback_status.get("games_available",0))+" upcoming games")
-                    st.caption(fallback_status.get("note",""))
-
-        # ---------------- NBA SCANNER ----------------
-
-
-        # Grading runs in the scheduled worker or the explicit Results refresh control.
-        # Board browsing never waits for a whole maintenance pass.
-
-        if app_page=="Results":
-            render_workflow(workflow,st,[],mode="results")
-        elif app_page=="Settings":
+                st.caption("PrizePicksAPI credit status")
+                pp_budget=workflow_store.get('request_budget',slate_day()+':prizepicks') or 0
+                st.caption("PrizePicks requests today: "+str(pp_budget))
             with diagnostic_settings:
+                render_saved_workspace(controls=True)
                 render_workflow(workflow,st,[row for row in st.session_state.get('v4_rows',[]) if today_pregame(row.get('Start (UTC)'))],mode="settings")
-
-        # PrizePicks tier feed: explicit refresh only.
-
-
-
-
-        # Import native Kalshi contracts for the games already on the saved board.
-
-
-
-
-        if app_page == "Settings":
-            with feed_settings:
-                render_native_kalshi_refresh()
-                if st.session_state.get("native_kalshi_notice"):
-                    st.info(st.session_state["native_kalshi_notice"])
-
-                render_pp_tier_refresh()
-                if st.session_state.get("pp_tier_notice"):
-                    st.info(st.session_state["pp_tier_notice"])
-
-            with feed_settings:
-                odds_usage_panel(workflow_store,st)
-            with board_settings:
-                scan_scope = st.radio('Today’s games to scan (Pacific time)',
-                    ['All today’s games', 'Limit game count'], horizontal=True, key='nba_scan_scope')
-                max_games = None
-                if scan_scope == 'Limit game count':
-                    max_games = int(st.number_input('Maximum games this scan', min_value=1,
-                        value=3, step=1, key='nba_scan_limit'))
-                if st.button('Load scan estimate and schedule preview', key='load_scan_preview_once'):
-                    try:
-                        preview = scan_schedule_preview(slate_day(), saved_fetch)
-                        estimated_games = len(preview) if max_games is None else min(len(preview), max_games)
-                        st.info(f'Estimated scan: {estimated_games} upcoming games today · '
-                            f'up to {estimated_games + 2} OddsPAPI HTTP requests if all data is uncached '
-                            '(fixtures + market catalog + one odds request per game).')
-                        st.caption('Estimate uses the public ESPN schedule, with no OddsPAPI call. '
-                            'Provider coverage may differ. HTTP requests are not a guaranteed credit count; '
-                            'your provider determines credit charges. Started games are excluded.')
-                        with st.expander('Preview today’s upcoming games'):
-                            if preview:
-                                st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
-                            else:
-                                st.info('No upcoming games found for today in Pacific time.')
-                    except Exception:
-                        st.warning('Public schedule preview unavailable. Request estimate unavailable. '
-                            'A scan still uses only today’s upcoming provider games: one fixtures request, '
-                            'one catalog request, and one odds request per game when uncached.')
-                render_manual_import(workflow,st)
-                st.caption('This manual scan shares the worker cache and daily request guard. Grading, combo building and browsing do not request OddsPAPI data.')
-
-                if st.button(
-                    "🔍 SCAN AND DECODE NBA LINES",
-                    use_container_width=True,
-                ):
-                    try:
-                        with st.spinner("Loading NBA fixtures and market lines..."):
-                            games = upcoming_nba()
-                            if max_games is not None:
-                                games = games[:max_games]
-                            all_rows, summaries, errors = [], [], []
-                            successful_fixtures = set()
-
-                            if not games:
-                                st.warning(
-                                    "No upcoming NBA games returned "
-                                    "for today in Pacific time. Tomorrow's games are not included."
-                                )
-
-                            else:
-                                catalog = market_catalog()
-
-                                for game in games:
-                                    try:
-                                        decoded_rows, summary = decode_game(
-                                            game,
-                                            game_odds(str(game["fixtureId"])),
-                                            catalog,
-                                        )
-
-                                        if not decoded_rows:
-                                            raise ValueError('No decoded lines returned; saved lines retained.')
-                                        all_rows.extend(decoded_rows)
-                                        summaries.extend(summary)
-                                        successful_fixtures.add(str(game['fixtureId']))
-
-                                    except ValueError as error:
-                                        errors.append(
-                                            f"{game.get('participant1Name', '?')} vs "
-                                            f"{game.get('participant2Name', '?')}: "
-                                            f"{error}"
-                                        )
-
-                            st.session_state["v4_rows"] = merge_scan_rows(
-                                st.session_state.get('v4_rows', []), all_rows, successful_fixtures)
-                            st.session_state.pop('calculated_board', None)
-                            st.session_state.pop('selected_prop_card', None)
-                            st.session_state["v4_summary"] = summaries
-                            st.session_state["v4_errors"] = errors
-                            st.session_state["v4_scan_at"] = (
-                                datetime.now(timezone.utc).isoformat()
-                            )
-
-                            workspace_store(
-                                "board",
-                                {
-                                    key: st.session_state[key]
-                                    for key in BOARD_FIELDS
-                                },
-                            )
-
-                            st.success(f'Scanned {len(successful_fixtures)} of {len(games)} upcoming games. '
-                                'Saved Fantasy lines and frozen forecasts preserved. '
-                                'Rebuild from the saved PrizePicks feed to match Fantasy lines to newly scanned games, '
-                                'then calculate and freeze the board. Neither step runs an OddsPAPI scan.')
-
-                    except ValueError as error:
-                        st.error(str(error))
-
+        elif app_page=="Results":
+            render_workflow(workflow,st,[],mode="results")
 
         # ---------------- RESULTS AND PLAYER LINES ----------------
         board_allowed,board_note=combo_board_ready(workflow.store) if app_page in ('Plays','Fantasy','Combos') else (True,'')
@@ -11717,21 +11581,6 @@ def render_app_pages():
         elif app_page == "Plays":
             if "unfinished" in board_note: st.caption(board_note)
             ui_board("Plays")
-
-        if app_page == "Settings":
-            with diagnostic_settings:
-                if HISTORY_DB.exists():
-                    if st.button("Prepare historical cache backup", key="prepare_history_cache_backup"):
-                        # Read only when requested, not on every visit to Settings.
-                        st.session_state["_prepared_history_cache_backup"] = HISTORY_DB.read_bytes()
-                    cache_backup = st.session_state.get("_prepared_history_cache_backup")
-                    if cache_backup is not None:
-                        st.download_button(
-                            "Back up historical response cache",
-                            data=cache_backup,
-                            file_name="sports_lab_history.sqlite3",
-                            mime="application/vnd.sqlite3",
-                        )
 
         loading.empty()
 
