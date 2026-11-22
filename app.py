@@ -10603,7 +10603,7 @@ def ui_fantasy_contributions(card, result):
         st.caption('Saved component contributions precede any learned blend; the final projection may differ. Missing inputs are shown as —.')
 
 
-def ui_card(card, frozen, saved=False):
+def ui_card(card, frozen):
     """Mobile-first pick card. Only frozen model values are displayed."""
     result = (frozen or {}).get('result') or {}
     health = ((workflow_store.get('health', slate_day()) or {}).get('players') or {}).get(player_health_key(card)) or {}
@@ -10663,12 +10663,8 @@ def ui_card(card, frozen, saved=False):
     if fantasy_weights(card):ui_fantasy_contributions(card,result)
     key = identity(card)
     with st.container(key='pick_actions_'+key):
-        left, right = st.columns([7, 3], gap='small')
-        if left.button('View research ›', key='detail_' + key, use_container_width=True):
+        if st.button('View research ›', key='detail_' + key, use_container_width=True):
             st.session_state['selected_prop_card'] = dict(card)
-            st.rerun()
-        if right.button('★ Saved' if saved else '☆ Save', key='save_' + key, disabled=not saved and (not fresh or not pick_is_selectable(card, result)), use_container_width=True):
-            ui_save_pick(card, frozen)
             st.rerun()
 
 
@@ -10960,17 +10956,11 @@ def ui_frozen_sources(result):
 
 
 def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='‹  Plays'):
-    back,save=st.columns([3,1])
-    if back.button('< Back', key='back_to_plays'):
+    if st.button('< Back', key='back_to_plays'):
         st.session_state.pop(selection_key, None)
         st.rerun()
     frozen = ui_matched_forecast(card,forecasts=forecasts)
     result = (frozen or {}).get('result') or {}
-    watched={k:v for k,v in workflow_store.items('watchlist') if v.get('active',True)}
-    saved=any(k==(frozen or {}).get('id') or v.get('forecast_id')==(frozen or {}).get('id') for k,v in watched.items()) if frozen else False
-    fresh=line_freshness(card,refresh_checks=dict(workflow_store.items('odds_refresh')),allow_daily_capture=True)[0]
-    if save.button('★ Saved' if saved else '☆ Save',key='detail_save_'+identity(card),disabled=not saved and (not fresh or not pick_is_selectable(card,result))):
-        ui_save_pick(card,frozen);st.rerun()
     name = ui_name(card.get('Player', ''))
     photo = ui_photo(frozen)
     portrait = (f'<img class="sl-photo sl-detail-photo" src="{ui_text(photo)}" alt="Player portrait">'
@@ -11059,8 +11049,7 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
 def ui_board(page):
     # Browsing renders saved forecasts only; worker controls live in Settings.
     rows = st.session_state.get('v4_rows', [])
-    forecasts = forecast_index(workflow_store.items('forecast') if page=='Saved'
-                               else saved_forecast_records(workflow_store,combo_clock()))
+    forecasts = forecast_index(saved_forecast_records(workflow_store,combo_clock()))
     health = workflow_store.get('health', slate_day()) or {}
     coverage = workflow_store.get('coverage', slate_day()) or {}
     line_checks=dict(workflow_store.items('odds_refresh'))
@@ -11068,10 +11057,6 @@ def ui_board(page):
         frozen = saved_prediction(forecasts, card)
         if frozen:
             forecasts[identity(card)] = frozen
-    saved = {key: value for key, value in workflow_store.items('watchlist') if value.get('active', True)}
-    saved_lookup=dict(saved)
-    for saved_key,value in saved.items():
-        if value.get('forecast_id'):saved_lookup.setdefault(value['forecast_id'],value)
     if page=='Plays':
         quote_revision=(slate_day(),st.session_state.get('v4_scan_at'))
         if st.session_state.get('_ui_quote_revision')!=quote_revision:
@@ -11080,13 +11065,13 @@ def ui_board(page):
             except Exception:st.session_state['_ui_saved_quote_rows']=[]
             st.session_state['_ui_quote_revision']=quote_revision
     selected = st.session_state.get('selected_prop_card')
-    if selected is not None and page != 'Saved' and (str(selected.get('Platform','')).lower()=='draftkings' or not today_pregame(selected.get('Start (UTC)'))):
+    if selected is not None and (str(selected.get('Platform','')).lower()=='draftkings' or not today_pregame(selected.get('Start (UTC)'))):
         st.session_state.pop('selected_prop_card', None)
         selected = None
     if selected is not None:
         ui_detail(selected, forecasts)
         return
-    st.subheader('Saved plays' if page == 'Saved' else 'Your NBA plays')
+    st.subheader('Your NBA plays')
     view = (st.segmented_control('Board view', ['Top plays', 'All props'], default=st.session_state.get('mobile_view', 'Top plays'), key='mobile_view_buttons', width='stretch') or 'Top plays') if page != 'Saved' else 'All props'
     market_filter='All';sharp_sort='Model score'
     if page=='Plays':
@@ -11108,17 +11093,12 @@ def ui_board(page):
         auto=workflow_store.get('automation',slate_day()) or {}
         if auto.get('feed_partial') or auto.get('fantasy_partial'):st.caption('Partial feed · Missing provider pages are excluded.')
         st.caption('Market filters use saved no-vig quotes and confirmed offered sides. Sharp +EV is a 54% threshold screen; entry payout EV is not calculated. Save follows the original model side and existing checks.')
-    if page == 'Saved':
-        records = [v['card'] for v in saved.values()]
-        st.caption('Saved lines stay fixed. Comparisons use the latest imported board; opening this page does not refresh prices.')
-    else:
-        records = [card for card in rows if str(card.get('Platform','')).lower()!='draftkings']
-        # Keep every not-yet-started game visible, including late tipoffs.
-        # This is a display filter only; eligibility and MORE/LESS stay unchanged.
-        if game_window == 'Later games':
-            cutoff = pd.Timestamp.now(tz='UTC') + pd.Timedelta(minutes=60)
-            records = [c for c in records if pd.notna(utc_timestamp(c.get('Start (UTC)')))
-                       and utc_timestamp(c.get('Start (UTC)')) > cutoff]
+    records = [card for card in rows if str(card.get('Platform','')).lower()!='draftkings']
+    # Keep every not-yet-started game visible, including late tipoffs.
+    if game_window == 'Later games':
+        cutoff = pd.Timestamp.now(tz='UTC') + pd.Timedelta(minutes=60)
+        records = [c for c in records if pd.notna(utc_timestamp(c.get('Start (UTC)')))
+                   and utc_timestamp(c.get('Start (UTC)')) > cutoff]
     unique = {}
     for card in records:
         if not card.get('Decoded') or not market_columns(card):
@@ -11553,7 +11533,10 @@ def render_app_pages():
         st.session_state['sports_lab_page_buttons']='Plays'
         st.session_state['sports_lab_page']='Plays'
         st.session_state['mobile_stat_pills']='Fantasy Score'
-    app_page = (st.segmented_control("Navigation", ["Plays", "Combos", "Saved", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
+    if st.session_state.get('sports_lab_page_buttons')=='Saved' or st.session_state.get('sports_lab_page')=='Saved':
+        st.session_state['sports_lab_page_buttons']='Plays'
+        st.session_state['sports_lab_page']='Plays'
+    app_page = (st.segmented_control("Navigation", ["Plays", "Combos", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
     if app_page!="Settings":render_live_board_status(workflow.store,st,detailed=False)
     st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
@@ -11741,9 +11724,9 @@ def render_app_pages():
         elif app_page == 'Combos':
             if 'unfinished' in board_note: st.caption(board_note)
             render_combos(workflow, st)
-        elif app_page in ("Plays", "Saved"):
+        elif app_page == "Plays":
             if "unfinished" in board_note: st.caption(board_note)
-            ui_board(app_page)
+            ui_board("Plays")
 
         if app_page == "Settings":
             with diagnostic_settings:
