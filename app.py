@@ -4637,13 +4637,16 @@ def render_results_dashboard(wf, st):
         daily = results_daily_summary(visible)
         if wins + losses:
             st.vega_lite_chart({'data': {'values': daily}, 'height': 210,
-                'mark': {'type':'line', 'point':{'filled':True, 'size':75}, 'color':'#6ce1b1'},
+                'background':'transparent', 'config':{'view':{'stroke':None},'axis':{'gridColor':'#1a2d3d','domainColor':'#1e3547','labelColor':'#9db1c0'}},
+                'layer':[{'mark':{'type':'area','line':{'color':'#23e689','strokeWidth':2.5},'color':{'x1':1,'y1':1,'x2':1,'y2':0,'gradient':'linear','stops':[{'offset':0,'color':'#23e68905'},{'offset':1,'color':'#23e68944'}]},'point':{'filled':True,'fill':'#23e689','size':65}},
                 'encoding': {'x': {'field':'Date', 'type':'ordinal', 'sort':'ascending', 'title':None,
                                   'axis':{'labelAngle':0, 'labelOverlap':True}},
                     'y': {'field':'Hit rate', 'type':'quantitative', 'scale':{'domain':[0,1]},
                           'axis':{'format':'.0%'}, 'title':'Daily hit rate'},
                     'tooltip':[{'field':'Date'}, {'field':'Hit rate', 'format':'.1%'},
-                               {'field':'Settled picks'}, {'field':'Wins'}, {'field':'Losses'}]}}, use_container_width=True)
+                               {'field':'Settled picks'}, {'field':'Wins'}, {'field':'Losses'}]}},
+                    {'data':{'values':[{'Breakeven':.542}]},'mark':{'type':'rule','color':'#8ca7b5','strokeDash':[5,5],'strokeWidth':1},
+                     'encoding':{'y':{'field':'Breakeven','type':'quantitative'}}}]}, use_container_width=True)
         else:
             st.info('No wins or losses match these filters yet. The graph appears after picks settle.')
         st.caption('Hit rate = wins ÷ (wins + losses). Hover for daily sample sizes. Ties, DNP and excluded picks do not count. This is not ROI.')
@@ -4709,7 +4712,7 @@ def render_results_dashboard(wf, st):
             st.info('No results match these filters.')
         st.download_button('Download full audit CSV', frame.to_csv(index=False), 'nba_audit.csv', 'text/csv')
         with st.expander('Player breakdown · line vs projection vs actual'):
-            if st.checkbox('Open player comparison', key='show_results_player_graph') and len(visible):
+            if len(visible):
                 names = sorted(visible['Player'].dropna().unique().tolist())
                 player = st.selectbox('Player', names, format_func=ui_name, key='results_graph_player')
                 selected = visible[visible['Player'] == player].copy()
@@ -4718,12 +4721,12 @@ def render_results_dashboard(wf, st):
                 stat = st.selectbox('Prop', sorted(selected['Prop family'].unique().tolist()), key='results_graph_stat')
                 bars = results_comparison_rows(selected[selected['Prop family'] == stat])
                 if bars:
-                    st.vega_lite_chart({'data':{'values':bars}, 'height':240, 'mark':{'type':'bar', 'cornerRadiusEnd':2},
+                    st.vega_lite_chart({'data':{'values':bars}, 'height':240,'background':'transparent','config':{'view':{'stroke':None},'axis':{'gridColor':'#1a2d3d','labelColor':'#cbd9e2'},'legend':{'labelColor':'#cbd9e2'}}, 'mark':{'type':'bar', 'cornerRadiusEnd':6},
                         'encoding':{'y':{'field':'Pick','type':'nominal','sort':None,'title':None,'axis':{'labelLimit':230}},
                             'yOffset':{'field':'Series','sort':['Line','Projection','Actual']},
                             'x':{'field':'Value','type':'quantitative','title':stat},
                             'color':{'field':'Series','type':'nominal','scale':{'domain':['Line','Projection','Actual'],
-                                'range':['#a9b5c4','#38c5ed','#f5bd59']},'legend':{'orient':'top','title':None}},
+                                'range':['#64748b','#38bdf8','#23e689']},'legend':{'orient':'top','title':None}},
                             'tooltip':[{'field':'Pick'},{'field':'Series'},{'field':'Value','format':'.2f'},
                                        {'field':'Direction'},{'field':'Outcome'}]}}, use_container_width=True)
                     st.caption('Latest six matching picks. Each row keeps its original platform and line. Missing actuals are omitted.')
@@ -4772,47 +4775,13 @@ def render_results_dashboard(wf, st):
                     st.rerun()
                 st.caption('Rechecks unresolved picks from saved forecasts. No paid odds scan. Technical error details are in Settings → Diagnostics.')
                 if active: st.info('Checking unresolved picks…')
-                if st.checkbox('Load audit details and learning', key='load_results_learning'):
-                    combined = wf.research_rows(across_platforms=True)
-                    decided = [row for row in combined if row['Outcome'] in ('WIN','LOSS')]
-                    hits = sum(row['Outcome'] == 'WIN' for row in decided)
-                    st.caption(f'Combined model record: {hits}W–{len(decided)-hits}L. Identical cross-platform markets counted once.')
-                    st.caption(f"{len(wf.store.items('model'))} learned stat models active. Updates require a chronological holdout.")
-                    reliability = wf.store.get('pick_reliability_evaluation', 'latest') or {}
-                    if reliability:
-                        st.caption('Green/red learning: '+str(reliability.get('graded_dates',0))+' graded dates · '
-                            +str(round(reliability.get('effective_examples',0)))+' player-game/market equivalents. Combo ranking can use the capped experimental adjustment; frozen MORE/LESS projections are unchanged.')
-                        st.caption('Patterns describe historical associations, not causes or guaranteed hit rates. Alternate lines share weight.')
-                        with st.expander('What the model saw in greens and reds'):
-                            patterns = reliability.get('patterns') or []
-                            from audit_display import format_table
-                            if patterns:st.dataframe(format_table(patterns),hide_index=True,width='stretch')
-                            folds = reliability.get('folds') or []
-                            if folds:
-                                st.caption('Earlier dates train; later dates test. Top-six comparison is a ranking diagnostic, not a full combo or payout backtest.')
-                                st.dataframe(format_table(folds),hide_index=True,width='stretch')
-                    latest_daily={}
-                    for _,evaluation in wf.store.items('model_daily_evaluation'):
-                        stat=evaluation.get('stat','Unknown')
-                        if str(evaluation.get('evaluated_at',''))>str(latest_daily.get(stat,{}).get('evaluated_at','')):
-                            latest_daily[stat]=evaluation
-                    if latest_daily:
-                        st.caption('Daily training runs on settled data. Candidate evaluation and production activation are tracked separately.')
-                        from audit_display import format_table
-                        st.dataframe(format_table([{'Market':stat,'Latest graded date':v.get('holdout_date'),
-                            'Daily evaluation':v.get('status'),'Candidate accuracy':(v.get('candidate_holdout') or {}).get('accuracy'),
-                            'Current model accuracy':(v.get('incumbent_holdout') or {}).get('accuracy'),
-                            'Production model':v.get('activation')} for stat,v in sorted(latest_daily.items())]),hide_index=True,width='stretch')
-
-
 
 
 
 def render_workflow(wf, st, rows, mode="settings"):
     if mode == 'results':
         render_results_dashboard(wf, st)
-        if not st.checkbox('Show detailed accuracy, ROI and unresolved records', key='load_detailed_results'):
-            return
+        return
     st.subheader("NBA workflow")
 
     st.caption(
@@ -11226,7 +11195,8 @@ st.markdown("""<style>
 .sl-drivers .sl-context-tile:first-child{grid-column:1/-1;}
 .sl-hit-strip{display:flex;justify-content:space-around;padding:9px;background:#0d1822;border:1px solid #1d3242;border-radius:10px;font-size:.78rem;}
 .sl-results-kpis{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:8px 0 14px;}
-.sl-results-kpi{background:#0d1822;border:1px solid #1d3242;border-radius:12px;padding:11px 13px;}
+.sl-results-kpi{background:linear-gradient(145deg,#10202e,#0b1620);border:1px solid #1e3547;border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.22);padding:11px 13px;}
+.stApp [data-testid="stExpander"]{background:linear-gradient(145deg,#10202e,#0b1620);border:1px solid #1e3547;border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.22);}
 .sl-results-kpi span{display:block;font-size:.74rem;color:#9db1c0;}
 .sl-results-kpi strong{display:block;font-size:1.5rem;line-height:1.3;color:#f3f8ff;}
 :root { color-scheme:dark; }
@@ -11295,7 +11265,7 @@ st.markdown("""<style>
 .combo-choice.less,.fc-less {color:#e04f5f!important;}
 
 .sl-status {display:block;color:#9db1c0;font-size:.75rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:0 0 8px;padding:5px 9px;background:#0d1822;border:1px solid #1d3242;border-radius:20px;}
-.sl-card {border:1px solid #1d3242;background:#0d1822;}
+.sl-card {background:linear-gradient(145deg,#10202e,#0b1620);border:1px solid #1e3547;border-radius:14px;box-shadow:0 6px 18px rgba(0,0,0,.22);}
 .sl-compact .sl-person {align-items:center;}
 .sl-compact .sl-photo {width:52px;height:60px;}
 .sl-compact .sl-side {min-width:0;max-width:105px;flex-shrink:0;}
@@ -11548,157 +11518,21 @@ def render_app_pages():
         loading.caption("Opening " + app_page + "…")
         render_saved_workspace(controls=False)
         if app_page=="Settings":
-            board_settings=st.expander("Today's Board & Manual Lines",expanded=False)
-            feed_settings=st.expander("API Quotas & Data Feeds",expanded=False)
-            diagnostic_settings=st.expander("Backups, v2 Backtest & Diagnostics",expanded=False)
+            board_settings=st.expander("Board & Quotas",expanded=False)
+            diagnostic_settings=st.expander("Backups & Diagnostics",expanded=False)
             with board_settings:
                 render_live_board_status(workflow.store,st,detailed=True)
                 preparation_panel(workflow,st,[row for row in st.session_state.get('v4_rows',[]) if today_pregame(row.get('Start (UTC)'))])
-            with diagnostic_settings:
-                render_saved_workspace(controls=True)
-        if app_page == "Settings":
-            with feed_settings:
-                st.caption("Existing forecasts, grading, learning and paper ROI are preserved. These controls do not refresh unless you click them.")
-                st.write("Odds key configured" if setting("ODDS_API_KEY", "") else "ODDS_API_KEY missing")
                 from the_odds_api import render_probe as render_the_odds_api_probe
                 render_the_odds_api_probe(st, workflow_store, setting("THE_ODDS_API_KEY", ""))
-                st.caption("Provider order: OddsPAPI first; The Odds API when the monthly or daily OddsPAPI guard blocks imports. The fallback has a separate paced free-credit guard. Scheduled use requires THE_ODDS_API_KEY in GitHub Actions Secrets too.")
-                fallback_status=workflow_store.get("source","the_odds_api_fallback_latest")
-                if fallback_status:
-                    st.write("Latest fallback: "+str(fallback_status.get("state"))+" · "+str(fallback_status.get("lines",0))+" lines · "+str(fallback_status.get("games_available",0))+" upcoming games")
-                    st.caption(fallback_status.get("note",""))
-
-        # ---------------- NBA SCANNER ----------------
-
-
-        # Grading runs in the scheduled worker or the explicit Results refresh control.
-        # Board browsing never waits for a whole maintenance pass.
-
-        if app_page=="Results":
-            render_workflow(workflow,st,[],mode="results")
-        elif app_page=="Settings":
+                st.caption("PrizePicksAPI credit status")
+                pp_budget=workflow_store.get('request_budget',slate_day()+':prizepicks') or 0
+                st.caption("PrizePicks requests today: "+str(pp_budget))
             with diagnostic_settings:
+                render_saved_workspace(controls=True)
                 render_workflow(workflow,st,[row for row in st.session_state.get('v4_rows',[]) if today_pregame(row.get('Start (UTC)'))],mode="settings")
-
-        # PrizePicks tier feed: explicit refresh only.
-
-
-
-
-        # Import native Kalshi contracts for the games already on the saved board.
-
-
-
-
-        if app_page == "Settings":
-            with feed_settings:
-                render_native_kalshi_refresh()
-                if st.session_state.get("native_kalshi_notice"):
-                    st.info(st.session_state["native_kalshi_notice"])
-
-                render_pp_tier_refresh()
-                if st.session_state.get("pp_tier_notice"):
-                    st.info(st.session_state["pp_tier_notice"])
-
-            with feed_settings:
-                odds_usage_panel(workflow_store,st)
-            with board_settings:
-                scan_scope = st.radio('Today’s games to scan (Pacific time)',
-                    ['All today’s games', 'Limit game count'], horizontal=True, key='nba_scan_scope')
-                max_games = None
-                if scan_scope == 'Limit game count':
-                    max_games = int(st.number_input('Maximum games this scan', min_value=1,
-                        value=3, step=1, key='nba_scan_limit'))
-                if st.button('Load scan estimate and schedule preview', key='load_scan_preview_once'):
-                    try:
-                        preview = scan_schedule_preview(slate_day(), saved_fetch)
-                        estimated_games = len(preview) if max_games is None else min(len(preview), max_games)
-                        st.info(f'Estimated scan: {estimated_games} upcoming games today · '
-                            f'up to {estimated_games + 2} OddsPAPI HTTP requests if all data is uncached '
-                            '(fixtures + market catalog + one odds request per game).')
-                        st.caption('Estimate uses the public ESPN schedule, with no OddsPAPI call. '
-                            'Provider coverage may differ. HTTP requests are not a guaranteed credit count; '
-                            'your provider determines credit charges. Started games are excluded.')
-                        with st.expander('Preview today’s upcoming games'):
-                            if preview:
-                                st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
-                            else:
-                                st.info('No upcoming games found for today in Pacific time.')
-                    except Exception:
-                        st.warning('Public schedule preview unavailable. Request estimate unavailable. '
-                            'A scan still uses only today’s upcoming provider games: one fixtures request, '
-                            'one catalog request, and one odds request per game when uncached.')
-                render_manual_import(workflow,st)
-                st.caption('This manual scan shares the worker cache and daily request guard. Grading, combo building and browsing do not request OddsPAPI data.')
-
-                if st.button(
-                    "🔍 SCAN AND DECODE NBA LINES",
-                    use_container_width=True,
-                ):
-                    try:
-                        with st.spinner("Loading NBA fixtures and market lines..."):
-                            games = upcoming_nba()
-                            if max_games is not None:
-                                games = games[:max_games]
-                            all_rows, summaries, errors = [], [], []
-                            successful_fixtures = set()
-
-                            if not games:
-                                st.warning(
-                                    "No upcoming NBA games returned "
-                                    "for today in Pacific time. Tomorrow's games are not included."
-                                )
-
-                            else:
-                                catalog = market_catalog()
-
-                                for game in games:
-                                    try:
-                                        decoded_rows, summary = decode_game(
-                                            game,
-                                            game_odds(str(game["fixtureId"])),
-                                            catalog,
-                                        )
-
-                                        if not decoded_rows:
-                                            raise ValueError('No decoded lines returned; saved lines retained.')
-                                        all_rows.extend(decoded_rows)
-                                        summaries.extend(summary)
-                                        successful_fixtures.add(str(game['fixtureId']))
-
-                                    except ValueError as error:
-                                        errors.append(
-                                            f"{game.get('participant1Name', '?')} vs "
-                                            f"{game.get('participant2Name', '?')}: "
-                                            f"{error}"
-                                        )
-
-                            st.session_state["v4_rows"] = merge_scan_rows(
-                                st.session_state.get('v4_rows', []), all_rows, successful_fixtures)
-                            st.session_state.pop('calculated_board', None)
-                            st.session_state.pop('selected_prop_card', None)
-                            st.session_state["v4_summary"] = summaries
-                            st.session_state["v4_errors"] = errors
-                            st.session_state["v4_scan_at"] = (
-                                datetime.now(timezone.utc).isoformat()
-                            )
-
-                            workspace_store(
-                                "board",
-                                {
-                                    key: st.session_state[key]
-                                    for key in BOARD_FIELDS
-                                },
-                            )
-
-                            st.success(f'Scanned {len(successful_fixtures)} of {len(games)} upcoming games. '
-                                'Saved Fantasy lines and frozen forecasts preserved. '
-                                'Rebuild from the saved PrizePicks feed to match Fantasy lines to newly scanned games, '
-                                'then calculate and freeze the board. Neither step runs an OddsPAPI scan.')
-
-                    except ValueError as error:
-                        st.error(str(error))
-
+        elif app_page=="Results":
+            render_workflow(workflow,st,[],mode="results")
 
         # ---------------- RESULTS AND PLAYER LINES ----------------
         board_allowed,board_note=combo_board_ready(workflow.store) if app_page in ('Plays','Fantasy','Combos') else (True,'')
@@ -11717,21 +11551,6 @@ def render_app_pages():
         elif app_page == "Plays":
             if "unfinished" in board_note: st.caption(board_note)
             ui_board("Plays")
-
-        if app_page == "Settings":
-            with diagnostic_settings:
-                if HISTORY_DB.exists():
-                    if st.button("Prepare historical cache backup", key="prepare_history_cache_backup"):
-                        # Read only when requested, not on every visit to Settings.
-                        st.session_state["_prepared_history_cache_backup"] = HISTORY_DB.read_bytes()
-                    cache_backup = st.session_state.get("_prepared_history_cache_backup")
-                    if cache_backup is not None:
-                        st.download_button(
-                            "Back up historical response cache",
-                            data=cache_backup,
-                            file_name="sports_lab_history.sqlite3",
-                            mime="application/vnd.sqlite3",
-                        )
 
         loading.empty()
 
