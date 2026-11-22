@@ -112,9 +112,7 @@ class NavigationTests(unittest.TestCase):
         self.assertFalse(app.exception,list(app.exception))
         self.assertTrue(any('Showing saved pregame projections' in item.value for item in app.warning))
         self.assertTrue(any('Player 0' in item.value and '↑ MORE' in item.value and 'VERIFY LINE' not in item.value for item in app.markdown))
-        save_buttons=[button for button in app.button if button.label=='☆ Save']
-        self.assertEqual(len(save_buttons),3)
-        self.assertTrue(all(button.disabled for button in save_buttons))
+        self.assertFalse(any(button.label in ('☆ Save','★ Saved') for button in app.button))
         self.assertFalse(any('No matching upcoming picks' in item.value for item in app.info))
         # Changing view must also keep these saved research cards visible.
         app.session_state['mobile_view_buttons']='All props'
