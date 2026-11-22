@@ -4637,13 +4637,16 @@ def render_results_dashboard(wf, st):
         daily = results_daily_summary(visible)
         if wins + losses:
             st.vega_lite_chart({'data': {'values': daily}, 'height': 210,
-                'mark': {'type':'line', 'point':{'filled':True, 'size':75}, 'color':'#6ce1b1'},
+                'background':'transparent', 'config':{'view':{'stroke':None},'axis':{'gridColor':'#1a2d3d','domainColor':'#1e3547','labelColor':'#9db1c0'}},
+                'layer':[{'mark':{'type':'area','line':{'color':'#23e689','strokeWidth':2.5},'color':{'x1':1,'y1':1,'x2':1,'y2':0,'gradient':'linear','stops':[{'offset':0,'color':'#23e68905'},{'offset':1,'color':'#23e68944'}]},'point':{'filled':True,'fill':'#23e689','size':65}},
                 'encoding': {'x': {'field':'Date', 'type':'ordinal', 'sort':'ascending', 'title':None,
                                   'axis':{'labelAngle':0, 'labelOverlap':True}},
                     'y': {'field':'Hit rate', 'type':'quantitative', 'scale':{'domain':[0,1]},
                           'axis':{'format':'.0%'}, 'title':'Daily hit rate'},
                     'tooltip':[{'field':'Date'}, {'field':'Hit rate', 'format':'.1%'},
-                               {'field':'Settled picks'}, {'field':'Wins'}, {'field':'Losses'}]}}, use_container_width=True)
+                               {'field':'Settled picks'}, {'field':'Wins'}, {'field':'Losses'}]}},
+                    {'data':{'values':[{'Breakeven':.542}]},'mark':{'type':'rule','color':'#8ca7b5','strokeDash':[5,5],'strokeWidth':1},
+                     'encoding':{'y':{'field':'Breakeven','type':'quantitative'}}}]}, use_container_width=True)
         else:
             st.info('No wins or losses match these filters yet. The graph appears after picks settle.')
         st.caption('Hit rate = wins ÷ (wins + losses). Hover for daily sample sizes. Ties, DNP and excluded picks do not count. This is not ROI.')
@@ -4718,12 +4721,12 @@ def render_results_dashboard(wf, st):
                 stat = st.selectbox('Prop', sorted(selected['Prop family'].unique().tolist()), key='results_graph_stat')
                 bars = results_comparison_rows(selected[selected['Prop family'] == stat])
                 if bars:
-                    st.vega_lite_chart({'data':{'values':bars}, 'height':240, 'mark':{'type':'bar', 'cornerRadiusEnd':2},
+                    st.vega_lite_chart({'data':{'values':bars}, 'height':240,'background':'transparent','config':{'view':{'stroke':None},'axis':{'gridColor':'#1a2d3d','labelColor':'#cbd9e2'},'legend':{'labelColor':'#cbd9e2'}}, 'mark':{'type':'bar', 'cornerRadiusEnd':6},
                         'encoding':{'y':{'field':'Pick','type':'nominal','sort':None,'title':None,'axis':{'labelLimit':230}},
                             'yOffset':{'field':'Series','sort':['Line','Projection','Actual']},
                             'x':{'field':'Value','type':'quantitative','title':stat},
                             'color':{'field':'Series','type':'nominal','scale':{'domain':['Line','Projection','Actual'],
-                                'range':['#a9b5c4','#38c5ed','#f5bd59']},'legend':{'orient':'top','title':None}},
+                                'range':['#64748b','#38bdf8','#23e689']},'legend':{'orient':'top','title':None}},
                             'tooltip':[{'field':'Pick'},{'field':'Series'},{'field':'Value','format':'.2f'},
                                        {'field':'Direction'},{'field':'Outcome'}]}}, use_container_width=True)
                     st.caption('Latest six matching picks. Each row keeps its original platform and line. Missing actuals are omitted.')
