@@ -7,7 +7,7 @@ import test_combo_regression as fixtures
 TREE=ast.parse(Path('app.py').read_text())
 class DailyBoardUiTests(unittest.TestCase):
  def render(self,sides):
-  st=MagicMock();st.session_state={};left,right=MagicMock(),MagicMock();left.button.return_value=False;right.button.return_value=False;st.columns.return_value=(left,right)
+  st=MagicMock();st.session_state={};st.button.return_value=False
   store=MagicMock();store.get.return_value={};store.items.return_value=[]
   card={'Platform':'prizepicks','Line Type':'Standard','Available Sides':sides,'Player':'Player','Game':'A vs B','Line':4,'Start (UTC)':'2026-11-20T01:10:00Z','Odds checked (UTC)':'2026-11-19T23:04:00Z'}
   result={'direction':'MORE','projection':4.4,'estimated_hit_probability':.57}
@@ -21,11 +21,11 @@ class DailyBoardUiTests(unittest.TestCase):
    node=next(n for n in TREE.body if isinstance(n,ast.FunctionDef) and n.name==name)
    exec(compile(ast.Module(body=[node],type_ignores=[]),'app.py','exec'),env)
   env['ui_card'](card,{'result':result})
-  return st.markdown.call_args.args[0],right.button.call_args.kwargs
- def test_same_day_afternoon_capture_shows_probability_and_enables_save(self):
+  return st.markdown.call_args.args[0],st.button.call_args
+ def test_same_day_afternoon_capture_shows_probability_and_research_button(self):
   html,button=self.render(['MORE','LESS'])
-  self.assertIn('57%</b>',html);self.assertIn('03:04 PM PT',html);self.assertFalse(button['disabled'])
- def test_unoffered_side_remains_disabled(self):
+  self.assertIn('57%</b>',html);self.assertIn('03:04 PM PT',html);self.assertEqual(button.args[0],'View research ›');self.assertTrue(button.kwargs['use_container_width'])
+ def test_unoffered_side_hides_probability_without_save(self):
   html,button=self.render(['LESS'])
-  self.assertNotIn('57%</b>',html);self.assertTrue(button['disabled'])
+  self.assertNotIn('57%</b>',html);self.assertEqual(button.args[0],'View research ›')
 if __name__=='__main__':unittest.main()
