@@ -79,7 +79,7 @@ def detect(card, result, rows, compare, offered, columns, fantasy=False):
              and len({b['book'] for b in books})>=2]
     if not options:return None
     line,books=min(options,key=lambda v:(-len(v[1]),abs(v[0]-pp),v[0]))
-    floors={'PTS':12.,'REB':6.,'AST':5.,'FG3M':3.,'STL':3.,'BLK':3.,'TOV':3.}
+    floors={'PTS':8.5,'REB':4.0,'AST':3.5,'FG3M':3.,'STL':3.,'BLK':3.,'TOV':3.}
     floor=22. if fantasy else math.sqrt(sum(floors.get(c,12.)**2 for c in columns)) if columns else 12.
     values=[float(v) for v in result.get('recent_values') or [] if isinstance(v,(int,float)) and math.isfinite(v)]
     spread=max(floor,pstdev(values) if len(values)>=5 else 0)
