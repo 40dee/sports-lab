@@ -4775,39 +4775,6 @@ def render_results_dashboard(wf, st):
                     st.rerun()
                 st.caption('Rechecks unresolved picks from saved forecasts. No paid odds scan. Technical error details are in Settings → Diagnostics.')
                 if active: st.info('Checking unresolved picks…')
-                if False:  # Legacy shadow-learning display retired; keep backend intact.
-                    combined = wf.research_rows(across_platforms=True)
-                    decided = [row for row in combined if row['Outcome'] in ('WIN','LOSS')]
-                    hits = sum(row['Outcome'] == 'WIN' for row in decided)
-                    st.caption(f'Combined model record: {hits}W–{len(decided)-hits}L. Identical cross-platform markets counted once.')
-                    st.caption(f"{len(wf.store.items('model'))} learned stat models active. Updates require a chronological holdout.")
-                    reliability = wf.store.get('pick_reliability_evaluation', 'latest') or {}
-                    if reliability:
-                        st.caption('Green/red learning: '+str(reliability.get('graded_dates',0))+' graded dates · '
-                            +str(round(reliability.get('effective_examples',0)))+' player-game/market equivalents. Combo ranking can use the capped experimental adjustment; frozen MORE/LESS projections are unchanged.')
-                        st.caption('Patterns describe historical associations, not causes or guaranteed hit rates. Alternate lines share weight.')
-                        with st.expander('What the model saw in greens and reds'):
-                            patterns = reliability.get('patterns') or []
-                            from audit_display import format_table
-                            if patterns:st.dataframe(format_table(patterns),hide_index=True,width='stretch')
-                            folds = reliability.get('folds') or []
-                            if folds:
-                                st.caption('Earlier dates train; later dates test. Top-six comparison is a ranking diagnostic, not a full combo or payout backtest.')
-                                st.dataframe(format_table(folds),hide_index=True,width='stretch')
-                    latest_daily={}
-                    for _,evaluation in wf.store.items('model_daily_evaluation'):
-                        stat=evaluation.get('stat','Unknown')
-                        if str(evaluation.get('evaluated_at',''))>str(latest_daily.get(stat,{}).get('evaluated_at','')):
-                            latest_daily[stat]=evaluation
-                    if latest_daily:
-                        st.caption('Daily training runs on settled data. Candidate evaluation and production activation are tracked separately.')
-                        from audit_display import format_table
-                        st.dataframe(format_table([{'Market':stat,'Latest graded date':v.get('holdout_date'),
-                            'Daily evaluation':v.get('status'),'Candidate accuracy':(v.get('candidate_holdout') or {}).get('accuracy'),
-                            'Current model accuracy':(v.get('incumbent_holdout') or {}).get('accuracy'),
-                            'Production model':v.get('activation')} for stat,v in sorted(latest_daily.items())]),hide_index=True,width='stretch')
-
-
 
 
 
