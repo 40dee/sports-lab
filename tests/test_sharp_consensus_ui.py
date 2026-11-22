@@ -12,6 +12,22 @@ class SharpConsensusTests(unittest.TestCase):
   self.card={'id':'a','Platform':'prizepicks','Line Type':'Standard'}
  def info(self,more=.554,direction='LESS',card=None):
   return self.env['consensus_edge_info'](card or self.card,{'direction':direction,'market':{'more':more,'less':1-more,'book_count':3}})
+ def test_pinnacle_one_tap_threshold_and_retail_exclusion(self):
+  match=self.env['consensus_matches_filter']
+  mode='🎯 Pinnacle (53.5%+)'
+  self.assertTrue(match({'has_pinnacle':True,'best_probability':.535},mode))
+  self.assertFalse(match({'has_pinnacle':True,'best_probability':.49},mode))
+  self.assertFalse(match({'has_pinnacle':False,'best_probability':.55},mode))
+  self.assertTrue(match({'has_pinnacle':True,'line_edge':{'probability':.54}},mode))
+  self.assertFalse(match({'has_pinnacle':False,'line_edge':{'probability':.55}},mode))
+ def test_pinnacle_presence_from_market_books(self):
+  from types import SimpleNamespace
+  from unittest.mock import patch
+  market=SimpleNamespace(sharp_weighted_market=lambda value:value)
+  result={'direction':'MORE','market':{'more':.55,'less':.45,'books':[{'book':'pinnacle'}]}}
+  with patch.dict(__import__('sys').modules,{'market_compare':market}):
+   info=self.env['consensus_edge_info'](self.card,result)
+  self.assertTrue(info['has_pinnacle'])
  def test_opposite_offered_side_separate_from_model_and_immutable(self):
   result={'direction':'LESS','projection':9,'market':{'more':.554,'less':.446,'book_count':3}}
   original=copy.deepcopy(result);card=copy.deepcopy(self.card)
