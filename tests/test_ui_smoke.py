@@ -187,8 +187,10 @@ class NavigationTests(unittest.TestCase):
         app.session_state['sports_lab_page_buttons']='Settings'
         app.run()
         self.assertFalse(app.exception,list(app.exception))
-        self.assertTrue(any(b.label=='Import and calculate these lines' for b in app.button))
-        self.assertTrue(any(b.label=='Check account usage — no quota cost' for b in app.button))
+        self.assertFalse(any(b.label=='Import and calculate these lines' for b in app.button))
+        self.assertFalse(any(b.label=='🔍 SCAN AND DECODE NBA LINES' for b in app.button))
+        self.assertTrue(any(e.label=='Board & Quotas' for e in app.expander))
+        self.assertTrue(any(e.label=='Backups & Diagnostics' for e in app.expander))
 
 
 
