@@ -21,10 +21,21 @@ class LineEdgeTests(unittest.TestCase):
   original=copy.deepcopy(rows);edge=self.run_edge(rows)
   self.assertEqual(edge['book_count'],2);self.assertEqual(edge['side'],'MORE')
   normal=NormalDist()
-  self.assertAlmostEqual(edge['probability'],normal.cdf(normal.inv_cdf(.55)+1/12))
+  self.assertAlmostEqual(edge['probability'],normal.cdf(normal.inv_cdf(.55)+1/8.5))
   with patch.dict('line_edges.BOOK_WEIGHTS',{'pinnacle':1.,'bovada':1.}):
    self.assertIsNone(self.run_edge(rows))
   self.assertEqual(rows,original)
+ def test_even_money_vig_one_point_pts_move_clears_54_percent(self):
+  from statistics import NormalDist
+  rows=[dict(row,Odds=-110) for row in self.rows(24.5)]
+  edge=self.run_edge(rows)
+  self.assertIsNotNone(edge)
+  self.assertEqual(edge['side'],'MORE')
+  self.assertEqual(edge['pp_line'],23.5)
+  self.assertEqual(edge['book_line'],24.5)
+  self.assertEqual(edge['spread'],8.5)
+  self.assertGreaterEqual(edge['probability'],.54)
+  self.assertAlmostEqual(edge['probability'],NormalDist().cdf(1/8.5))
  def test_pp_and_book_captures_must_be_within_thirty_minutes(self):
   for captured,expected in (('2026-11-18T17:35Z',True),('2026-11-18T17:34:59Z',False),('2026-11-18T18:35Z',True),('2026-11-18T18:35:01Z',False),(None,False)):
    with self.subTest(captured=captured):
