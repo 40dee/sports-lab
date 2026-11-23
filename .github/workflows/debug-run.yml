@@ -10,5 +10,30 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Test Import
-        run: python -c "import app; print('IMPORT OK')"
+      - name: Run Board Preparation
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          python - <<'PY'
+          import os
+          from app import Store, pick_offered_sides, preparation_rows
+
+          print('--- STARTING BOARD PREP DEBUG ---', flush=True)
+          if not os.environ.get('DATABASE_URL'):
+              raise RuntimeError('DATABASE_URL secret is missing; cannot inspect saved board')
+          store = Store(url=os.environ['DATABASE_URL'])
+          board = store.get('board', 'board') or {}
+          rows = board.get('v4_rows') or []
+          print('SAVED_BOARD_ROWS', len(rows), flush=True)
+          prepared = preparation_rows(rows)
+          print('PREPARATION_ELIGIBLE_ROWS', len(prepared), flush=True)
+          fantasy = [card for card in rows
+                     if 'fantasy' in str(card.get('Stat', '')).lower()
+                     or 'fantasy' in str(card.get('Stat Key', '')).lower()]
+          print('FANTASY_ROWS', len(fantasy), flush=True)
+          for card in fantasy:
+              sides = pick_offered_sides(card)
+              print('FANTASY_SIDE_RESULT', card.get('Platform'),
+                    card.get('Line Type'), sides, flush=True)
+          print('--- FINISHED BOARD PREP DEBUG ---', flush=True)
+          PY
