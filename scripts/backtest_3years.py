@@ -46,7 +46,9 @@ def normalize_box_scores(raw: pd.DataFrame, season: str) -> pd.DataFrame:
         "PLAYER_ID": ("player_id", "person_id", "athlete_id", "playerid", "athleteid"),
         "GAME_ID": ("game_id", "gameid", "event_id", "eventid"),
         "GAME_DATE": ("game_date", "game_date_est", "gamedate", "date", "game_datetime"),
-        "PLAYER_NAME": ("player_name", "name_i", "display_name"),
+        "PLAYER_NAME": ("player_name", "name_i", "player_slug", "display_name"),
+        "TEAM_ABBREVIATION": ("team_tricode", "team_abbreviation"),
+        "SEASON": ("season",),
         "MIN": ("min", "minutes", "minutes_played", "mins", "min_played"),
         "PTS": ("pts", "points", "points_scored"),
         "REB": ("reb", "rebounds_total", "rebounds", "total_rebounds"),
@@ -62,6 +64,19 @@ def normalize_box_scores(raw: pd.DataFrame, season: str) -> pd.DataFrame:
         if source is not None:
             rename[source] = canonical
     df = df.rename(columns=rename)
+    # The source can encode a season as its ending year (2023) or
+    # as an NBA label (2022-23). Validate against the requested file.
+    if "SEASON" in df.columns:
+        raw_seasons = df["SEASON"].dropna().astype(str).str.strip()
+        ending_year = int(season[:4]) + 1
+        allowed = {season, str(ending_year), str(int(season[:4]))}
+        unexpected = sorted(set(raw_seasons.unique()) - allowed)
+        if unexpected:
+            raise ValueError(
+                f"{season}: unexpected season labels {unexpected[:10]}; "
+                "refusing to silently mix seasons"
+            )
+    df["SEASON"] = str(season)
     required = ("PLAYER_ID", "GAME_ID", "MIN", *STATS)
     missing = [col for col in required if col not in df.columns]
     if missing:
