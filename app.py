@@ -2252,9 +2252,38 @@ class Workflow:
 
         result["ranking_games"] = len(values)
 
+        # Directional normal approximation for weighted Fantasy and combo props.
+        # Historical score_frame values are combined *per game*, retaining
+        # covariance between components instead of summing independent SDs.
+        is_combined_stat = stat_key == "PrizePicks Fantasy" or "+" in stat_key
+        if is_combined_stat:
+            combined_scores = pd.to_numeric(values, errors="coerce").dropna()
+            combined_scores = combined_scores[
+                np.isfinite(combined_scores.to_numpy(dtype=float))
+            ]
+            if len(combined_scores) >= 3:
+                combined_variance = float(combined_scores.var(ddof=1))
+                if math.isfinite(combined_variance) and combined_variance > 1e-9:
+                    combined_sd = math.sqrt(combined_variance)
+                    z = (line - forecast) / combined_sd
+                    p_more = 0.5 * math.erfc(z / math.sqrt(2.0))
+                    p_less = 1.0 - p_more
+                    result["p_more"] = p_more
+                    result["p_less"] = p_less
+                    result["estimated_hit_probability"] = (
+                        p_more if result["direction"] == "MORE" else p_less
+                    )
+                    result["probability_sample_games"] = len(combined_scores)
+                    result["probability_method"] = "combined-score-normal-v1"
+                    result["probability_note"] = (
+                        "Uncalibrated normal approximation using the projected "
+                        "mean and observed variance of combined per-game scores; "
+                        "component covariance retained. Conditional on playing."
+                    )
+
         # Experimental estimate, saved before the game.
         # The calibration audit measures its actual hit rate.
-        if len(values) >= 3:
+        if len(values) >= 3 and "estimated_hit_probability" not in result:
             shifted = (
                 values
                 - float(values.mean())
