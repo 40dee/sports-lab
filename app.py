@@ -2311,7 +2311,7 @@ class Workflow:
                         p_more if result["direction"] == "MORE" else p_less
                     )
                     result["probability_sample_games"] = len(combined_scores)
-                    result["probability_method"] = "combined-score-normal-v1"
+                    result["probability_method"] = ("combined-score-covariance-v2" if stat_key == "PrizePicks Fantasy" else "combined-score-normal-v1")
                     result["probability_note"] = (
                         "Uncalibrated normal approximation using the projected "
                         "mean and combined-score variance (Fantasy uses assumed "
@@ -2355,6 +2355,8 @@ class Workflow:
         else:
             direction = "PASS"
         result["direction"] = direction
+        result["direction_method"] = "probability-direction-tau-0.02-v2"
+        result["direction_tau"] = tau
         result["estimated_hit_probability"] = (
             result["p_more"] if direction == "MORE"
             else result["p_less"] if direction == "LESS"
