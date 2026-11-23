@@ -2263,6 +2263,43 @@ class Workflow:
             ]
             if len(combined_scores) >= 3:
                 combined_variance = float(combined_scores.var(ddof=1))
+                if stat_key == "PrizePicks Fantasy":
+                    # Weighted component variance with assumed 0.30
+                    # correlation for volume-stat pairs. This replaces
+                    # the empirical combined variance when data is complete.
+                    volume_stats = {"PTS", "REB", "AST", "FG3M"}
+                    component_sds = {}
+                    component_variance = 0.0
+                    valid_components = True
+                    for stat, weight in weights.items():
+                        if not weight:
+                            continue
+                        if stat not in current.columns:
+                            valid_components = False
+                            break
+                        series = pd.to_numeric(
+                            current[stat], errors="coerce"
+                        ).dropna()
+                        if len(series) < 3:
+                            valid_components = False
+                            break
+                        sd = float(series.std(ddof=1))
+                        if not math.isfinite(sd):
+                            valid_components = False
+                            break
+                        component_sds[stat] = abs(float(weight)) * sd
+                        component_variance += (float(weight) * sd) ** 2
+                    if valid_components and component_sds:
+                        for index, stat_a in enumerate(component_sds):
+                            for stat_b in list(component_sds)[index + 1:]:
+                                if stat_a in volume_stats and stat_b in volume_stats:
+                                    component_variance += (
+                                        2.0 * 0.30 * float(weights[stat_a])
+                                        * float(weights[stat_b])
+                                        * (component_sds[stat_a] / abs(float(weights[stat_a])))
+                                        * (component_sds[stat_b] / abs(float(weights[stat_b])))
+                                    )
+                        combined_variance = component_variance
                 if math.isfinite(combined_variance) and combined_variance > 1e-9:
                     combined_sd = math.sqrt(combined_variance)
                     z = (line - forecast) / combined_sd
@@ -2277,8 +2314,9 @@ class Workflow:
                     result["probability_method"] = "combined-score-normal-v1"
                     result["probability_note"] = (
                         "Uncalibrated normal approximation using the projected "
-                        "mean and observed variance of combined per-game scores; "
-                        "component covariance retained. Conditional on playing."
+                        "mean and combined-score variance (Fantasy uses assumed "
+                        "0.30 volume-stat correlation when component data "
+                        "is available). Conditional on playing."
                     )
 
         # For standard stats, use the existing centered-history probability
@@ -7684,11 +7722,8 @@ def calculate_player_projection(
                 )
 
                 if mean_allowed > 0:
-                    residual = (
-                        float(allowed.iloc[0][label])
-                        / mean_allowed
-                        / (opponent_pace / league_pace)
-                    )
+                    # Pace is applied separately in the final estimate.
+                    residual = float(allowed.iloc[0][label]) / mean_allowed
 
                     matchup = max(
                         0.90,
