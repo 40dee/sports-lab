@@ -2178,7 +2178,7 @@ class Workflow:
             baseline=baseline,
             matchup_projection=adjusted,
             projection=forecast,
-            direction="MORE" if forecast > line else "LESS",
+            direction="PASS",
             gap=forecast - line,
             tie=abs(forecast - line) < 1e-9,
             learning_model=model,
@@ -2263,16 +2263,22 @@ class Workflow:
 
             above = int((shifted > line).sum())
             below = int((shifted < line).sum())
+            denominator = above + below + 2
+            p_more = (above + 1) / denominator
+            p_less = (below + 1) / denominator
+            tau = 0.02
 
-            wins = (
-                above
-                if result["direction"] == "MORE"
-                else below
-            )
+            if p_more > p_less + tau:
+                result["direction"] = "MORE"
+            elif p_less > p_more + tau:
+                result["direction"] = "LESS"
+            else:
+                result["direction"] = "PASS"
 
             result["estimated_hit_probability"] = (
-                (wins + 1)
-                / (above + below + 2)
+                p_more if result["direction"] == "MORE"
+                else p_less if result["direction"] == "LESS"
+                else None
             )
 
             result["probability_sample_games"] = len(values)
