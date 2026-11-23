@@ -1,0 +1,79 @@
+name: Test Math
+on: [push, workflow_dispatch]
+jobs:
+  test-math:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run Math Test
+        run: |
+          python - <<'PY'
+          import ast
+          import math
+          import hashlib
+          import pandas as pd
+          import numpy as np
+          
+          print('--- STARTING MATH TEST ---')
+          # Extract the real Workflow.enrich implementation without executing
+          # Streamlit's UI entrypoint or making network/database calls.
+          source = open('app.py', encoding='utf-8').read()
+          tree = ast.parse(source, filename='app.py')
+          workflow = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Workflow')
+          method = next(n for n in workflow.body if isinstance(n, ast.FunctionDef) and n.name == 'enrich')
+          module = ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[]))
+          namespace = {
+              'pd': pd, 'np': np, 'math': math, 'hashlib': hashlib,
+              'pick_is_selectable': lambda card, result: True,
+              'pick_side_note': lambda card, result: '',
+          }
+          exec(compile(module, 'app.py', 'exec'), namespace)
+          enrich = namespace['enrich']
+          
+          weights = {'PTS': 1.0, 'REB': 1.2, 'AST': 1.5, 'STL': 3.0, 'BLK': 3.0, 'TOV': -1.0}
+          base = pd.Timestamp.now(tz='UTC') - pd.Timedelta(days=20)
+          history = pd.DataFrame([
+              {'GAME_DATE': base + pd.Timedelta(days=i), 'SEASON': '2026-27',
+               'GAME_ID': str(i), 'PTS': 12+i, 'REB': 3+i%4,
+               'AST': 2+i%3, 'STL': i%2, 'BLK': i%2, 'TOV': 1+i%2}
+              for i in range(12)
+          ])
+          def score_frame(frame, card):
+              return sum(pd.to_numeric(frame[stat], errors='coerce') * weight
+                         for stat, weight in weights.items())
+          class StoreMock:
+              def get(self, namespace, key, default=None):
+                  return default
+          class WorkflowMock:
+              store = StoreMock()
+              e = {
+                  'fantasy_weights': lambda card: weights,
+                  'market_columns': lambda card: list(weights),
+                  'score_frame': score_frame,
+                  'current_season': lambda: '2026-27',
+              }
+          self = WorkflowMock()
+          card = {'Line': 50.0, 'Start (UTC)': (pd.Timestamp.now(tz='UTC') + pd.Timedelta(days=1)).isoformat()}
+          result = enrich(
+              self, {'components': [], 'projection': 35.0},
+              history, card, {'id': 'mock-player'}, 'mock-event', {},
+              {'available': True, 'entries': []},
+          )
+          print('projection:', result['projection'], 'line:', card['Line'])
+          print('p_more:', result.get('p_more'))
+          print('p_less:', result.get('p_less'))
+          print('direction:', result['direction'])
+          print('method:', result.get('probability_method'))
+          assert result['projection'] == 35.0
+          assert result['direction'] == 'LESS'
+          assert 0 <= result['p_more'] < 0.5
+          assert 0.5 < result['p_less'] <= 1
+          assert abs(result['p_more'] + result['p_less'] - 1) < 1e-10
+          assert result['probability_method'] == 'combined-score-normal-v1'
+          print('--- MATH TEST COMPLETE ---')
+          PY
