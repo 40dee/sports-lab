@@ -878,6 +878,7 @@ def pick_offered_sides(card):
     # Do not infer two-sided availability for a special or unknown line.
     if str(card.get('Line Type','')).strip().lower() in ('standard','regular'):
         return ('MORE','LESS')
+    print("NO_SIDES_DEBUG", card.get("Platform"), card.get("Line Type"), card.get("Available Sides"))
     return None
 
 
