@@ -2281,41 +2281,45 @@ class Workflow:
                         "component covariance retained. Conditional on playing."
                     )
 
-        # Experimental estimate, saved before the game.
-        # The calibration audit measures its actual hit rate.
-        if len(values) >= 3 and "estimated_hit_probability" not in result:
-            shifted = (
-                values
-                - float(values.mean())
-                + forecast
-            )
-
+        # For standard stats, use the existing centered-history probability
+        # estimator in both directions (no new API or market inputs).
+        if "p_more" not in result and len(values) >= 3:
+            shifted = values - float(values.mean()) + forecast
             above = int((shifted > line).sum())
             below = int((shifted < line).sum())
-
-            wins = (
-                above
-                if result["direction"] == "MORE"
-                else below
-            )
-
-            result["estimated_hit_probability"] = (
-                (wins + 1)
-                / (above + below + 2)
-            )
-
+            denominator = above + below + 2
+            result["p_more"] = (above + 1) / denominator
+            result["p_less"] = (below + 1) / denominator
             result["probability_sample_games"] = len(values)
-
-            result["probability_method"] = (
-                "experimental-centered-history-v1"
-            )
-
+            result["probability_method"] = "experimental-centered-history-v1"
             result["probability_note"] = (
                 "Uncalibrated shifted recent-game distribution; "
-                "conditional on playing and no tie. "
-                "Saved before the game. The percentage tracker "
-                "measures how these estimates actually perform."
+                "conditional on playing and no tie. Saved before the game."
             )
+
+        # Only a strictly better-than-even model probability selects a side.
+        # A projection exactly on the line is a tie, regardless of sample noise.
+        p_more = result.get("p_more")
+        p_less = result.get("p_less")
+        valid_probs = (
+            p_more is not None and p_less is not None
+            and all(math.isfinite(float(p)) and 0 <= float(p) <= 1
+                    for p in (p_more, p_less))
+        )
+        if result["tie"] or not valid_probs:
+            direction = "PASS"
+        elif p_more > 0.50:
+            direction = "MORE"
+        elif p_less > 0.50:
+            direction = "LESS"
+        else:
+            direction = "PASS"
+        result["direction"] = direction
+        result["estimated_hit_probability"] = (
+            result["p_more"] if direction == "MORE"
+            else result["p_less"] if direction == "LESS"
+            else None
+        )
 
         for source_field in (
             "advanced",
