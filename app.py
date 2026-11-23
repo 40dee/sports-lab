@@ -11557,14 +11557,10 @@ def render_native_kalshi_refresh():
 # trailing blocks. Only the lightweight status poll is a timed fragment.
 def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
-    if st.session_state.get('sports_lab_page_buttons')=='Fantasy' or st.session_state.get('sports_lab_page')=='Fantasy':
-        st.session_state['sports_lab_page_buttons']='Plays'
-        st.session_state['sports_lab_page']='Plays'
-        st.session_state['mobile_stat_pills']='Fantasy Score'
     if st.session_state.get('sports_lab_page_buttons')=='Saved' or st.session_state.get('sports_lab_page')=='Saved':
         st.session_state['sports_lab_page_buttons']='Plays'
         st.session_state['sports_lab_page']='Plays'
-    app_page = (st.segmented_control("Navigation", ["Plays", "Combos", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
+    app_page = (st.segmented_control("Navigation", ["Plays", "Fantasy", "Combos", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
     if app_page!="Settings":render_live_board_status(workflow.store,st,detailed=False)
     st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
@@ -11613,6 +11609,10 @@ def render_app_pages():
         if not board_allowed and app_page not in ('Combos','Fantasy'):
             st.info('Today’s picks are waiting for the complete board. '+board_note)
             st.caption('Saved plays and results remain available. Progress updates automatically; browsing does not download provider lines.')
+        elif app_page == 'Fantasy':
+            # Historical Fantasy views must remain accessible even if
+            # today's board worker has not completed.
+            render_fantasy_plays(workflow, st)
         elif app_page == 'Combos':
             if 'unfinished' in board_note: st.caption(board_note)
             render_combos(workflow, st)
