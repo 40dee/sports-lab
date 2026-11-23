@@ -7601,9 +7601,17 @@ def calculate_player_projection(
             "At least 3 current-season appearances are needed."
         )
 
-    minutes = min(
-        float(sample.head(5)["MIN"].mean()), 48.0
-    )
+    # Shrink recent playing time toward a starter-role prior before
+    # applying pace or positional matchup adjustments.
+    minute_sample = pd.to_numeric(sample.head(5)["MIN"], errors="coerce").dropna()
+    n = len(minute_sample)
+    if not n:
+        raise ValueError("Missing usable recent minutes.")
+    mean_min = float(minute_sample.mean())
+    k = 5.0
+    # Position-defense data does not supply positional playing-time means.
+    prior_mean = 28.0
+    minutes = min((n * mean_min + k * prior_mean) / (n + k), 48.0)
     estimates = {}
     components = []
     warnings = []
