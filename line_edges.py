@@ -88,7 +88,7 @@ def detect(card, result, rows, compare, offered, columns, fantasy=False):
     p=sum(b['more']*w for b,w in zip(books,weights))/sum(weights)
     if not 0<p<1:return None
     more=normal.cdf(normal.inv_cdf(p)+(line-pp)/spread)
-    probabilities={'MORE':min(.65,more),'LESS':min(.65,1-more)}
+    probabilities={'MORE':more,'LESS':1-more}
     side=max(offered,key=lambda s:probabilities[s])
     probability=probabilities[side]
     if probability<.54:return None
