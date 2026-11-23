@@ -37,31 +37,57 @@ CSV_URL = ("https://github.com/sportsdataverse/sportsdataverse-data/releases/dow
 
 
 def normalize_box_scores(raw: pd.DataFrame, season: str) -> pd.DataFrame:
-    """Map common published box-score schemas; reject incomplete datasets."""
-    frame = raw.copy()
-    frame.columns = [str(c).strip().lower().replace(" ", "_").replace(".", "_")
-                     for c in frame.columns]
+    """Normalize sportsdataverse player box scores to V2 replay schema."""
+    df = raw.copy()
+    df.columns = [str(c).strip().lower().replace(" ", "_").replace(".", "_")
+                  for c in df.columns]
+    # Explicit published sportsdataverse fields plus common alternate names.
     aliases = {
-        "PLAYER_ID": ("player_id", "athlete_id", "person_id", "playerid", "athleteid"),
+        "PLAYER_ID": ("player_id", "person_id", "athlete_id", "playerid", "athleteid"),
         "GAME_ID": ("game_id", "gameid", "event_id", "eventid"),
-        "GAME_DATE": ("game_date", "gamedate", "date", "game_datetime", "game_date_est"),
+        "GAME_DATE": ("game_date", "game_date_est", "gamedate", "date", "game_datetime"),
+        "PLAYER_NAME": ("player_name", "name_i", "display_name"),
         "MIN": ("min", "minutes", "minutes_played", "mins", "min_played"),
         "PTS": ("pts", "points", "points_scored"),
-        "REB": ("reb", "rebounds", "total_rebounds"),
+        "REB": ("reb", "rebounds_total", "rebounds", "total_rebounds"),
         "AST": ("ast", "assists"),
+        "STL": ("stl", "steals"),
+        "BLK": ("blk", "blocks"),
+        "TOV": ("tov", "turnovers"),
+        "FG3M": ("fg3m", "three_pointers_made"),
     }
-    selected = {}
-    for name, options in aliases.items():
-        match = next((col for col in options if col in frame.columns), None)
-        if match is None:
-            raise ValueError(
-                f"CSV for {season} missing required {name}; "
-                f"available columns: {sorted(frame.columns)}"
-            )
-        selected[name] = frame[match]
-    out = pd.DataFrame(selected)
-    out["SEASON"] = season
-    out["GAME_DATE"] = pd.to_datetime(out["GAME_DATE"], utc=True, errors="coerce")
+    rename = {}
+    for canonical, options in aliases.items():
+        source = next((col for col in (canonical.lower(), *options) if col in df.columns), None)
+        if source is not None:
+            rename[source] = canonical
+    df = df.rename(columns=rename)
+    required = ("PLAYER_ID", "GAME_ID", "MIN", *STATS)
+    missing = [col for col in required if col not in df.columns]
+    if missing:
+        raise ValueError(
+            f"CSV for {season} missing required fields {missing}; "
+            f"available columns: {sorted(df.columns)}"
+        )
+    if "GAME_DATE" not in df.columns:
+        # Game IDs are identifiers, NOT actual dates. Assign an ordered
+        # synthetic timestamp per distinct numeric game ID for replay only.
+        # Never interpret a game ID as a real calendar date.
+        ids = pd.to_numeric(df["GAME_ID"], errors="coerce")
+        if ids.isna().any():
+            raise ValueError(f"{season}: no game date and nonnumeric game IDs; cannot safely order")
+        unique_ids = sorted(ids.unique())
+        if len(unique_ids) < 100:
+            raise ValueError(f"{season}: too few game IDs to establish chronological proxy")
+        ranks = {game_id: i for i, game_id in enumerate(unique_ids)}
+        base = pd.Timestamp(f"{season[:4]}-01-01", tz="UTC")
+        df["GAME_DATE"] = ids.map(ranks).map(
+            lambda rank: base + pd.Timedelta(days=int(rank))
+        )
+        print(f"WARNING {season}: no actual game dates; using numeric GAME_ID ordering "
+              "with synthetic dates (assumes IDs increase chronologically)", flush=True)
+    else:
+        df["GAME_DATE"] = pd.to_datetime(df["GAME_DATE"], utc=True, errors="coerce")
     # NBA box scores may encode minutes as MM:SS.
     def minutes_number(value):
         if isinstance(value, str) and ":" in value:
@@ -71,20 +97,20 @@ def normalize_box_scores(raw: pd.DataFrame, season: str) -> pd.DataFrame:
             except (ValueError, TypeError):
                 return float("nan")
         return pd.to_numeric(value, errors="coerce")
-    out["MIN"] = out["MIN"].map(minutes_number)
+    df["MIN"] = df["MIN"].map(minutes_number)
     for stat in STATS:
-        out[stat] = pd.to_numeric(out[stat], errors="coerce")
-    out["PLAYER_ID"] = out["PLAYER_ID"].astype(str)
-    out["GAME_ID"] = out["GAME_ID"].astype(str)
-    out = out.dropna(subset=["GAME_DATE", "MIN", *STATS])
-    out = out[out["MIN"].between(.01, 70)]
-    out = out.drop_duplicates(["PLAYER_ID", "GAME_ID"])
-    if len(out) < 10000:
+        df[stat] = pd.to_numeric(df[stat], errors="coerce")
+    df["PLAYER_ID"] = df["PLAYER_ID"].astype(str)
+    df["GAME_ID"] = df["GAME_ID"].astype(str)
+    df = df.dropna(subset=["GAME_DATE", "MIN", *STATS])
+    df = df[df["MIN"].between(.01, 70)]
+    df = df.drop_duplicates(["PLAYER_ID", "GAME_ID"])
+    if len(df) < 10000:
         raise RuntimeError(
-            f"{season} contains only {len(out)} valid player-game rows; "
+            f"{season} contains only {len(df)} valid player-game rows; "
             "refusing to backtest season-level or incomplete data"
         )
-    return out
+    return df
 
 
 def load_season(season: str, refresh: bool = False) -> pd.DataFrame:
