@@ -1,0 +1,57 @@
+name: Temporary Manual NBA Board Pull
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Check setup first or force today's board pull"
+        required: true
+        type: choice
+        options:
+          - check
+          - pull
+        default: check
+
+concurrency:
+  group: sports-lab-manual-board-pull
+  cancel-in-progress: false
+
+jobs:
+  board:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Validate configured Turso storage
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          if not os.getenv('TURSO_DATABASE_URL') or not os.getenv('TURSO_AUTH_TOKEN'):
+              sys.exit('Missing Turso Actions secrets. No board run attempted.')
+          print('Turso credentials are configured (values hidden).')
+          PY
+      - name: Check or run NBA board worker
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          PRIZEPICKS_API_KEY: ${{ secrets.PRIZEPICKS_API_KEY }}
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+          ODDS_PAPI_API_KEY: ${{ secrets.ODDS_PAPI_API_KEY }}
+          MODE: ${{ inputs.mode }}
+        run: |
+          if [ "$MODE" = "pull" ]; then
+            echo 'Starting explicit board worker. API requests may be consumed.'
+            python app.py --auto-board --refresh
+          else
+            echo 'CHECK ONLY: no board pull or provider requests attempted.'
+            python -m py_compile app.py line_edges.py
+          fi
