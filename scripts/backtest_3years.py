@@ -16,6 +16,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from projection_v2 import (
     ENGINE_VERSION, estimate_robust_minutes, shrunk_per_minute_rate,
     calibrated_hit_probability,
