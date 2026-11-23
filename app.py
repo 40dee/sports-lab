@@ -2335,7 +2335,8 @@ class Workflow:
                 "conditional on playing and no tie. Saved before the game."
             )
 
-        # Only a strictly better-than-even model probability selects a side.
+        # Require both better-than-even probability and a two-percentage-point
+        # directional margin (tau), so near-50/50 outcomes are PASS.
         # A projection exactly on the line is a tie, regardless of sample noise.
         p_more = result.get("p_more")
         p_less = result.get("p_less")
@@ -2344,11 +2345,12 @@ class Workflow:
             and all(math.isfinite(float(p)) and 0 <= float(p) <= 1
                     for p in (p_more, p_less))
         )
+        tau = 0.02
         if result["tie"] or not valid_probs:
             direction = "PASS"
-        elif p_more > 0.50:
+        elif p_more > 0.50 and p_more > p_less + tau:
             direction = "MORE"
-        elif p_less > 0.50:
+        elif p_less > 0.50 and p_less > p_more + tau:
             direction = "LESS"
         else:
             direction = "PASS"
