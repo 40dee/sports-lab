@@ -1,0 +1,42 @@
+name: One-time Legacy Forecast Cleanup
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Preview counts first; delete is irreversible"
+        required: true
+        type: choice
+        options:
+          - preview
+          - delete
+        default: preview
+      confirmation:
+        description: "For delete, type DELETE_LEGACY_FORECASTS"
+        required: false
+        type: string
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: sports-lab-legacy-forecast-cleanup
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install database driver
+        run: python -m pip install "psycopg[binary]>=3,<4"
+      - name: Preview or delete legacy forecasts
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CLEANUP_MODE: ${{ inputs.mode }}
+          CLEANUP_CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          if [ "$CLEANUP_MODE" = "delete" ]; then
+            python scripts/clear_old_forecasts.py --delete --confirm "$CLEANUP_CONFIRMATION"
+          else
+            python scripts/clear_old_forecasts.py
+          fi
