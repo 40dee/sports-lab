@@ -4664,10 +4664,65 @@ def render_combo_hit_rates(store, st, date='All dates'):
     st.caption('Standard/Goblin/Demon means every leg has that tier; Mixed means multiple tiers. Hit rate = full combo hits ÷ (full hits + misses). Pending and tie/DNP reviews are separate. Overlapping combos are not independent. Game-date filter applies; singles platform/result filters do not.')
 
 
+def render_fantasy_results(st, rows):
+    """Read-only Standard Fantasy Score performance, independent of raw scope."""
+    from result_scopes import results_breakdowns
+    frame = pd.DataFrame(rows)
+    st.markdown('#### Fantasy Score · Standard only')
+    if frame.empty:
+        st.info('No saved Standard Fantasy Score predictions match these filters.')
+        return
+    settled = frame[frame['Outcome'].isin(['WIN', 'LOSS']) & frame['Grade status'].eq('FINAL')]
+    wins = int(settled['Outcome'].eq('WIN').sum())
+    losses = len(settled) - wins
+    pushes = int(frame['Outcome'].eq('TIE').sum())
+    probabilities = pd.to_numeric(settled['Estimated hit probability'], errors='coerce') if 'Estimated hit probability' in settled else pd.Series(index=settled.index, dtype=float)
+    valid = probabilities.between(0, 1)
+    brier = ((probabilities[valid] - settled.loc[valid, 'Outcome'].eq('WIN').astype(float)) ** 2).mean()
+    metrics = [('Wins', wins), ('Losses', losses), ('Pushes', pushes),
+               ('Settled picks', len(settled)), ('Hit rate', f'{wins/len(settled):.1%}' if len(settled) else '—'),
+               ('Brier score', f'{brier:.3f}' if pd.notna(brier) else '—')]
+    st.markdown(ui_html('<div class="sl-results-kpis">'+''.join(
+        '<div class="sl-results-kpi"><span>'+ui_text(label)+'</span><strong>'+ui_text(value)+'</strong></div>'
+        for label,value in metrics)+'</div>'),unsafe_allow_html=True)
+    if settled.empty:
+        st.info('Fantasy Score graphs appear after Standard picks settle.')
+        return
+    daily = pd.DataFrame(results_daily_summary(settled))
+    daily['Cumulative hit rate'] = daily['Wins'].cumsum() / daily['Settled picks'].cumsum()
+    trend = daily.melt(id_vars=['Date','Wins','Losses','Settled picks'],
+                       value_vars=['Hit rate','Cumulative hit rate'],var_name='Series',value_name='Rate')
+    st.vega_lite_chart({'data':{'values':trend.to_dict('records')},'height':220,
+        'mark':{'type':'line','point':True},'encoding':{
+            'x':{'field':'Date','type':'ordinal','sort':'ascending','title':None},
+            'y':{'field':'Rate','type':'quantitative','scale':{'domain':[0,1]},'axis':{'format':'.0%'},'title':'Hit rate'},
+            'color':{'field':'Series','type':'nominal','scale':{'range':['#23e689','#38bdf8']}},
+            'tooltip':[{'field':'Date'},{'field':'Series'},{'field':'Rate','format':'.1%'},{'field':'Settled picks'}]}},use_container_width=True)
+    breakdowns = results_breakdowns(settled.to_dict('records'))
+    for label, key in [('MORE vs LESS','direction'),('Confidence calibration','confidence')]:
+        st.markdown('##### '+label)
+        data = breakdowns[key]
+        if data:
+            display = pd.DataFrame(data)
+            for field in ('Hit rate','Average estimate'):
+                display[field] = display[field].map(lambda v:f'{v:.1%}' if pd.notna(v) else '—')
+            st.dataframe(display,hide_index=True,use_container_width=True)
+    calibration = [r for r in breakdowns['confidence'] if r['Average estimate'] is not None]
+    if calibration:
+        st.vega_lite_chart({'data':{'values':calibration},'height':200,
+            'layer':[{'mark':{'type':'point','filled':True,'color':'#23e689','size':80},
+                'encoding':{'x':{'field':'Average estimate','type':'quantitative','scale':{'domain':[0,1]},'axis':{'format':'.0%'}},
+                    'y':{'field':'Hit rate','type':'quantitative','scale':{'domain':[0,1]},'axis':{'format':'.0%'}},
+                    'tooltip':[{'field':'Saved confidence'},{'field':'Average estimate','format':'.1%'},{'field':'Hit rate','format':'.1%'},{'field':'Settled picks'}]}},
+                {'data':{'values':[{'x':0,'y':0},{'x':1,'y':1}]},'mark':{'type':'line','strokeDash':[5,5],'color':'#94a3b8'},
+                 'encoding':{'x':{'field':'x','type':'quantitative'},'y':{'field':'y','type':'quantitative'}}}]},use_container_width=True)
+    st.caption(f'Brier score uses {int(valid.sum())} settled picks with valid frozen probabilities. Pushes, pending, DNP and excluded picks do not count toward hit rate. No paid requests.')
+
+
 def render_results_dashboard(wf, st):
     st.markdown('### Results')
     results_view = st.segmented_control(
-        'Results view', ['Overview', 'Sharp +EV', 'Pick Log', 'Audits'],
+        'Results view', ['Overview', 'Fantasy', 'Sharp +EV', 'Pick Log', 'Audits'],
         default='Overview', key='results_view_tabs',
         label_visibility='collapsed', width='stretch') or 'Overview'
     research = wf.research_rows()
@@ -4743,6 +4798,16 @@ def render_results_dashboard(wf, st):
                     st.info('No settled pregame MORE/LESS picks match these filters.')
 
         render_combo_hit_rates(wf.store,st,date)
+
+    elif results_view == 'Fantasy':
+        fantasy = [row for row in standard_playable_rows(research)
+                   if 'fantasy' in str(row.get('Stat', '')).lower()]
+        if date != 'All dates':
+            fantasy = [row for row in fantasy if row.get('Game date') == date]
+        if platform != 'All platforms':
+            fantasy = [row for row in fantasy if row.get('Platform') == platform]
+        st.caption('Standard selectable pregame Fantasy Score only. Date and platform filters apply; outcome and raw scope filters do not affect performance metrics.')
+        render_fantasy_results(st, fantasy)
 
     elif results_view == 'Sharp +EV':
         from result_scopes import sharp_market_breakdowns
