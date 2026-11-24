@@ -4721,8 +4721,10 @@ def render_fantasy_results(st, rows):
 
 def render_results_dashboard(wf, st):
     st.markdown('### Results')
+    if st.session_state.get('results_view_tabs') == 'Fantasy':
+        st.session_state['results_view_tabs'] = 'Overview'
     results_view = st.segmented_control(
-        'Results view', ['Overview', 'Fantasy', 'Sharp +EV', 'Pick Log', 'Audits'],
+        'Results view', ['Overview', 'Sharp +EV', 'Pick Log', 'Audits'],
         default='Overview', key='results_view_tabs',
         label_visibility='collapsed', width='stretch') or 'Overview'
     research = wf.research_rows()
@@ -4797,9 +4799,7 @@ def render_results_dashboard(wf, st):
                 else:
                     st.info('No settled pregame MORE/LESS picks match these filters.')
 
-        render_combo_hit_rates(wf.store,st,date)
 
-    elif results_view == 'Fantasy':
         fantasy = [row for row in standard_playable_rows(research)
                    if 'fantasy' in str(row.get('Stat', '')).lower()]
         if date != 'All dates':
@@ -4808,6 +4808,7 @@ def render_results_dashboard(wf, st):
             fantasy = [row for row in fantasy if row.get('Platform') == platform]
         st.caption('Standard selectable pregame Fantasy Score only. Date and platform filters apply; outcome and raw scope filters do not affect performance metrics.')
         render_fantasy_results(st, fantasy)
+        render_combo_hit_rates(wf.store,st,date)
 
     elif results_view == 'Sharp +EV':
         from result_scopes import sharp_market_breakdowns
@@ -11634,10 +11635,10 @@ def render_native_kalshi_refresh():
 # trailing blocks. Only the lightweight status poll is a timed fragment.
 def render_app_pages():
     st.markdown("## ▥ SPORTS :green[LAB]")
-    if st.session_state.get('sports_lab_page_buttons')=='Saved' or st.session_state.get('sports_lab_page')=='Saved':
+    if st.session_state.get('sports_lab_page_buttons') in ('Saved','Fantasy') or st.session_state.get('sports_lab_page') in ('Saved','Fantasy'):
         st.session_state['sports_lab_page_buttons']='Plays'
         st.session_state['sports_lab_page']='Plays'
-    app_page = (st.segmented_control("Navigation", ["Plays", "Fantasy", "Combos", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
+    app_page = (st.segmented_control("Navigation", ["Plays", "Combos", "Results", "Settings"], default=st.session_state.get("sports_lab_page", "Plays"), key="sports_lab_page_buttons", label_visibility="collapsed", width="stretch") or "Plays")
     if app_page!="Settings":render_live_board_status(workflow.store,st,detailed=False)
     st.session_state["sports_lab_page"] = app_page
     if st.session_state.get("last_ui_page") != app_page:
@@ -11676,20 +11677,16 @@ def render_app_pages():
             render_workflow(workflow,st,[],mode="results")
 
         # ---------------- RESULTS AND PLAYER LINES ----------------
-        board_allowed,board_note=combo_board_ready(workflow.store) if app_page in ('Plays','Fantasy','Combos') else (True,'')
-        if board_allowed and app_page in ('Plays','Fantasy','Combos'):
+        board_allowed,board_note=combo_board_ready(workflow.store) if app_page in ('Plays','Combos') else (True,'')
+        if board_allowed and app_page in ('Plays','Combos'):
             st.session_state['_ui_verified_board_day']=slate_day()
             shown_run=workflow.store.get('board_run',slate_day()) or {}
             shown_preparation=workflow.store.get('preparation','last') or {}
             st.session_state['_ui_displayed_board_revision']=(shown_run.get('board_scan_at'),
                 shown_preparation.get('ready'),shown_preparation.get('total'))
-        if not board_allowed and app_page not in ('Combos','Fantasy'):
+        if not board_allowed and app_page != 'Combos':
             st.info('Today’s picks are waiting for the complete board. '+board_note)
             st.caption('Saved plays and results remain available. Progress updates automatically; browsing does not download provider lines.')
-        elif app_page == 'Fantasy':
-            # Historical Fantasy views must remain accessible even if
-            # today's board worker has not completed.
-            render_fantasy_plays(workflow, st)
         elif app_page == 'Combos':
             if 'unfinished' in board_note: st.caption(board_note)
             render_combos(workflow, st)
@@ -11723,7 +11720,7 @@ def poll_saved_board_updates():
     # An existing verified page stays still during background preparation.
     # First-time imports may update progress; publish a finished board once.
     page=st.session_state.get('sports_lab_page','Plays')
-    live_page=page in ('Plays','Fantasy','Combos')
+    live_page=page in ('Plays','Combos')
     initial_progress=active_progress and live_page and st.session_state.get('_ui_verified_board_day')!=day
     publication=changed and run.get('stage')=='finished'
     if publication or initial_progress:
