@@ -11194,6 +11194,7 @@ def ui_board(page):
         if st.session_state.get('plays_sharp_sort') not in (None,'Highest sharp %','Model score'):
             st.session_state.pop('plays_sharp_sort',None)
         sharp_sort=st.segmented_control('Sort by',['Model score','Highest sharp %'],default='Model score',key='plays_sharp_sort',width='stretch') or 'Model score'
+    direction_filter = st.segmented_control('Direction', ['All', 'MORE', 'LESS'], default='All', key='plays_direction_filter', width='stretch') or 'All'
     stat = st.segmented_control('Stat', ['All','Points','Rebounds','Assists','PRA','Fantasy Score'], default=st.session_state.get('mobile_stat_pills','All'), key='mobile_stat_pills',label_visibility='collapsed',width='stretch') or 'All'
     kind='Fantasy' if stat=='Fantasy Score' else 'All'
     with st.expander('Filters & Search'):
@@ -11237,11 +11238,17 @@ def ui_board(page):
         elif not records:
             st.info('No PrizePicks Fantasy Score lines are imported for today. In Settings, rebuild the saved PrizePicks feed without API calls. The feed must contain an actual fantasy line.')
         elif view == 'Top plays' and not any(identity(c) in forecasts for c in records):
-            st.info('Fantasy lines are imported but not calculated yet. Choose All props to inspect them; calculate the board in Settings to create forecasts.')
+            st.info('Fantasy lines are imported but not calculated yet. Calculate the board in Settings to create MORE or LESS forecasts.')
     records = [c for c in records if tier=='All' or (str(c.get('Platform','')).lower()=='prizepicks' and
                (str(c.get('Line Type','')).lower() in ('standard','regular') if tier=='Standard' else
                 str(c.get('Line Type','')).lower() not in ('standard','regular','goblin','demon') if tier=='Unverified' else
                 str(c.get('Line Type','')).lower()==tier.lower()))]
+    # Filter frozen model directions before market ranking, grouping and pagination.
+    def matches_direction(card):
+        result = (saved_prediction(forecasts, card) or {}).get('result') or {}
+        direction = str(result.get('direction') or '').upper()
+        return direction in ('MORE', 'LESS') and (direction_filter == 'All' or direction == direction_filter)
+    records = [card for card in records if matches_direction(card)]
     sharp_infos={}
     if page=='Plays' and (market_filter!='All' or sharp_sort=='Highest sharp %'):
         # Narrow candidate rows once; exact semantic matching still happens in engine_no_vig.
@@ -11262,7 +11269,7 @@ def ui_board(page):
         if calculated and not verified:
             st.warning('No entry-ready picks passed the current checks. Showing saved pregame projections for review below. Their exact lines or offered directions need verification; these are not current slip recommendations.')
         elif len(calculated)>len(verified):
-            st.caption(f'{len(calculated)-len(verified)} saved forecasts need line verification or are passes; they remain visible below with review labels.')
+            st.caption(f'{len(calculated)-len(verified)} saved forecasts need line verification; they remain visible below with review labels.')
         st.caption('Model score is experimental gap size, not validated confidence. Sharp sorting uses saved sportsbook quotes.')
     else:
         records.sort(key=lambda c: (str(c['Player']), ui_stat(c), float(c['Line'])))
@@ -11318,7 +11325,7 @@ def ui_board(page):
         return
     per_page = 24
     pages = max(1, (len(records) + per_page - 1) // per_page)
-    page_number = int(st.number_input('Page', min_value=1, max_value=pages, value=1, step=1, key='mobile_page_' + page + '_' + kind + '_' + platform + '_' + str(len(records)))) if pages>1 else 1
+    page_number = int(st.number_input('Page', min_value=1, max_value=pages, value=1, step=1, key='mobile_page_' + page + '_' + kind + '_' + platform + '_' + direction_filter + '_' + str(len(records)))) if pages>1 else 1
     visible = records[(page_number - 1) * per_page:page_number * per_page]
     for offset in range(0, len(visible), 2):
         card_columns = st.columns(2, gap='small')
