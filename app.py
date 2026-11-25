@@ -11203,13 +11203,15 @@ def ui_board(page):
         if st.session_state.get('plays_sharp_sort') not in (None,'Highest sharp %','Model score'):
             st.session_state.pop('plays_sharp_sort',None)
         sharp_sort=st.segmented_control('Sort by',['Model score','Highest sharp %'],default='Model score',key='plays_sharp_sort',width='stretch') or 'Model score'
-    confidence_filter = st.segmented_control('Confidence Filter',
-        ['All', 'Gold Zone (50-65%)', 'High Confidence (65%+)'],
-        default='All', key='plays_confidence_filter', width='stretch') or 'All'
-    st.caption('Confidence filters use saved model estimates, not guaranteed hit rates or sportsbook probabilities.')
-    direction_filter = st.segmented_control('Direction', ['All', 'MORE', 'LESS'], default='All', key='plays_direction_filter', width='stretch') or 'All'
     stat = st.segmented_control('Stat', ['All','Points','Rebounds','Assists','PRA','Fantasy Score'], default=st.session_state.get('mobile_stat_pills','All'), key='mobile_stat_pills',label_visibility='collapsed',width='stretch') or 'All'
     kind='Fantasy' if stat=='Fantasy Score' else 'All'
+    confidence_filter = direction_filter = 'All'
+    if kind == 'Fantasy':
+        confidence_filter = st.segmented_control('Confidence Filter',
+            ['All', 'Gold Zone (50-65%)', 'High Confidence (65%+)'],
+            default='All', key='plays_confidence_filter', width='stretch') or 'All'
+        st.caption('Confidence filters use saved model estimates, not guaranteed hit rates or sportsbook probabilities.')
+        direction_filter = st.segmented_control('Direction', ['All', 'MORE', 'LESS'], default='All', key='plays_direction_filter', width='stretch') or 'All'
     with st.expander('Filters & Search'):
         platform_options=['All', 'PrizePicks', 'Kalshi']+(['DraftKings'] if page=='Saved' else [])
         if st.session_state.get('mobile_platform_buttons') not in platform_options:st.session_state.pop('mobile_platform_buttons',None)
