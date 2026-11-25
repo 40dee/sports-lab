@@ -11203,6 +11203,10 @@ def ui_board(page):
         if st.session_state.get('plays_sharp_sort') not in (None,'Highest sharp %','Model score'):
             st.session_state.pop('plays_sharp_sort',None)
         sharp_sort=st.segmented_control('Sort by',['Model score','Highest sharp %'],default='Model score',key='plays_sharp_sort',width='stretch') or 'Model score'
+    confidence_filter = st.segmented_control('Confidence Filter',
+        ['All', 'Gold Zone (50-65%)', 'High Confidence (65%+)'],
+        default='All', key='plays_confidence_filter', width='stretch') or 'All'
+    st.caption('Confidence filters use saved model estimates, not guaranteed hit rates or sportsbook probabilities.')
     direction_filter = st.segmented_control('Direction', ['All', 'MORE', 'LESS'], default='All', key='plays_direction_filter', width='stretch') or 'All'
     stat = st.segmented_control('Stat', ['All','Points','Rebounds','Assists','PRA','Fantasy Score'], default=st.session_state.get('mobile_stat_pills','All'), key='mobile_stat_pills',label_visibility='collapsed',width='stretch') or 'All'
     kind='Fantasy' if stat=='Fantasy Score' else 'All'
@@ -11258,6 +11262,22 @@ def ui_board(page):
         direction = str(result.get('direction') or '').upper()
         return direction in ('MORE', 'LESS') and (direction_filter == 'All' or direction == direction_filter)
     records = [card for card in records if matches_direction(card)]
+    if confidence_filter != 'All':
+        def matches_confidence(card):
+            result = (saved_prediction(forecasts, card) or {}).get('result') or {}
+            raw = result.get('estimated_hit_probability')
+            if isinstance(raw, bool):
+                return False
+            try:
+                probability = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                return False
+            if not math.isfinite(probability) or not 0 <= probability <= 1:
+                return False
+            if confidence_filter == 'Gold Zone (50-65%)':
+                return 0.50 <= probability <= 0.65
+            return probability >= 0.65
+        records = [card for card in records if matches_confidence(card)]
     sharp_infos={}
     if page=='Plays' and (market_filter!='All' or sharp_sort=='Highest sharp %'):
         # Narrow candidate rows once; exact semantic matching still happens in engine_no_vig.
@@ -11334,7 +11354,7 @@ def ui_board(page):
         return
     per_page = 24
     pages = max(1, (len(records) + per_page - 1) // per_page)
-    page_number = int(st.number_input('Page', min_value=1, max_value=pages, value=1, step=1, key='mobile_page_' + page + '_' + kind + '_' + platform + '_' + direction_filter + '_' + str(len(records)))) if pages>1 else 1
+    page_number = int(st.number_input('Page', min_value=1, max_value=pages, value=1, step=1, key='mobile_page_' + page + '_' + kind + '_' + platform + '_' + direction_filter + '_' + confidence_filter + '_' + str(len(records)))) if pages>1 else 1
     visible = records[(page_number - 1) * per_page:page_number * per_page]
     for offset in range(0, len(visible), 2):
         card_columns = st.columns(2, gap='small')
