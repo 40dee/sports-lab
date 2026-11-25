@@ -1093,8 +1093,17 @@ def combo_player_exposure(store, tier_mode, quote_mode, size, reference=None):
     return counts
 
 
-def combo_candidates(pool, size, policy, exposure=None):
+def combo_candidates(pool, size, policy, exposure=None, *, tier_mode="mixed"):
     import heapq
+    # Enforce the requested tier again at the actual combination boundary.
+    allowed_tiers = {'standard': {'standard', 'regular'},
+                     'goblin': {'goblin'}, 'demon': {'demon'},
+                     'mixed': {'standard', 'regular', 'goblin', 'demon'}}
+    if tier_mode not in allowed_tiers:
+        raise ValueError('Unknown combo tier mode')
+    pool = [leg for leg in pool
+            if str(leg.get('card', {}).get('Line Type', '')).strip().lower()
+            in allowed_tiers[tier_mode]]
     # Re-run a bounded beam for each option so new players are not discarded
     # before alternatives can account for the players already selected.
     game_limit=1 if len({leg['event_id'] for leg in pool})>=size else 2
@@ -1231,7 +1240,7 @@ def combo_research_suggestions(store, tier_mode, size, reference=None):
     policy=(store.get('combo_model',str(size)) or {}).get('policy','balanced-v1')
     if policy not in COMBO_POLICIES:policy='balanced-v1'
     keys=[]
-    for legs in combo_candidates(pool,size,policy,combo_player_exposure(store,tier_mode,'research',size,current)):
+    for legs in combo_candidates(pool,size,policy,combo_player_exposure(store,tier_mode,'research',size,current),tier_mode=tier_mode):
         combo=combo_snapshot(legs,policy,current)
         combo['quote_mode']='research'
         store.put('combo',combo['id'],combo,immutable=True)
@@ -1517,7 +1526,7 @@ def update_combos(store, generate=False, reference=None, quote_mode="verified"):
                 models=store.get('combo_model',str(size)) or {'policy':'balanced-v1'}
                 policies={}
                 for policy in COMBO_POLICIES:
-                    snapshots=[combo_snapshot(legs,policy,current) for legs in combo_candidates(pool,size,policy,combo_player_exposure(store,tier_mode,quote_mode,size,current))]
+                    snapshots=[combo_snapshot(legs,policy,current) for legs in combo_candidates(pool,size,policy,combo_player_exposure(store,tier_mode,quote_mode,size,current),tier_mode=tier_mode)]
                     for snapshot in snapshots:
                         store.put('combo',snapshot['id'],snapshot,immutable=True)
                         generated+=1
