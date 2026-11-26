@@ -8,11 +8,11 @@ from urllib.parse import urlparse
 import feedparser
 import requests
 
+# Public Bluesky RSS endpoints use stable DID identifiers where known.
 FEEDS = (
-    "https://bsky.app/profile/underdognba.bsky.social/rss",
-    "https://bsky.app/profile/shamscharania.bsky.social/rss",
-    "https://bsky.app/profile/rotowire.bsky.social/rss",
-    "https://bsky.app/profile/nbapr.bsky.social/rss",
+    "https://bsky.app/profile/did:plc:ihxhbkzgvr2wzja4rlit6pnn/rss",  # Underdog NBA
+    "https://bsky.app/profile/did:plc:sa73fbx3vxzh2fw5pu5wmief/rss",  # Shams mirror
+    "https://bsky.app/profile/did:plc:ykcnnf6kqnn3lasmobrczoem/rss",  # NBA Daily News mirror
 )
 
 class PlainText(HTMLParser):
