@@ -10282,6 +10282,21 @@ def run_quota_fallback(wf, budget_seconds=1200):
         board,feed_errors=import_daily_prizepicks_board(wf,board,ledger,day)
     else:
         feed_errors.append('PRIZEPICKS_API_KEY missing; Fantasy Score uses saved lines only.')
+    # Free Kalshi public market import is isolated from paid provider capture.
+    # Never let an unavailable Kalshi endpoint block PrizePicks preparation.
+    try:
+        kalshi_rows=[r for r in board.get('v4_rows',[]) if r.get('Decoded') and
+                     str(r.get('Period','')).lower()=='result' and today_pregame(r.get('Start (UTC)'))]
+        imported,warnings,events=import_native_kalshi_rows(
+            kalshi_rows,kalshi_public,espn_teams(),pd.Timestamp.now(tz='UTC'))
+        if imported:
+            board['v4_rows']=[r for r in board.get('v4_rows',[])
+                if not (r.get('Kalshi Source')=='public API' and today_pregame(r.get('Start (UTC)')))] + imported
+            wf.store.put('board','board',board)
+        print('KALSHI_PUBLIC_IMPORT','imported',len(imported),'events',events,
+              'warnings',warnings[:5],flush=True)
+    except Exception as error:
+        print('KALSHI_PUBLIC_IMPORT','imported',0,'error',type(error).__name__,flush=True)
     ledger['feed_partial']=not status.get('complete',False)
     ledger['source_routing']={'regular_props':'The Odds API','fantasy_score':'PrizePicksAPI','league':'NBA'}
     board_run_stage(wf.store,'preparing',not ledger['feed_partial'] and not ledger['fantasy_partial'])
@@ -10615,7 +10630,9 @@ def consensus_edge_info(card, result, board_rows=None):
     if not valid(market):
         market=(engine_no_vig(card) if board_rows is None else engine_no_vig(card,board_rows)) or {}
         source='matching saved board'
-    if not valid(market):return {'line_edge':line_edge_info(card,result,board_rows),'model_probability':None,'best_side':None,'best_probability':None,'book_count':0,'aligned':False,'sharp_ev':False}
+    if not valid(market):
+        edge=line_edge_info(card,result,board_rows)
+        return {'line_edge':edge,'has_pinnacle':_has_pinnacle((edge or {}).get('books')),'model_probability':None,'best_side':None,'best_probability':None,'book_count':0,'aligned':False,'sharp_ev':False}
     from market_compare import sharp_weighted_market
     market=sharp_weighted_market(market)
     direction=str(result.get('direction') or '').upper()
@@ -10625,8 +10642,10 @@ def consensus_edge_info(card, result, board_rows=None):
     best_probability=float(market[best.lower()]) if best else None
     count=ui_number(market.get('book_count'))
     count=int(count) if count is not None and count>=1 else len(market.get('books') or []) or (1 if market.get('book') else 0)
+    edge=line_edge_info(card,result,board_rows)
     return {'model_probability':float(probability) if probability is not None else None,
-            'best_side':best,'best_probability':best_probability,'book_count':count,'source':source,'market':market,
+            'has_pinnacle':_has_pinnacle(market.get('books'),market.get('book')) or _has_pinnacle((edge or {}).get('books')),
+            'line_edge':edge,'best_side':best,'best_probability':best_probability,'book_count':count,'source':source,'market':market,
             'aligned':direction in offered and probability is not None and float(probability)>=.535,
             'sharp_ev':best_probability is not None and best_probability>=.54}
 
@@ -10665,6 +10684,8 @@ def ui_line_edge_badge(edge):
 
 
 def consensus_matches_filter(info, mode):
+    if mode=='🎯 Pinnacle (53.5%+)':
+        return bool(info.get('has_pinnacle')) and (float(info.get('best_probability') or 0)>=.535 or float((info.get('line_edge') or {}).get('probability') or 0)>=.535)
     return info.get('aligned',False) if mode=='✓ Sharp aligned (53.5%+)' else bool(info.get('sharp_ev') or info.get('line_edge')) if mode=='🔥 Sharp +EV (54%+)' else True
 
 
@@ -11199,7 +11220,7 @@ def ui_board(page):
     view = (st.segmented_control('Board view', ['Top plays', 'All props'], default=st.session_state.get('mobile_view', 'Top plays'), key='mobile_view_buttons', width='stretch') or 'Top plays') if page != 'Saved' else 'All props'
     market_filter='All';sharp_sort='Model score'
     if page=='Plays':
-        market_filter=st.segmented_control('Market',['All','✓ Sharp aligned (53.5%+)','🔥 Sharp +EV (54%+)'],default='All',key='plays_market_filter',width='stretch') or 'All'
+        market_filter=st.segmented_control('Market',['All','🎯 Pinnacle (53.5%+)','🔥 Sharp +EV (54%+)','✓ Sharp aligned (53.5%+)'],default='All',key='plays_market_filter',width='stretch') or 'All'
         if st.session_state.get('plays_sharp_sort') not in (None,'Highest sharp %','Model score'):
             st.session_state.pop('plays_sharp_sort',None)
         sharp_sort=st.segmented_control('Sort by',['Model score','Highest sharp %'],default='Model score',key='plays_sharp_sort',width='stretch') or 'Model score'
