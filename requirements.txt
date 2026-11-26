@@ -3,3 +3,4 @@ pandas
 requests
 nba_api
 psycopg[binary]
+feedparser
