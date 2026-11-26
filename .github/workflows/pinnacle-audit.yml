@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -93,4 +94,51 @@ jobs:
           print('Exact attached pairs:',matched,'stronger side >=53.5%:',above535,'>=54%:',above54)
           print('Threshold counts are quote-only, not model-direction or UI eligibility checks.')
           if not events: print('INCONCLUSIVE: no raw event cache for today; attached quotes alone cannot establish raw provider coverage.')
+          import ast, re, unicodedata
+          from pathlib import Path
+          from market_compare import sharp_weighted_market
+          tree=ast.parse(Path('app.py').read_text())
+          wanted={'normalize_player','engine_team_key','market_columns','fantasy_weights','engine_no_vig','pick_offered_sides','ui_number','consensus_edge_info','consensus_matches_filter'}
+          nodes=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name in wanted]
+          assert {n.name for n in nodes}==wanted
+          # Extract actual production functions without importing the app or starting workers.
+          def line_edge_info(*args): return None
+          exec(compile(ast.Module(body=nodes,type_ignores=[]),'app.py','exec'),globals())
+          counts=Counter(); ages=[]
+          for t,event in events.values():
+              for book in event.get('bookmakers') or []:
+                  if book.get('key')!='pinnacle': continue
+                  for m in book.get('markets') or []:
+                      observed=stamp(m.get('last_update'))
+                      if not observed or not observed.tzinfo: counts['missing timestamp']+=1; continue
+                      age=(t-observed).total_seconds()/60
+                      ages.append(age)
+                      counts['future timestamp' if age<0 else 'older than 30 min' if age>30 else 'fresh']+=1
+          print('Pinnacle market timestamp audit:',dict(counts))
+          if ages: print('Age minutes min/median/max:',min(ages),sorted(ages)[len(ages)//2],max(ages))
+          checked=Counter()
+          for card in cards:
+              if str(card.get('Line Type','')).lower() not in ('standard','regular') or fantasy_weights(card): continue
+              market=engine_no_vig(card,[])
+              if not market: continue
+              books=market.get('books') or []
+              pin=next((b for b in books if b.get('book')=='pinnacle'),None)
+              if not pin: continue
+              checked['production Pinnacle matched cards']+=1
+              for b in books:
+                  expected=implied(b['over_price'])/(implied(b['over_price'])+implied(b['under_price']))
+                  assert abs(expected-b['more'])<1e-10 and abs(1-expected-b['less'])<1e-10, 'No-vig mismatch'
+              weights={'pinnacle':3,'fanduel':1.5,'draftkings':1.5,'betmgm':1,'bovada':1}
+              expected=sum(b['more']*weights[b['book']] for b in books)/sum(weights[b['book']] for b in books)
+              assert abs(expected-market['more'])<1e-10,'Consensus mismatch'
+              for side in ('MORE','LESS'):
+                  info=consensus_edge_info(card,{'direction':side,'market':market},[])
+                  offered=pick_offered_sides(card) or ()
+                  assert consensus_matches_filter(info,'✓ Sharp aligned (53.5%+)')==(side in offered and market[side.lower()]>=.535)
+                  assert consensus_matches_filter(info,'🔥 Sharp +EV (54%+)')==any(market[d.lower()]>=.54 for d in offered)
+              checked['math and exact-line filter checks passed']+=1
+              print('PRODUCTION',card['Player'],card['Stat'],card['Line'],'Pinnacle MORE',round(pin['more']*100,2),'consensus MORE',round(market['more']*100,2))
+          print('PRODUCTION VALIDATION:',dict(checked))
+          if not checked: raise SystemExit('INCONCLUSIVE: no production Pinnacle matches')
+          print('Scope: exact-line saved-board reconstruction, both hypothetical model directions; moved-line branch and frozen forecast/UI state not tested.')
           PY
