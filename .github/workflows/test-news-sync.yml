@@ -1,0 +1,42 @@
+name: Test News Sync
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: injury-news-sync
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install feedparser requests
+      - name: Fetch live RSS and verify Turso readback
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from scripts import sync_news
+          started = datetime.now(timezone.utc)
+          sync_news.main()
+          rows = sync_news.query("SELECT payload FROM sports_records WHERE namespace=? AND key=?", ["injury_news", "latest"], True)
+          assert len(rows) == 1, "Missing news snapshot"
+          data = json.loads(rows[0][0]["value"])
+          assert datetime.fromisoformat(data["synced_at"]) >= started, "Snapshot not refreshed"
+          posts = data["posts"]
+          assert 0 < len(posts) <= 10
+          assert len({p["link"] for p in posts}) == len(posts)
+          assert all(p["text"] and p["link"] and datetime.fromisoformat(p["timestamp"]).tzinfo for p in posts)
+          print("TURSO READBACK PASS:", len(posts), "posts;", data["feeds_ok"], "/", data["feeds_total"], "feeds")
+          print("Synced at:", data["synced_at"])
+          for p in posts:
+              print(p["timestamp"], p["link"], p["text"][:300])
+          PY
