@@ -4673,9 +4673,66 @@ def render_combo_hit_rates(store, st, date='All dates'):
     st.caption('Standard/Goblin/Demon means every leg has that tier; Mixed means multiple tiers. Hit rate = full combo hits ÷ (full hits + misses). Pending and tie/DNP reviews are separate. Overlapping combos are not independent. Game-date filter applies; singles platform/result filters do not.')
 
 
+def render_result_record_cards(st, records):
+    """Display existing settled records using the Sharp +EV card theme."""
+    cards = []
+    for label, wins, losses in records:
+        total = wins + losses
+        rate = wins / total if total else None
+        color = '#23e689' if rate is not None and rate >= .542 else '#e04f5f' if rate is not None and rate < .5 else '#f3f8ff'
+        value = f'{rate:.1%}' if rate is not None else '—'
+        cards.append('<div class="sl-results-kpi"><span>' + ui_text(label)
+            + '</span><strong style="color:' + color + '">' + ui_text(value)
+            + '</strong><span>' + ui_text(f'{wins}W–{losses}L · {total} settled')
+            + '</span></div>')
+    st.markdown(ui_html('<div class="sl-results-kpis">' + ''.join(cards) + '</div>'),
+                unsafe_allow_html=True)
+
+
+def render_direction_confidence_cards(st, rows):
+    from result_scopes import results_breakdowns
+    breakdowns = results_breakdowns(rows)
+    directions = {r['Direction']: r for r in breakdowns['direction']}
+    st.markdown('##### MORE vs LESS')
+    render_result_record_cards(st, [(side, directions.get(side, {}).get('Wins', 0),
+        directions.get(side, {}).get('Losses', 0)) for side in ('MORE', 'LESS')])
+    confidence = {r['Saved confidence']: r for r in breakdowns['confidence']}
+    groups = [('Gold Zone (50–65%)', ('50–54.9%', '55–59.9%', '60–64.9%')),
+              ('High Confidence (65%+)', ('65–69.9%', '70%+')),
+              ('Low Confidence (<50%)', ('Below 50%',))]
+    st.markdown('##### Saved confidence')
+    render_result_record_cards(st, [(label,
+        sum(confidence.get(key, {}).get('Wins', 0) for key in keys),
+        sum(confidence.get(key, {}).get('Losses', 0) for key in keys))
+        for label, keys in groups])
+    unavailable = confidence.get('Unavailable', {}).get('Settled picks', 0)
+    st.caption(f'Gold: 50% to below 65%; High: 65% and above. {unavailable} settled picks with unavailable confidence excluded from confidence cards.')
+
+
+def render_standard_prop_cards(st, rows):
+    from result_scopes import results_breakdowns
+    groups = {}
+    for row in rows:
+        if 'fantasy' in str(row.get('Stat', '')).lower():
+            continue
+        label = compact_result_stat(row.get('Stat', 'Unknown'))
+        if '+' in label:
+            label = ' + '.join(sorted(part.strip() for part in label.split('+')))
+        groups.setdefault(label, []).append(row)
+    st.markdown('#### Standard Props Breakdown')
+    order = ('PTS', 'REB', 'AST', '3PM', 'STL', 'BLK', 'TOV', 'AST + PTS + REB')
+    labels = list(order) + sorted(set(groups) - set(order))
+    records = []
+    for label in labels:
+        directions = results_breakdowns(groups.get(label, []))['direction']
+        records.append(('PRA' if label == 'AST + PTS + REB' else label,
+                        sum(r['Wins'] for r in directions), sum(r['Losses'] for r in directions)))
+    render_result_record_cards(st, records)
+    st.caption('Standard selectable pregame props only, excluding Fantasy Score. Date and platform filters apply; only final MORE/LESS wins and losses count.')
+
+
 def render_fantasy_results(st, rows):
     """Read-only Standard Fantasy Score performance, independent of raw scope."""
-    from result_scopes import results_breakdowns
     frame = pd.DataFrame(rows)
     st.markdown('#### Fantasy Score · Standard only')
     if frame.empty:
@@ -4707,24 +4764,7 @@ def render_fantasy_results(st, rows):
             'y':{'field':'Rate','type':'quantitative','scale':{'domain':[0,1]},'axis':{'format':'.0%'},'title':'Hit rate'},
             'color':{'field':'Series','type':'nominal','scale':{'range':['#23e689','#38bdf8']}},
             'tooltip':[{'field':'Date'},{'field':'Series'},{'field':'Rate','format':'.1%'},{'field':'Settled picks'}]}},use_container_width=True)
-    breakdowns = results_breakdowns(settled.to_dict('records'))
-    for label, key in [('MORE vs LESS','direction'),('Confidence calibration','confidence')]:
-        st.markdown('##### '+label)
-        data = breakdowns[key]
-        if data:
-            display = pd.DataFrame(data)
-            for field in ('Hit rate','Average estimate'):
-                display[field] = display[field].map(lambda v:f'{v:.1%}' if pd.notna(v) else '—')
-            st.dataframe(display,hide_index=True,use_container_width=True)
-    calibration = [r for r in breakdowns['confidence'] if r['Average estimate'] is not None]
-    if calibration:
-        st.vega_lite_chart({'data':{'values':calibration},'height':200,
-            'layer':[{'mark':{'type':'point','filled':True,'color':'#23e689','size':80},
-                'encoding':{'x':{'field':'Average estimate','type':'quantitative','scale':{'domain':[0,1]},'axis':{'format':'.0%'}},
-                    'y':{'field':'Hit rate','type':'quantitative','scale':{'domain':[0,1]},'axis':{'format':'.0%'}},
-                    'tooltip':[{'field':'Saved confidence'},{'field':'Average estimate','format':'.1%'},{'field':'Hit rate','format':'.1%'},{'field':'Settled picks'}]}},
-                {'data':{'values':[{'x':0,'y':0},{'x':1,'y':1}]},'mark':{'type':'line','strokeDash':[5,5],'color':'#94a3b8'},
-                 'encoding':{'x':{'field':'x','type':'quantitative'},'y':{'field':'y','type':'quantitative'}}}]},use_container_width=True)
+    render_direction_confidence_cards(st, settled.to_dict('records'))
     st.caption(f'Brier score uses {int(valid.sum())} settled picks with valid frozen probabilities. Pushes, pending, DNP and excluded picks do not count toward hit rate. No paid requests.')
 
 
@@ -4792,22 +4832,8 @@ def render_results_dashboard(wf, st):
             st.info('No wins or losses match these filters yet. The graph appears after picks settle.')
         st.caption('Hit rate = wins ÷ (wins + losses). Hover for daily sample sizes. Ties, DNP and excluded picks do not count. This is not ROI.')
 
-        from result_scopes import results_breakdowns
-        with st.expander('MORE / LESS and confidence breakdowns', expanded=False):
-            breakdowns = results_breakdowns(visible.to_dict('records'))
-            st.caption('Uses the scope, date, platform and result filters above. Only FINAL pregame wins and losses count. Confidence uses the original saved probability; missing estimates stay unavailable. These estimates are experimental.')
-            for label, key in (('By direction', 'direction'), ('By saved confidence', 'confidence')):
-                st.markdown('#### ' + label)
-                rows = breakdowns[key]
-                if rows:
-                    display = pd.DataFrame(rows)
-                    for field in ('Hit rate', 'Average estimate'):
-                        if field in display:
-                            display[field] = display[field].map(lambda value: f'{value:.1%}' if pd.notna(value) else '—')
-                    st.dataframe(display, hide_index=True, use_container_width=True)
-                else:
-                    st.info('No settled pregame MORE/LESS picks match these filters.')
-
+        render_direction_confidence_cards(st, visible.to_dict('records'))
+        st.caption('Uses the scope, date, platform and result filters above. Only FINAL pregame wins and losses count. Confidence uses original saved probabilities.')
 
         fantasy = [row for row in standard_playable_rows(research)
                    if 'fantasy' in str(row.get('Stat', '')).lower()]
@@ -4817,6 +4843,10 @@ def render_results_dashboard(wf, st):
             fantasy = [row for row in fantasy if row.get('Platform') == platform]
         st.caption('Standard selectable pregame Fantasy Score only. Date and platform filters apply; outcome and raw scope filters do not affect performance metrics.')
         render_fantasy_results(st, fantasy)
+        standard = [row for row in standard_playable_rows(research)
+                    if (date == 'All dates' or row.get('Game date') == date)
+                    and (platform == 'All platforms' or row.get('Platform') == platform)]
+        render_standard_prop_cards(st, standard)
         render_combo_hit_rates(wf.store,st,date)
 
     elif results_view == 'Sharp +EV':
