@@ -29,7 +29,10 @@ def status_for(posts, name, start, now=None):
             continue
         text = normalize(post.get("text"))
         # Do not interpret historical, future-game or conditional reports.
-        if re.search(r"\b(yesterday|tomorrow|next game|last game|last night|if|could|might|expected|out indefinitely|out for|not ruled out)\b", text):
+        if re.search(r"\b(yesterday|tomorrow|next game|last game|last night|if|could|might|expected|out indefinitely|not ruled out|was out|were out|missed\s+\d+\s+games?)\b", text):
+            continue
+        # Only accept explicit current-game qualifiers after OUT for.
+        if re.search(r"\bout for\b(?!\s+(?:tonight\b|the game\b|today\b))", text):
             continue
         m = re.search(pattern, text)
         if m:
