@@ -11229,6 +11229,42 @@ def ui_detail(card, forecasts, selection_key='selected_prop_card', back_label='�
         st.warning('This research section could not load. Your frozen forecast remains unchanged.')
 
 
+@st.fragment(run_every="60s")
+def render_news_ticker():
+    from urllib.parse import urlparse
+    with st.expander("Live Injury News", expanded=False):
+        try:
+            # Bypass session read cache for this single isolated record.
+            if not isinstance(workflow_store, TursoStore):
+                st.caption("News storage unavailable.")
+                return
+            rows = workflow_store.query(
+                "SELECT payload FROM sports_records WHERE namespace=? AND key=?",
+                ("injury_news", "latest"), fetch=True)
+            snapshot = json.loads(rows[0][0]) if rows else {}
+            posts = snapshot.get("posts") or []
+            if not posts:
+                st.caption("No news synced yet.")
+                return
+            st.caption("Last sync: " + str(snapshot.get("synced_at", "Unknown")) +
+                       " · Public feed posts, not verified injury reports. Manual sync for now.")
+            items = []
+            for post in posts[:10]:
+                link = str(post.get("link", ""))
+                parsed = urlparse(link)
+                source = ('<a href="' + ui_text(link) + '" target="_blank" rel="noopener noreferrer">Source</a>'
+                          if parsed.scheme == "https" and parsed.hostname == "bsky.app" else "")
+                items.append('<div style="padding:10px 0;border-bottom:1px solid #1e3547;">'
+                    '<div style="color:#9db1c0;font-size:.75rem;">' + ui_text(post.get("timestamp")) +
+                    ' · ' + source + '</div><div style="color:#f3f8ff;overflow-wrap:anywhere;">' +
+                    ui_text(post.get("text")) + '</div></div>')
+            st.markdown(ui_html('<div style="max-height:320px;overflow-y:auto;background:#10202e;'
+                'border:1px solid #1e3547;border-radius:14px;padding:0 12px;">' +
+                ''.join(items) + '</div>'), unsafe_allow_html=True)
+        except Exception:
+            st.caption("News temporarily unavailable. Saved picks are unaffected.")
+
+
 def ui_board(page):
     # Browsing renders saved forecasts only; worker controls live in Settings.
     rows = st.session_state.get('v4_rows', [])
@@ -11772,6 +11808,9 @@ def render_app_pages():
                 render_workflow(workflow,st,[row for row in st.session_state.get('v4_rows',[]) if today_pregame(row.get('Start (UTC)'))],mode="settings")
         elif app_page=="Results":
             render_workflow(workflow,st,[],mode="results")
+
+        if app_page == 'Plays':
+            render_news_ticker()
 
         # ---------------- RESULTS AND PLAYER LINES ----------------
         board_allowed,board_note=combo_board_ready(workflow.store) if app_page in ('Plays','Combos') else (True,'')
