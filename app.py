@@ -4731,6 +4731,25 @@ def render_standard_prop_cards(st, rows):
     st.caption('Standard selectable pregame props only, excluding Fantasy Score. Date and platform filters apply; only final MORE/LESS wins and losses count.')
 
 
+def result_brier_card_html(brier):
+    """Display-only rating of an existing Brier score."""
+    if pd.isna(brier):
+        value, label, color = '—', 'No settled estimates', '#9db1c0'
+    else:
+        value = f'{brier:.3f}'
+        if brier < .24:
+            label, color = 'Excellent Calibration', '#23e689'
+        elif brier < .25:
+            label, color = 'Good Calibration', '#86efac'
+        elif brier <= .26:
+            label, color = 'Coin Flip', '#facc15'
+        else:
+            label, color = 'Poor Calibration', '#e04f5f'
+    return ('<div class="sl-results-kpi"><span>Brier score</span><strong>'
+            + ui_text(value) + '</strong><span style="color:' + color + '">'
+            + ui_text(label) + '</span></div>')
+
+
 def render_fantasy_results(st, rows):
     """Read-only Standard Fantasy Score performance, independent of raw scope."""
     frame = pd.DataFrame(rows)
@@ -4746,11 +4765,10 @@ def render_fantasy_results(st, rows):
     valid = probabilities.between(0, 1)
     brier = ((probabilities[valid] - settled.loc[valid, 'Outcome'].eq('WIN').astype(float)) ** 2).mean()
     metrics = [('Wins', wins), ('Losses', losses), ('Pushes', pushes),
-               ('Settled picks', len(settled)), ('Hit rate', f'{wins/len(settled):.1%}' if len(settled) else '—'),
-               ('Brier score', f'{brier:.3f}' if pd.notna(brier) else '—')]
+               ('Settled picks', len(settled)), ('Hit rate', f'{wins/len(settled):.1%}' if len(settled) else '—')]
     st.markdown(ui_html('<div class="sl-results-kpis">'+''.join(
         '<div class="sl-results-kpi"><span>'+ui_text(label)+'</span><strong>'+ui_text(value)+'</strong></div>'
-        for label,value in metrics)+'</div>'),unsafe_allow_html=True)
+        for label,value in metrics)+result_brier_card_html(brier)+'</div>'),unsafe_allow_html=True)
     if settled.empty:
         st.info('Fantasy Score graphs appear after Standard picks settle.')
         return
@@ -4812,9 +4830,20 @@ def render_results_dashboard(wf, st):
     metrics=[('Settled picks',wins+losses),('Wins',wins),('Losses',losses),
              ('Hit rate',f'{wins/(wins+losses):.1%}' if wins+losses else '—')]
     if results_view == 'Overview':
+        # Display-only Overall Brier, using the same formula as Fantasy.
+        from result_scopes import timestamp
+        settled = visible[visible['Outcome'].isin(['WIN', 'LOSS']) & visible['Grade status'].eq('FINAL')]
+        settled = settled[settled.apply(lambda row: bool(
+            timestamp(row.get('Created (UTC)')) and timestamp(row.get('Start (UTC)'))
+            and timestamp(row.get('Created (UTC)')) < timestamp(row.get('Start (UTC)'))
+            and row.get('Pick') in ('MORE', 'LESS')), axis=1)] if not settled.empty else settled
+        probabilities = pd.to_numeric(settled['Estimated hit probability'], errors='coerce') if 'Estimated hit probability' in settled else pd.Series(index=settled.index, dtype=float)
+        valid = probabilities.between(0, 1)
+        brier = ((probabilities[valid] - settled.loc[valid, 'Outcome'].eq('WIN').astype(float)) ** 2).mean()
         st.markdown(ui_html('<div class="sl-results-kpis">'+''.join(
             '<div class="sl-results-kpi"><span>'+ui_text(label)+'</span><strong>'+ui_text(value)+'</strong></div>'
-            for label,value in metrics)+'</div>'),unsafe_allow_html=True)
+            for label,value in metrics)+result_brier_card_html(brier)+'</div>'),unsafe_allow_html=True)
+        st.caption(f'Overall Brier: {int(valid.sum())} final pregame picks with valid saved probabilities. Rating labels are display thresholds, not a separate calibration test.')
         daily = results_daily_summary(visible)
         if wins + losses:
             st.vega_lite_chart({'data': {'values': daily}, 'height': 210,
