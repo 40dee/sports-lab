@@ -954,6 +954,8 @@ def combo_pool(store, reference=None, tier_mode="mixed", quote_mode="verified"):
     ranking_context=ranking_context_for(reliability_model,slate_day(current),ranking_mode)
     ranking_context=(dict(ranking_context,version='reliability-blend-v2-neutral-base',base_version='eligibility-diversity-v1')
                      if ranking_context else {'version':'eligibility-diversity-v1','experimental':True,'basis':'eligibility and diversification; gap is diagnostic only'})
+    from injury_news import read_posts, status_for
+    news_posts = read_posts(store)
     pool, excluded, seen = [], {}, set()
     def reject(reason): excluded[reason] = excluded.get(reason, 0) + 1
     for card in board.get('v4_rows') or []:
@@ -968,6 +970,8 @@ def combo_pool(store, reference=None, tier_mode="mixed", quote_mode="verified"):
             reject('Duplicate eligible market'); continue
         if not today_pregame(card.get('Start (UTC)'), current):
             reject('Game not upcoming today (Pacific time)'); continue
+        if status_for(news_posts, card.get('Player'), card.get('Start (UTC)')) == 'OUT':
+            reject('Ruled out by news feed.'); continue
         frozen = saved_prediction(index, card)
         result = (frozen or {}).get('result') or {}
         start = utc_timestamp(card.get('Start (UTC)'))
@@ -2561,6 +2565,18 @@ class Workflow:
             except Exception:
                 optional.append(None)
 
+        from injury_news import read_posts, usage_context, pass_result
+        news_posts = getattr(self, '_news_posts', None)
+        if news_posts is None:
+            news_posts = read_posts(self.store)
+        news_context = {}
+        if news_posts:
+            try:
+                roster = self.e["saved_fetch"](self.e["ESPN_BASE"] + f"teams/{team['id']}/roster", {}, ttl_seconds=300)
+                news_context = usage_context(news_posts, player, roster.get("athletes", []), card["Start (UTC)"])
+            except Exception:
+                news_context = usage_context(news_posts, player, [], card["Start (UTC)"])
+
         result = self.e["calculate_player_projection"](
             history,
             card,
@@ -2568,6 +2584,7 @@ class Workflow:
             team["displayName"],
             position,
             *optional,
+            news_context=news_context,
         )
         result.setdefault('warnings', []).extend(history.attrs.get('history_warnings', []))
 
@@ -2583,6 +2600,9 @@ class Workflow:
             availability,
         )
 
+        if news_context.get("out"):
+            pass_result(result)
+        result["injury_news_context"] = news_context
         result["position_evidence"] = evidence
         result["market"] = self.e["engine_no_vig"](card)
         from teammate_context import from_availability
@@ -4125,6 +4145,9 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
     # exact saved board being prepared, rather than an empty session_state.
     if 'engine_no_vig' in engine:
         wf.e['engine_no_vig'] = lambda card: engine['engine_no_vig'](card, board.get('v4_rows') or [])
+    from injury_news import read_posts
+    previous_news = getattr(wf, "_news_posts", None)
+    wf._news_posts = read_posts(wf.store)
     original_player, original_event = wf.player, wf.event_for
     original_availability = getattr(wf, 'availability', None)
     player_cache, event_cache, history_cache, availability_cache, shared_cache = {}, {}, {}, {}, {}
@@ -4207,6 +4230,7 @@ def prepare_saved_board(wf, board, budget_seconds=20, max_picks=6, clock=time.mo
                 wf.store.put('preparation', 'last', report)
                 last_progress=clock()
     finally:
+        wf._news_posts = previous_news
         wf.player, wf.event_for, wf.e = original_player, original_event, engine
         if original_availability is not None:
             wf.availability = original_availability
@@ -8899,7 +8923,7 @@ _base_calculate_player_projection = calculate_player_projection
 
 def calculate_player_projection(
     history, card, season, team_name, position,
-    advanced=None, position_data=None,
+    advanced=None, position_data=None, news_context=None,
 ):
     result = _base_calculate_player_projection(
         history, card, season, team_name, position,
@@ -8931,6 +8955,12 @@ def calculate_player_projection(
             ),
         }
 
+    if news_context:
+        from injury_news import apply_usage
+        apply_usage(result, news_context, weights)
+        result["gap"] = result["projection"] - float(card["Line"])
+        result["direction"] = "MORE" if result["gap"] > 0 else "LESS"
+        result["tie"] = abs(result["gap"]) < 1e-9
     return result
 
 
@@ -11272,10 +11302,18 @@ def ui_board(page):
     health = workflow_store.get('health', slate_day()) or {}
     coverage = workflow_store.get('coverage', slate_day()) or {}
     line_checks=dict(workflow_store.items('odds_refresh'))
+    from injury_news import read_posts, status_for, pass_result
+    news_posts = read_posts(workflow_store)
+    blocked_news = set()
     for card in rows:
         frozen = saved_prediction(forecasts, card)
         if frozen:
+            if status_for(news_posts, card.get('Player'), card.get('Start (UTC)')) == 'OUT':
+                frozen = dict(frozen, result=pass_result(dict(frozen.get('result') or {})))
+                blocked_news.add(str(card.get('Player')))
             forecasts[identity(card)] = frozen
+    if blocked_news:
+        st.warning('Ruled out by news feed: ' + ', '.join(sorted(blocked_news)))
     if page=='Plays':
         quote_revision=(slate_day(),st.session_state.get('v4_scan_at'))
         if st.session_state.get('_ui_quote_revision')!=quote_revision:
