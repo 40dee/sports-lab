@@ -1,0 +1,96 @@
+name: Pinnacle Odds Audit
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Read saved Turso evidence only
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          python - <<'PY'
+          import os, json, math, urllib.request
+          from urllib.parse import urlparse
+          from datetime import datetime, timezone
+          from zoneinfo import ZoneInfo
+          from collections import Counter, defaultdict
+          url=urlparse(os.environ['TURSO_DATABASE_URL'].replace('libsql://','https://',1))
+          assert url.scheme=='https' and url.hostname and url.hostname.endswith('.turso.io')
+          token=os.environ['TURSO_AUTH_TOKEN']
+          def read(sql):
+              body={'requests':[{'type':'execute','stmt':{'sql':sql,'want_rows':True}},{'type':'close'}]}
+              req=urllib.request.Request('https://'+url.netloc+'/v2/pipeline',data=json.dumps(body).encode(),headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+              with urllib.request.urlopen(req,timeout=45) as response:
+                  item=json.load(response)['results'][0]
+              if item['type']!='ok': raise RuntimeError('Read-only query failed')
+              return [[c.get('value') for c in row] for row in item['response']['result']['rows']]
+          pt=ZoneInfo('America/Los_Angeles')
+          day=datetime.now(pt).date()
+          def stamp(s):
+              try: return datetime.fromisoformat(str(s).replace('Z','+00:00'))
+              except (ValueError,TypeError): return None
+          def today(s):
+              t=stamp(s)
+              return bool(t and t.tzinfo and t.astimezone(pt).date()==day)
+          def name(s): return ''.join(c for c in str(s).casefold() if c.isalnum())
+          print('Pacific slate:',day)
+          raw=read("SELECT payload FROM sports_records WHERE namespace='source' AND key LIKE 'the_odds_api_game_v2:%'")
+          events={}
+          for (payload,) in raw:
+              obj=json.loads(payload); event=obj.get('event') or {}
+              if not today(event.get('commence_time')): continue
+              t=stamp(obj.get('fetched_at'))
+              if not t or not t.tzinfo: continue
+              eid=event.get('id')
+              if eid not in events or t>events[eid][0]: events[eid]=(t,event)
+          print('Saved raw events for slate:',len(events))
+          board=read("SELECT payload FROM sports_records WHERE namespace='board' AND key='board'")
+          cards=[c for c in (json.loads(board[0][0]).get('v4_rows') or []) if str(c.get('Platform','')).lower()=='prizepicks' and today(c.get('Start (UTC)'))] if board else []
+          print('Saved PrizePicks cards:',len(cards))
+          markets=Counter(); stale=0; raw_count=0; pairs=defaultdict(dict); attached=set()
+          for t,event in events.values():
+              for book in event.get('bookmakers') or []:
+                  if book.get('key')!='pinnacle': continue
+                  for m in book.get('markets') or []:
+                      for o in m.get('outcomes') or []:
+                          raw_count+=1; markets[m.get('key')]+=1
+                          observed=stamp(m.get('last_update'))
+                          if not observed or not observed.tzinfo or not 0<=(t-observed).total_seconds()<=1800:
+                              stale+=1; continue
+                          try: line=float(o['point']); odds=float(o['price'])
+                          except (KeyError,TypeError,ValueError): continue
+                          if not math.isfinite(line) or not math.isfinite(odds) or line<=0 or abs(odds)<100 or o.get('name') not in ('Over','Under'): continue
+                          key=(str(event.get('id')),str(o.get('description')),m.get('key'),line)
+                          pairs[key][o['name']]=odds
+          for c in cards:
+              for q in c.get('Sportsbook Quotes') or []:
+                  if str(q.get('Platform','')).lower()!='pinnacle' or name(q.get('Player'))!=name(c.get('Player')): continue
+                  if q.get('Line')!=c.get('Line') or q.get('Stat Key')!=c.get('Stat Key'): continue
+                  attached.add((str(q.get('Fixture ID')),name(q.get('Player')),str(q.get('Market ID')),float(q['Line']),q.get('Direction')))
+          print('Raw Pinnacle outcomes:',raw_count,'markets:',dict(markets))
+          print('Stale/invalid timestamp outcomes:',stale)
+          print('Unique Pinnacle players with accepted quotes:',len({name(k[1]) for k in pairs}))
+          print('Unique attached exact-player/stat/line sides:',len(attached))
+          def implied(o): return 100/(100+o) if o>0 else -o/(100-o)
+          complete=matched=above535=above54=0
+          for (eid,player,market,line),sides in sorted(pairs.items()):
+              if set(sides)!= {'Over','Under'}: continue
+              complete+=1
+              p=implied(sides['Over'])/(implied(sides['Over'])+implied(sides['Under']))
+              exact=all(('theodds:'+eid,name(player),'theodds:'+market,line,d) in attached for d in ('MORE','LESS'))
+              if exact:
+                  matched+=1; above535+=max(p,1-p)>=.535; above54+=max(p,1-p)>=.54
+              print(player,market,line,'OVER',sides['Over'],'UNDER',sides['Under'],'no-vig MORE',round(p*100,2),'LESS',round((1-p)*100,2),'exact attached pair',exact)
+          print('Complete accepted Pinnacle pairs:',complete)
+          print('Exact attached pairs:',matched,'stronger side >=53.5%:',above535,'>=54%:',above54)
+          print('Threshold counts are quote-only, not model-direction or UI eligibility checks.')
+          if not events: print('INCONCLUSIVE: no raw event cache for today; attached quotes alone cannot establish raw provider coverage.')
+          PY
