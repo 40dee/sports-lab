@@ -63,7 +63,11 @@ class LineEdgeTests(unittest.TestCase):
   self.assertGreater(self.run_edge(rows)['probability'],.65)
   self.assertLessEqual(self.run_edge(rows)['probability'],1.0)
   self.assertEqual(self.card,original)
-  self.assertGreaterEqual(self.run_edge(rows,columns=('FG3M',))['spread'],3)
+  # Use a realistic half-point count market for the Poisson interpolation.
+  self.card.update({'Stat Key':'FG3M','Line':2.5})
+  count_edge=self.run_edge(self.rows(3.5),columns=('FG3M',))
+  self.assertIsNotNone(count_edge)
+  self.assertGreaterEqual(count_edge['spread'],3)
  def test_app_offered_side_guard_and_filter_integration(self):
   import ast
   from pathlib import Path
