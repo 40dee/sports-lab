@@ -87,10 +87,11 @@ class ResultsDisplayTests(unittest.TestCase):
         self.assertFalse(app.exception, list(app.exception))
         grid=next(m.value for m in app.markdown if '<div class="sl-results-kpis">' in m.value)
         self.assertIn('<span>Settled picks</span><strong>1</strong>',grid)
-        self.assertEqual(grid.count('class="sl-results-kpi"'),4)
-        direction = next(d.value for d in app.dataframe if 'Direction' in d.value.columns and 'Settled picks' in d.value.columns)
-        self.assertEqual(direction.iloc[0]['Losses'], 1)
-        self.assertEqual(direction.iloc[0]['Average estimate'], '60.0%')
+        self.assertEqual(grid.count('class="sl-results-kpi"'),5)
+        direction = next(m.value for m in app.markdown if '<span>MORE</span>' in m.value and '<span>LESS</span>' in m.value)
+        self.assertIn('0W–1L · 1 settled', direction)
+        self.assertIn('<span>Brier score</span>', grid)
+        self.assertIn('0.360', grid)
         app.button_group(key='results_view_tabs').set_value('Sharp +EV').run()
         self.assertFalse(app.exception, list(app.exception))
         sharp = next(m.value for m in app.markdown if '🔥 Sharp +EV (54%+' in m.value and 'sl-results-kpi' in m.value)
@@ -102,9 +103,8 @@ class ResultsDisplayTests(unittest.TestCase):
         grid=next(m.value for m in app.markdown if '<div class="sl-results-kpis">' in m.value)
         self.assertIn('<span>Settled picks</span><strong>2</strong>',grid)
         app.selectbox(key='results_outcome').select('WIN').run()
-        direction = next(d.value for d in app.dataframe if 'Direction' in d.value.columns and 'Settled picks' in d.value.columns)
-        self.assertEqual(direction.iloc[0]['Settled picks'], 1)
-        self.assertEqual(direction.iloc[0]['Wins'], 1)
+        direction = next(m.value for m in app.markdown if '<span>MORE</span>' in m.value and '<span>LESS</span>' in m.value)
+        self.assertIn('1W–0L · 1 settled', direction)
 
 
 class SharpMarketTests(unittest.TestCase):
