@@ -34,7 +34,8 @@ jobs:
           data = json.loads(rows[0][0]["value"])
           assert datetime.fromisoformat(data["synced_at"]) >= started, "Snapshot not refreshed"
           posts = data["posts"]
-          assert 0 < len(posts) <= 10
+          assert 0 <= len(posts) <= 10
+          assert all(sync_news.is_fresh(p['timestamp'], datetime.fromisoformat(data['synced_at'])) for p in posts), 'Expired or future news saved'
           assert len({p["link"] for p in posts}) == len(posts)
           assert all(p["text"] and p["link"] and datetime.fromisoformat(p["timestamp"]).tzinfo for p in posts)
           print("TURSO READBACK PASS:", len(posts), "posts;", data["feeds_ok"], "/", data["feeds_total"], "feeds")
