@@ -1,0 +1,42 @@
+name: Recover cached NBA games
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sports-lab-worker
+  cancel-in-progress: false
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+      TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      ODDS_API_KEY: ''
+      THE_ODDS_API_KEY: ''
+      PRIZEPICKS_API_KEY: ''
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - name: Verify timestamp tolerance
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone, timedelta
+          from unittest.mock import patch
+          from odds_fallback import decode
+          now=datetime(2026,11,27,23,6,51,999888,tzinfo=timezone.utc)
+          market={'key':'player_points','outcomes':[{'name':'Over','description':'Test Player','point':10.5}]}
+          event={'id':'test','home_team':'A','away_team':'B','commence_time':(now+timedelta(hours=2)).isoformat(),'bookmakers':[{'key':'prizepicks','markets':[market]}]}
+          with patch('odds_fallback.attach_quotes',side_effect=lambda cards,*args:cards):
+              for delta,expected in [(0.000112,1),(1,1),(2,0),(-1800,1),(-1801,0)]:
+                  market['last_update']=(now+timedelta(seconds=delta)).isoformat()
+                  assert len(decode(event,now.isoformat(),now))==expected,delta
+          print('Timestamp regression passed')
+          PY
+      - name: Recover and prepare saved games
+        run: python app.py --recover-cached-nba-games
