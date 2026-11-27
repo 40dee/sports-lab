@@ -69,12 +69,24 @@ def normalize_box_scores(raw: pd.DataFrame, season: str) -> pd.DataFrame:
                 rename[match] = target
     frame = frame.rename(columns=rename)
     frame = frame.loc[:, ~frame.columns.duplicated()]
+    synthetic = "GAME_DATE" not in frame.columns
+    if synthetic and "GAME_ID" in frame.columns:
+        ids = pd.to_numeric(frame["GAME_ID"], errors="coerce")
+        if ids.isna().any():
+            raise ValueError(f"{season}: nonnumeric or missing GAME_ID; cannot infer order")
+        # Rank distinct IDs, keeping all players in a game on the same synthetic day.
+        ranks = ids.rank(method="dense").astype("int64") - 1
+        # Spread ranks across a season-sized interval with distinct timestamps.
+        # The replay uses exact timestamp cutoffs for synthetic rows below.
+        frame["GAME_DATE"] = pd.Timestamp(f"{season[:4]}-10-01", tz="UTC") + pd.to_timedelta(ranks, unit="h")
+        print(f"WARNING {season}: synthetic GAME_ID order; chronology unverified", flush=True)
     missing = set(COLUMNS) - set(frame.columns)
     if missing:
         raise ValueError(f"CSV for {season} missing required {sorted(missing)}; "
                          f"available columns: {sorted(frame.columns)}")
     out = frame[list(COLUMNS)].copy()
     out["SEASON"] = season
+    out["SYNTHETIC_DATE"] = synthetic
     out["GAME_DATE"] = pd.to_datetime(out["GAME_DATE"], utc=True, errors="coerce")
     # NBA box scores may encode minutes as MM:SS.
     def minutes_number(value):
@@ -128,7 +140,7 @@ def run(frame: pd.DataFrame) -> pd.DataFrame:
         games = games.sort_values(["GAME_DATE", "GAME_ID"]).reset_index(drop=True)
         for idx in range(15, len(games)):
             target = games.iloc[idx]
-            cutoff = target["GAME_DATE"].normalize()
+            cutoff = target["GAME_DATE"] if target["SYNTHETIC_DATE"] else target["GAME_DATE"].normalize()
             history = games.iloc[:idx]
             history = history[history["GAME_DATE"] < cutoff].sort_values("GAME_DATE", ascending=False)
             if len(history) < 15:
@@ -167,7 +179,8 @@ def run(frame: pd.DataFrame) -> pd.DataFrame:
                         records.append({
                             "variant": variant, "game_id": target["GAME_ID"],
                             "season": target["SEASON"], "player": player,
-                            "date": target["GAME_DATE"].date().isoformat(),
+                            "date": target["GAME_DATE"].isoformat(),
+                            "synthetic_date": bool(target["SYNTHETIC_DATE"]),
                             "stat": stat, "line": line, "projection": projection,
                             "actual": actual, "direction": direction,
                             "probability": probability, "win": win,
@@ -183,6 +196,8 @@ def report(results: pd.DataFrame) -> None:
         raise RuntimeError("No gradeable picks: check dataset and sample requirements")
     print(f"\nV2 ENGINE: {ENGINE_VERSION}")
     print("Proxy: preceding 15 games; no historical PrizePicks lines")
+    if results.synthetic_date.any():
+        print("WARNING: synthetic GAME_ID ordering; true chronology and baseline equivalence unverified.")
     print("Historical game context: neutral (no reconstructed Vegas/pace/matchup)")
     print("Note: V2 replay minutes differ from the new live app.py minutes shrinkage.")
     print(f"Samples: {len(results):,}")
