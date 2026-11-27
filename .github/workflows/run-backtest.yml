@@ -1,0 +1,29 @@
+name: Historical NBA calibration backtest
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install numpy pandas nba_api requests
+      - uses: actions/cache@v4
+        with:
+          path: .cache/nba_backtest
+          key: nba-proxy-2022-2025-v1
+      - name: Run offline calibration comparison
+        run: |
+          set -o pipefail
+          python scripts/backtest_3years.py | tee backtest_report.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: calibration-backtest
+          path: |
+            backtest_report.txt
+            backtest_results.csv
