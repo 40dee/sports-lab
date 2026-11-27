@@ -1,6 +1,6 @@
 """Free, chronological 2022-24 NBA season-start backtest; no PrizePicks or odds calls.
 
-Uses nba_api LeagueGameLog (2022-23, 2023-24, 2024-25). The proxy
+Uses public sportsdataverse GitHub Release player box-score CSVs (2022-23 through 2024-25). The proxy
 line is each player's previous 15 appearances, never the target game.
 V2 replay functions are imported from projection_v2; unavailable historical
 Vegas/pace/position context is intentionally neutral rather than fabricated.
@@ -11,7 +11,6 @@ import argparse
 import sys
 import hashlib
 import math
-import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -34,36 +33,80 @@ COLUMNS = ("PLAYER_ID", "GAME_ID", "GAME_DATE", "MIN", *STATS)
 CACHE = Path(".cache/nba_backtest")
 
 
-def load_season(season: str, refresh: bool = False) -> pd.DataFrame:
-    path = CACHE / f"player_gamelog_{season}.csv"
-    if path.exists() and not refresh:
-        frame = pd.read_csv(path, dtype={"GAME_ID": str, "PLAYER_ID": str})
-    else:
-        from nba_api.stats.endpoints import leaguegamelog
-        print(f"Downloading free NBA player logs: {season}", flush=True)
-        response = leaguegamelog.LeagueGameLog(
-            season=season, season_type_all_star="Regular Season",
-            player_or_team_abbreviation="P", timeout=90,
+# Public, static GitHub Release CSVs: 2023 = 2022-23, etc.
+# https://github.com/sportsdataverse/sportsdataverse-data/releases/tag/nba_stats_player_boxscores
+CSV_URL = ("https://github.com/sportsdataverse/sportsdataverse-data/releases/download/"
+           "nba_stats_player_boxscores/player_boxscores_{year}.csv")
+
+
+def normalize_box_scores(raw: pd.DataFrame, season: str) -> pd.DataFrame:
+    """Map common published box-score schemas; reject incomplete datasets."""
+    frame = raw.copy()
+    frame.columns = [str(c).strip().lower().replace(" ", "_").replace(".", "_")
+                     for c in frame.columns]
+    aliases = {
+        "PLAYER_ID": ("player_id", "athlete_id", "person_id", "playerid", "athleteid"),
+        "GAME_ID": ("game_id", "gameid", "event_id", "eventid"),
+        "GAME_DATE": ("game_date", "gamedate", "date", "game_datetime", "game_date_est"),
+        "MIN": ("min", "minutes", "minutes_played", "mins", "min_played"),
+        "PTS": ("pts", "points", "points_scored"),
+        "REB": ("reb", "rebounds", "total_rebounds"),
+        "AST": ("ast", "assists"),
+    }
+    selected = {}
+    for name, options in aliases.items():
+        match = next((col for col in options if col in frame.columns), None)
+        if match is None:
+            raise ValueError(
+                f"CSV for {season} missing required {name}; "
+                f"available columns: {sorted(frame.columns)}"
+            )
+        selected[name] = frame[match]
+    out = pd.DataFrame(selected)
+    out["SEASON"] = season
+    out["GAME_DATE"] = pd.to_datetime(out["GAME_DATE"], utc=True, errors="coerce")
+    # NBA box scores may encode minutes as MM:SS.
+    def minutes_number(value):
+        if isinstance(value, str) and ":" in value:
+            try:
+                mm, ss = value.split(":", 1)
+                return float(mm) + float(ss) / 60
+            except (ValueError, TypeError):
+                return float("nan")
+        return pd.to_numeric(value, errors="coerce")
+    out["MIN"] = out["MIN"].map(minutes_number)
+    for stat in STATS:
+        out[stat] = pd.to_numeric(out[stat], errors="coerce")
+    out["PLAYER_ID"] = out["PLAYER_ID"].astype(str)
+    out["GAME_ID"] = out["GAME_ID"].astype(str)
+    out = out.dropna(subset=["GAME_DATE", "MIN", *STATS])
+    out = out[out["MIN"].between(.01, 70)]
+    out = out.drop_duplicates(["PLAYER_ID", "GAME_ID"])
+    if len(out) < 10000:
+        raise RuntimeError(
+            f"{season} contains only {len(out)} valid player-game rows; "
+            "refusing to backtest season-level or incomplete data"
         )
-        frame = response.get_data_frames()[0]
-        if frame.empty:
-            raise RuntimeError(f"No player games returned for {season}")
+    return out
+
+
+def load_season(season: str, refresh: bool = False) -> pd.DataFrame:
+    path = CACHE / f"player_boxscores_{season}.csv"
+    if path.exists() and not refresh:
+        raw = pd.read_csv(path, low_memory=False)
+    else:
+        year = int(season[:4]) + 1
+        url = CSV_URL.format(year=year)
+        print(f"Downloading public GitHub player box-score CSV: {season}", flush=True)
+        try:
+            raw = pd.read_csv(url, low_memory=False)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to download {url}: {exc}") from exc
+        if raw.empty:
+            raise RuntimeError(f"Empty GitHub CSV for {season}")
         CACHE.mkdir(parents=True, exist_ok=True)
-        frame.to_csv(path, index=False)
-        time.sleep(2)
-    missing = set(COLUMNS) - set(frame.columns)
-    if missing:
-        raise RuntimeError(f"Missing columns for {season}: {sorted(missing)}")
-    frame = frame[list(COLUMNS)].copy()
-    frame["SEASON"] = season
-    frame["GAME_DATE"] = pd.to_datetime(frame["GAME_DATE"], utc=True, errors="coerce")
-    for col in ("MIN", *STATS):
-        frame[col] = pd.to_numeric(frame[col], errors="coerce")
-    frame["PLAYER_ID"] = frame["PLAYER_ID"].astype(str)
-    frame["GAME_ID"] = frame["GAME_ID"].astype(str)
-    frame = frame.dropna(subset=["GAME_DATE", "MIN", *STATS])
-    frame = frame[frame["MIN"].between(.01, 70)]
-    return frame.drop_duplicates(["PLAYER_ID", "GAME_ID"])
+        raw.to_csv(path, index=False)
+    return normalize_box_scores(raw, season)
 
 
 def run(frame: pd.DataFrame) -> pd.DataFrame:
