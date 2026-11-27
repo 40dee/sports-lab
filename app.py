@@ -4931,18 +4931,19 @@ def render_results_dashboard(wf, st):
                            'nba_sharp_market.csv', 'text/csv', key='results_sharp_csv')
 
     elif results_view == 'Pick Log':
-        if len(visible):
-            pages = max(1, math.ceil(len(visible)/25))
-            filters = (date, platform, outcome, scope)
-            if st.session_state.get('_results_filters') != filters or st.session_state.get('results_page', 1) > pages:
-                st.session_state.pop('results_page', None)
-                st.session_state['_results_filters'] = filters
-            page = st.selectbox('Results page', options=list(range(1, pages + 1)), format_func=lambda n: f'Page {n} of {pages}', key='results_page')
-            page_rows = visible.iloc[(page-1)*25:page*25].to_dict('records')
-            st.markdown(ui_html(result_table_html(page_rows)), unsafe_allow_html=True)
-            st.caption(f'{len(visible)} matching picks · 25 per page')
-        else:
-            st.info('No results match these filters.')
+        with st.expander('View pick results', expanded=False):
+            if len(visible):
+                pages = max(1, math.ceil(len(visible)/25))
+                filters = (date, platform, outcome, scope)
+                if st.session_state.get('_results_filters') != filters or st.session_state.get('results_page', 1) > pages:
+                    st.session_state.pop('results_page', None)
+                    st.session_state['_results_filters'] = filters
+                page = st.selectbox('Results page', options=list(range(1, pages + 1)), format_func=lambda n: f'Page {n} of {pages}', key='results_page')
+                page_rows = visible.iloc[(page-1)*25:page*25].to_dict('records')
+                st.markdown(ui_html(result_table_html(page_rows)), unsafe_allow_html=True)
+                st.caption(f'{len(visible)} matching picks · 25 per page')
+            else:
+                st.info('No results match these filters.')
         st.download_button('Download full audit CSV', frame.to_csv(index=False), 'nba_audit.csv', 'text/csv')
         with st.expander('Player breakdown · line vs projection vs actual'):
             if len(visible):
