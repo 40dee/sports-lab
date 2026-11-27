@@ -44,25 +44,36 @@ def normalize_box_scores(raw: pd.DataFrame, season: str) -> pd.DataFrame:
     frame = raw.copy()
     frame.columns = [str(c).strip().lower().replace(" ", "_").replace(".", "_")
                      for c in frame.columns]
-    aliases = {
-        "PLAYER_ID": ("player_id", "athlete_id", "person_id", "playerid", "athleteid"),
-        "GAME_ID": ("game_id", "gameid", "event_id", "eventid"),
-        "GAME_DATE": ("game_date", "gamedate", "date", "game_datetime", "game_date_est"),
-        "MIN": ("min", "minutes", "minutes_played", "mins", "min_played"),
-        "PTS": ("pts", "points", "points_scored"),
-        "REB": ("reb", "rebounds", "total_rebounds"),
-        "AST": ("ast", "assists"),
+    # Explicit source-to-model mapping; prefer canonical names when both exist.
+    rename = {
+        "game_date": "GAME_DATE", "game_id": "GAME_ID",
+        "person_id": "PLAYER_ID", "minutes": "MIN", "points": "PTS",
+        "rebounds_total": "REB", "assists": "AST", "season": "SEASON",
     }
-    selected = {}
-    for name, options in aliases.items():
-        match = next((col for col in options if col in frame.columns), None)
-        if match is None:
-            raise ValueError(
-                f"CSV for {season} missing required {name}; "
-                f"available columns: {sorted(frame.columns)}"
-            )
-        selected[name] = frame[match]
-    out = pd.DataFrame(selected)
+    aliases = {
+        "PLAYER_ID": ("player_id", "athlete_id", "playerid", "athleteid"),
+        "GAME_ID": ("gameid", "event_id", "eventid"),
+        "GAME_DATE": ("gamedate", "date", "game_datetime", "game_date_est",
+                      "game_date_time", "game_date_time_utc", "game_date_time_est"),
+        "MIN": ("min", "minutes_played", "mins", "min_played"),
+        "PTS": ("pts", "points_scored"),
+        "REB": ("reb", "rebounds", "total_rebounds"),
+        "AST": ("ast",),
+    }
+    for target, options in aliases.items():
+        if target not in rename.values() or not any(
+            source in frame.columns and dest == target for source, dest in rename.items()
+        ):
+            match = next((col for col in options if col in frame.columns), None)
+            if match is not None:
+                rename[match] = target
+    frame = frame.rename(columns=rename)
+    frame = frame.loc[:, ~frame.columns.duplicated()]
+    missing = set(COLUMNS) - set(frame.columns)
+    if missing:
+        raise ValueError(f"CSV for {season} missing required {sorted(missing)}; "
+                         f"available columns: {sorted(frame.columns)}")
+    out = frame[list(COLUMNS)].copy()
     out["SEASON"] = season
     out["GAME_DATE"] = pd.to_datetime(out["GAME_DATE"], utc=True, errors="coerce")
     # NBA box scores may encode minutes as MM:SS.
