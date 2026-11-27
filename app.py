@@ -4937,7 +4937,7 @@ def render_results_dashboard(wf, st):
             if st.session_state.get('_results_filters') != filters or st.session_state.get('results_page', 1) > pages:
                 st.session_state.pop('results_page', None)
                 st.session_state['_results_filters'] = filters
-            page = int(st.number_input('Results page', min_value=1, max_value=pages, value=1, step=1, key='results_page'))
+            page = st.selectbox('Results page', options=list(range(1, pages + 1)), format_func=lambda n: f'Page {n} of {pages}', key='results_page')
             page_rows = visible.iloc[(page-1)*25:page*25].to_dict('records')
             st.markdown(ui_html(result_table_html(page_rows)), unsafe_allow_html=True)
             st.caption(f'{len(visible)} matching picks · 25 per page')
