@@ -78,7 +78,7 @@ jobs:
           assert result['p_less'] == .60 and result['p_more'] == .40
           assert result['raw_p_less'] > .65
           pts = {'Stat': 'PTS', 'Expected minutes': 30, 'Per minute': .8, 'Projection': 24.0}
-          corrected = enrich(self, {'components': [pts], 'projection': 24.0}, history, card, {'id': 'mock-player'}, 'mock-event', {}, {'entries': []})
+          corrected = enrich(self, {'components': [pts], 'projection': 24.0}, history, card, {'id': 'mock-player'}, 'mock-event', {}, {'available': True, 'entries': []})
           assert math.isclose(corrected['projection'], 22.8)
           print('PTS calibration:', corrected['projection'])
           print('--- MATH TEST COMPLETE ---')
