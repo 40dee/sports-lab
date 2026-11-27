@@ -92,7 +92,7 @@ def decode(event, fetched, current):
             market_key=market.get('key') or ''
             stat=MARKETS.get(market_key.removesuffix('_alternate'))
             observed=stamp(market.get('last_update'))
-            if not stat or not observed or not 0<=(current-observed).total_seconds()<=1800:continue
+            if not stat or not observed or not -1<=(current-observed).total_seconds()<=1800:continue
             for outcome in market.get('outcomes') or []:
                 if not isinstance(outcome,dict):continue
                 side={'Over':'MORE','Under':'LESS'}.get(outcome.get('name'))
