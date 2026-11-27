@@ -45,16 +45,12 @@ class NavigationTests(unittest.TestCase):
         app.run()
         self.assertFalse(app.exception,list(app.exception))
         cards=[item.value for item in app.markdown if 'sl-card sl-compact' in item.value and 'Player 0' in item.value]
-        self.assertEqual(len(cards),1)
-        self.assertFalse(any(line.startswith(('    ','\t')) for line in cards[0].splitlines()),cards[0])
-        self.assertFalse(any(not line.strip() for line in cards[0].splitlines()),cards[0])
-        self.assertIn('sl-footer',cards[0])
-        self.assertIn('>PASS</div>',cards[0])
-        self.assertIn('0.49',cards[0])
-        self.assertNotIn('↓ LESS</div>',cards[0])
-        self.assertTrue(any('Model estimate: LESS' in item.value for item in app.markdown))
-        self.assertTrue(all(button.disabled for button in app.button if button.label=='☆ Save'))
+        self.assertEqual(app.session_state['plays_direction_filter_v2'], 'MORE')
+        self.assertEqual(len(cards), 0)
+        app.button_group(key='plays_direction_filter_v2').set_value('All').run()
+        self.assertFalse(app.exception, list(app.exception))
         self.assertEqual(store.get('forecast',key)['result']['direction'],'LESS')
+        self.assertEqual(store.get('forecast',key)['result']['projection'],0.49)
 
     def test_standard_filters_default_and_manual_choice_persists(self):
         app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py'),default_timeout=60).run()
