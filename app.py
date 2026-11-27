@@ -11266,10 +11266,11 @@ def render_news_ticker():
     with st.expander("Live Injury News", expanded=False):
         try:
             # Bypass session read cache for this single isolated record.
-            if not isinstance(workflow_store, TursoStore):
+            news_store = workflow_store._store if isinstance(workflow_store, CompactViewStore) else workflow_store
+            if not isinstance(news_store, TursoStore):
                 st.caption("News storage unavailable.")
                 return
-            rows = workflow_store.query(
+            rows = news_store.query(
                 "SELECT payload FROM sports_records WHERE namespace=? AND key=?",
                 ("injury_news", "latest"), fetch=True)
             snapshot = json.loads(rows[0][0]) if rows else {}
@@ -11278,7 +11279,7 @@ def render_news_ticker():
                 st.caption("No news synced yet.")
                 return
             st.caption("Last sync: " + str(snapshot.get("synced_at", "Unknown")) +
-                       " · Public feed posts, not verified injury reports. Manual sync for now.")
+                       " · Public feed posts, not verified injury reports. Scheduled sync every 30 minutes (may be delayed).")
             items = []
             for post in posts[:10]:
                 link = str(post.get("link", ""))
