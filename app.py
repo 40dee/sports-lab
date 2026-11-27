@@ -10463,6 +10463,52 @@ def daily_cached_board_run(wf, budget_seconds=None, capture_due=True):
         close_capture(store,day,now())
 
 
+if '--recover-cached-nba-games' in sys.argv:
+    from odds_fallback import decode, market_coverage, finalize_coverage
+    if not _database_online:raise SystemExit('Permanent storage unavailable.')
+    store=workflow_store
+    day=slate_day()
+    if day!='2026-11-27':raise SystemExit('Recovery is restricted to the original slate.')
+    prefix='3ee64729f386:17b41203f19177a5fbaf:'
+    ids=('13d9ca3bcb664829c603755d31401002','5b64071f3e3bf67b0fdea8d1ac81d0ec')
+    snapshot_key='the_odds_api_daily_v2:'+prefix+day
+    saved=store.get('source',snapshot_key) or {}
+    board=store.get('board','board') or {}
+    previous=board.get('v4_rows') or []
+    if not previous or not saved.get('captured'):raise SystemExit('Existing board or snapshot missing.')
+    report=saved['report']
+    recovered=[]
+    for event_id in ids:
+        cache=store.get('source','the_odds_api_game_v2:'+prefix+event_id) or {}
+        event=cache.get('event') or {}
+        if event.get('id')!=event_id:raise SystemExit('Cached event identity mismatch.')
+        if not today_pregame(event.get('commence_time')):raise SystemExit('Game no longer pregame.')
+        cards=decode(event,cache['fetched_at'],utc_timestamp(cache['fetched_at']).to_pydatetime())
+        counts,states=market_coverage(event,cards,report['requested_markets'])
+        if not cards or any(v!='available' for v in states.values()):raise SystemExit('Cached markets still invalid: '+str(states))
+        for game in report['game_coverage']:
+            if game['event_id']==event_id:game.update(market_counts=counts,market_status=states)
+        recovered.extend(cards)
+    def append_unique(old,new):
+        seen={market_signature(c) for c in old}
+        result=list(old)
+        for card in new:
+            sig=market_signature(card)
+            if sig not in seen:result.append(card);seen.add(sig)
+        return result
+    merged=append_unique(previous,recovered)
+    snapshot_rows=append_unique(saved.get('rows') or [],recovered)
+    finalize_coverage(report)
+    report['lines']=len(snapshot_rows)
+    store.put('board','board',dict(board,v4_rows=merged))
+    store.put('source',snapshot_key,dict(saved,rows=snapshot_rows,report=report,complete=report['complete']))
+    store.put('source','the_odds_api_fallback_latest',report)
+    board_download_progress(store,provider='The Odds API',state='saved snapshot',games_total=report['games_available'],games_done=len(report['game_coverage']),games_with_lines=sum(any(g['market_counts'].values()) for g in report['game_coverage']),lines=len(snapshot_rows),missing_markets=[])
+    print('RECOVERY',len(previous),len(merged),len(recovered),flush=True)
+    print(encode(prepare_saved_board(workflow,{'v4_rows':recovered},budget_seconds=None,max_picks=None)))
+    raise SystemExit(0)
+
+
 if '--rebuild-compact-fantasy' in sys.argv:
     if not _database_online:raise SystemExit('Permanent storage unavailable; no rebuild made.')
     print(encode(rebuild_compact_fantasy(workflow)))
