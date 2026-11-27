@@ -2185,6 +2185,17 @@ class Workflow:
             baseline + alpha * (adjusted - baseline),
         )
 
+        # Experimental calibration: shrink only the final learned PTS contribution.
+        points_contribution = sum(
+            (float(c["Expected minutes"]) * float(c["Per minute"])
+             + alpha * (float(c["Projection"]) - float(c["Expected minutes"]) * float(c["Per minute"])))
+            * weights.get("PTS", 1.0)
+            for c in components if c["Stat"] == "PTS"
+        )
+        forecast = max(0.0, forecast - 0.05 * points_contribution)
+        result["calibration_version"] = "pts-095-confidence-060-v1"
+        result["points_calibration_factor"] = 0.95 if any(c["Stat"] == "PTS" for c in components) else 1.0
+
         line = float(card["Line"])
 
         result.update(
@@ -2358,6 +2369,13 @@ class Workflow:
             and all(math.isfinite(float(p)) and 0 <= float(p) <= 1
                     for p in (p_more, p_less))
         )
+        if valid_probs:
+            result["raw_p_more"], result["raw_p_less"] = p_more, p_less
+            if p_more > 0.65:
+                p_more, p_less = 0.60, 0.40
+            elif p_less > 0.65:
+                p_more, p_less = 0.40, 0.60
+            result["p_more"], result["p_less"] = p_more, p_less
         tau = 0.02
         if result["tie"] or not valid_probs:
             direction = "PASS"
@@ -11346,7 +11364,8 @@ def ui_board(page):
             ['All', 'Gold Zone (50-65%)', 'High Confidence (65%+)'],
             default='All', key='plays_confidence_filter', width='stretch') or 'All'
         st.caption('Confidence filters use saved model estimates, not guaranteed hit rates or sportsbook probabilities.')
-        direction_filter = st.segmented_control('Direction', ['All', 'MORE', 'LESS'], default='All', key='plays_direction_filter', width='stretch') or 'All'
+    if page == 'Plays':
+        direction_filter = st.segmented_control('Direction', ['All', 'MORE', 'LESS'], default='MORE', key='plays_direction_filter_v2', width='stretch') or 'MORE'
     with st.expander('Filters & Search'):
         platform_options=['All', 'PrizePicks', 'Kalshi']+(['DraftKings'] if page=='Saved' else [])
         if st.session_state.get('mobile_platform_buttons') not in platform_options:st.session_state.pop('mobile_platform_buttons',None)
