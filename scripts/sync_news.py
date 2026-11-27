@@ -2,7 +2,7 @@
 import calendar
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from urllib.parse import urlparse
 import feedparser
@@ -42,6 +42,13 @@ def query(sql, values, fetch=False):
         raise RuntimeError("Turso statement rejected")
     return item["response"]["result"].get("rows", [])
 
+def is_fresh(value, now):
+    try:
+        published = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return published.tzinfo is not None and timedelta(0) <= now - published <= timedelta(hours=24)
+    except (ValueError, TypeError):
+        return False
+
 def main():
     posts = {}
     successful = 0
@@ -58,24 +65,27 @@ def main():
             for entry in feed.entries:
                 link = str(entry.get("link", ""))
                 parsed = urlparse(link)
-                date = entry.get("published_parsed") or entry.get("updated_parsed")
+                date = entry.get("published_parsed")
                 text = plain(entry.get("summary") or entry.get("title"))
                 if parsed.scheme != "https" or parsed.hostname != "bsky.app" or not date or not text:
                     continue
                 timestamp = datetime.fromtimestamp(calendar.timegm(date), timezone.utc).isoformat()
+                if not is_fresh(timestamp, datetime.now(timezone.utc)):
+                    continue
                 posts[link] = {"text": text, "link": link, "timestamp": timestamp}
             print("Feed read:", url, len(feed.entries))
         except Exception as exc:
             print("Feed unavailable:", url, type(exc).__name__)
-    if not successful or not posts:
-        raise SystemExit("No usable fresh feed posts; previous snapshot preserved.")
+    if not successful:
+        raise SystemExit("All feeds unavailable; previous snapshot preserved (parser rejects expired posts).")
     rows = query("SELECT payload FROM sports_records WHERE namespace=? AND key=?", ["injury_news", "latest"], True)
     if rows:
         previous = json.loads(rows[0][0]["value"])
         for post in previous.get("posts", []):
             posts.setdefault(post["link"], post)
-    latest = sorted(posts.values(), key=lambda p: p["timestamp"], reverse=True)[:10]
-    stamp = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
+    latest = sorted((p for p in posts.values() if is_fresh(p.get("timestamp"), now)), key=lambda p: p["timestamp"], reverse=True)[:10]
+    stamp = now.isoformat()
     payload = json.dumps({"posts": latest, "synced_at": stamp, "feeds_ok": successful, "feeds_total": len(FEEDS)})
     query("INSERT INTO sports_records (namespace,key,payload,updated) VALUES (?,?,?,?) ON CONFLICT(namespace,key) DO UPDATE SET payload=excluded.payload,updated=excluded.updated",
           ["injury_news", "latest", payload, stamp])
