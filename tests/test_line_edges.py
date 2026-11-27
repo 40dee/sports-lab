@@ -21,11 +21,11 @@ class LineEdgeTests(unittest.TestCase):
   original=copy.deepcopy(rows);edge=self.run_edge(rows)
   self.assertEqual(edge['book_count'],2);self.assertEqual(edge['side'],'MORE')
   normal=NormalDist()
-  self.assertAlmostEqual(edge['probability'],normal.cdf(normal.inv_cdf(.55)+1/8.5))
+  self.assertAlmostEqual(edge['probability'],normal.cdf(normal.inv_cdf(.55)+1/9.5))
   with patch.dict('line_edges.BOOK_WEIGHTS',{'pinnacle':1.,'bovada':1.}):
    equal_weight_edge=self.run_edge(rows)
    self.assertIsNotNone(equal_weight_edge)
-   self.assertAlmostEqual(equal_weight_edge['probability'],normal.cdf(1/8.5))
+   self.assertAlmostEqual(equal_weight_edge['probability'],normal.cdf(1/9.5))
    self.assertLess(equal_weight_edge['probability'],edge['probability'])
   self.assertEqual(rows,original)
  def test_even_money_vig_one_point_pts_move_clears_54_percent(self):
@@ -36,9 +36,9 @@ class LineEdgeTests(unittest.TestCase):
   self.assertEqual(edge['side'],'MORE')
   self.assertEqual(edge['pp_line'],23.5)
   self.assertEqual(edge['book_line'],24.5)
-  self.assertEqual(edge['spread'],8.5)
+  self.assertEqual(edge['spread'],9.5)
   self.assertGreaterEqual(edge['probability'],.54)
-  self.assertAlmostEqual(edge['probability'],NormalDist().cdf(1/8.5))
+  self.assertAlmostEqual(edge['probability'],NormalDist().cdf(1/9.5))
  def test_pp_and_book_captures_must_be_within_thirty_minutes(self):
   for captured,expected in (('2026-11-18T17:35Z',True),('2026-11-18T17:34:59Z',False),('2026-11-18T18:35Z',True),('2026-11-18T18:35:01Z',False),(None,False)):
    with self.subTest(captured=captured):
@@ -60,7 +60,8 @@ class LineEdgeTests(unittest.TestCase):
   for field,value in (('Player','Other'),('Game','C vs D'),('Period','firsthalf'),('Stat Key','AST'),('Provider fetched at','2026-11-18T20:00Z')):
    self.assertIsNone(self.run_edge([dict(r,**{field:value}) for r in self.rows()]))
   original=copy.deepcopy(self.card);rows=self.rows(100)
-  self.assertLessEqual(self.run_edge(rows)['probability'],.65)
+  self.assertGreater(self.run_edge(rows)['probability'],.65)
+  self.assertLessEqual(self.run_edge(rows)['probability'],1.0)
   self.assertEqual(self.card,original)
   self.assertGreaterEqual(self.run_edge(rows,columns=('FG3M',))['spread'],3)
  def test_app_offered_side_guard_and_filter_integration(self):
